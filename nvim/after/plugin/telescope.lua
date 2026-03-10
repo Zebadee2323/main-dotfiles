@@ -39,16 +39,46 @@ function qfToLiveGrep()
     builtin.live_grep({ layout_strategy = 'vertical', layout_config = { width = 0.95 }, search_dirs = files })
 end
 
+local unity_library_ignored_dirs = {
+    "Library/Artifacts/",
+    "Library/Bee/",
+    "Library/BurstCache/",
+    "Library/PackageCache/",
+    "Library/ScriptAssemblies/",
+    "Library/ShaderCache/",
+}
+
+local file_ignore_patterns = {
+    "%.meta$",
+    "^%.git/"
+}
+
+for _, dir in ipairs(unity_library_ignored_dirs) do
+    table.insert(file_ignore_patterns, dir)
+end
+
 vim.keymap.set('n', '<C-p><C-p>', function()
     builtin.find_files(
         { 
             layout_strategy = 'vertical', 
             layout_config = { width = 0.95 },
-            file_ignore_patterns = { "%.meta$" }
+            hidden = true,
+            file_ignore_patterns = file_ignore_patterns
         })
 end)
 vim.keymap.set('n', '<C-p><C-f>', function()
-    builtin.live_grep({ layout_strategy = 'vertical', layout_config = { width = 0.95 } })
+    builtin.live_grep({
+        layout_strategy = 'vertical',
+        layout_config = { width = 0.95 },
+        additional_args = function()
+            local args = { "--hidden", "--glob", "!.git/*" }
+            for _, dir in ipairs(unity_library_ignored_dirs) do
+                table.insert(args, "--glob")
+                table.insert(args, "!" .. dir .. "*")
+            end
+            return args
+        end,
+    })
 end)
 vim.keymap.set('n', '<C-p><C-s>', function()
     builtin.lsp_dynamic_workspace_symbols({ layout_strategy = 'vertical', layout_config = { width = 0.95 }, symbol_width = 60 })
