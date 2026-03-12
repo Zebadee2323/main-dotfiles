@@ -11,6 +11,7 @@ local summary_prompt = table.concat({
   "Summarize the following assistant response to be passed to a Text-To-Speech model.",
   "The summary should always be from the point of view of the assistant and sound casual.",
   "Try to keep it quite short, only 3-4 sentences max.",
+  "Avoid including long file paths, commands or code.",
   "Original response:",
 }, " ")
 
@@ -276,7 +277,7 @@ local function get_summary_model_name()
     return vim.g.ai_voice_summary_model
   end
 
-  return "opencode/minimax-m2.5-free"
+  return "openai/gpt-5.1-codex-mini"
 end
 
 local function build_summary_chat_params(chat)
