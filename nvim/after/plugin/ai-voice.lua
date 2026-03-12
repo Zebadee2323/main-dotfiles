@@ -7,23 +7,33 @@ local piper_noise_w = 0.2
 local piper_sentence_silence = 0.5
 local ai_voice_robot_mode = true
 local robot_voice_filter = table.concat({
-  "asplit=3[dry][d1][d2]",
+  -- split into 4 parallel signals: dry, body, ai, extra_chorus
+  "asplit=4[dry][d1][d2][d3]",
 
-  "[d1]adelay=20|20,volume=0.75[body]",
+  -- body layer (micro delay adds fullness)
+  "[d1]adelay=22|22,volume=0.78[body]",
 
-  "[d2]chorus=0.7:0.9:45|60|75:0.32|0.28|0.22:0.35|0.40|0.45:2.2|2.6|3,"
-  .. "tremolo=7:0.07,"
-  .. "adelay=12|12,"
-  .. "volume=0.7[ai]",
+  -- AI synthetic layer (stronger chorus + small delay + light tremolo)
+  "[d2]chorus=0.78:0.98:50|68|82:0.38|0.32|0.26:0.38|0.44|0.50:2.5|2.8|3.3,"
+    .. "tremolo=6:0.05,adelay=12|12,volume=0.68[ai]",
 
-  "[dry][body][ai]amix=3:weights=1 0.8 0.65[mix]",
+  -- extra chorus/widening branch (creates lushness without pitch artifacts)
+  "[d3]chorus=0.65:0.9:32|48:0.30|0.24:0.30|0.36:1.8|2.1,volume=0.62[wide]",
 
-  "[mix]highpass=f=90",
-  "equalizer=f=180:t=q:w=1.2:g=3",
-  "equalizer=f=3200:t=q:w=1:g=3",
+  -- mix layers (positional amix)
+  "[dry][body][ai][wide]amix=4:weights=1 0.82 0.66 0.6[mix]",
 
-  "acompressor=threshold=-22dB:ratio=2.5:attack=15:release=120",
+  -- tone shaping after mix
+  "[mix]highpass=f=80",
+  "equalizer=f=140:t=q:w=1.2:g=3.2",    -- low-mid warmth
+  "equalizer=f=3200:t=q:w=1:g=2.8",    -- presence
+  "equalizer=f=6000:t=q:w=1:g=1.0",    -- sheen
 
+  -- glue compression and mild de-harsh
+  "acompressor=threshold=-20dB:ratio=2.4:attack=12:release=110",
+  "equalizer=f=4500:t=q:w=2:g=-1.0",
+
+  -- final level and safety
   "volume=6dB",
   "alimiter=limit=0.92",
 }, ",")
@@ -597,6 +607,11 @@ local function toggle_ai_voice_codecompanion()
   set_ai_voice_codecompanion_enabled(not ai_voice_codecompanion_enabled)
 end
 
+local function create_or_replace_user_command(name, fn, opts)
+  pcall(vim.api.nvim_del_user_command, name)
+  vim.api.nvim_create_user_command(name, fn, opts)
+end
+
 local function attach_ai_voice_to_chat(bufnr, chat)
   if not chat or chat.hidden then
     return
@@ -609,7 +624,14 @@ local function attach_ai_voice_to_chat(bufnr, chat)
 
   pcall(vim.api.nvim_buf_set_var, bufnr, "ai_voice_hook_generation", ai_voice_hook_generation)
 
+  chat._ai_voice_hook_generation = ai_voice_hook_generation
+  local callback_generation = ai_voice_hook_generation
+
   chat:add_callback("on_completed", function(current_chat)
+    if current_chat._ai_voice_hook_generation ~= callback_generation then
+      return
+    end
+
     if not ai_voice_codecompanion_enabled then
       return
     end
@@ -656,7 +678,7 @@ end
 
 attach_codecompanion_voice_hook()
 
-vim.api.nvim_create_user_command("AIVoiceInstall", function()
+create_or_replace_user_command("AIVoiceInstall", function()
   vim.fn.mkdir(voices_dir, "p")
 
   local output = {}
@@ -696,26 +718,26 @@ end, {
   desc = "Install the configured piper voice",
 })
 
-vim.api.nvim_create_user_command("AIVoice", function(opts)
+create_or_replace_user_command("AIVoice", function(opts)
   ai_voice_speak(opts.args)
 end, {
   nargs = "+",
   desc = "Speak a message with piper",
 })
 
-vim.api.nvim_create_user_command("AIVoiceTest", function()
+create_or_replace_user_command("AIVoiceTest", function()
   ai_voice_speak(ai_voice_test_paragraph)
 end, {
   desc = "Speak the built-in AI voice test paragraph",
 })
 
-vim.api.nvim_create_user_command("AIVoiceStop", function()
+create_or_replace_user_command("AIVoiceStop", function()
   ai_voice_stop()
 end, {
   desc = "Stop current piper audio playback",
 })
 
-vim.api.nvim_create_user_command("AIVoiceRange", function(opts)
+create_or_replace_user_command("AIVoiceRange", function(opts)
   local lines = vim.api.nvim_buf_get_lines(0, opts.line1 - 1, opts.line2, false)
   local message = vim.trim(table.concat(lines, "\n"))
 
@@ -730,43 +752,43 @@ end, {
   desc = "Speak the selected line range with piper",
 })
 
-vim.api.nvim_create_user_command("AIVoiceSummary", function()
+create_or_replace_user_command("AIVoiceSummary", function()
   summarize_last_codecompanion_response()
 end, {
   desc = "Summarize the latest CodeCompanion reply and speak it",
 })
 
-vim.api.nvim_create_user_command("AIToggleVoice", function()
+create_or_replace_user_command("AIToggleVoice", function()
   toggle_ai_voice_codecompanion()
 end, {
   desc = "Toggle AI voice for CodeCompanion responses",
 })
 
-vim.api.nvim_create_user_command("AIEnableVoice", function()
+create_or_replace_user_command("AIEnableVoice", function()
   set_ai_voice_codecompanion_enabled(true)
 end, {
   desc = "Enable AI voice for CodeCompanion responses",
 })
 
-vim.api.nvim_create_user_command("AIDisableVoice", function()
+create_or_replace_user_command("AIDisableVoice", function()
   set_ai_voice_codecompanion_enabled(false)
 end, {
   desc = "Disable AI voice for CodeCompanion responses",
 })
 
-vim.api.nvim_create_user_command("AIToggleVoiceRobot", function()
+create_or_replace_user_command("AIToggleVoiceRobot", function()
   toggle_ai_voice_robot_mode()
 end, {
   desc = "Toggle robot mode for AI voice playback",
 })
 
-vim.api.nvim_create_user_command("AIEnableVoiceRobot", function()
+create_or_replace_user_command("AIEnableVoiceRobot", function()
   set_ai_voice_robot_mode(true)
 end, {
   desc = "Enable robot mode for AI voice playback",
 })
 
-vim.api.nvim_create_user_command("AIDisableVoiceRobot", function()
+create_or_replace_user_command("AIDisableVoiceRobot", function()
   set_ai_voice_robot_mode(false)
 end, {
   desc = "Disable robot mode for AI voice playback",

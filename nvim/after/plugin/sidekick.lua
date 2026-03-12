@@ -1,9 +1,7 @@
 require("sidekick").setup({
-    providers = {
-        nes = {
-            enabled = false,
-        },
-    }
+  nes = {
+    enabled = false,
+  },
 })
 
 vim.keymap.set('n', '<c-p><c-g>', ':Sidekick cli toggle<CR>')
@@ -66,12 +64,6 @@ local function maybe_restore_visual(opts)
     end)
   end
 end
-
-vim.api.nvim_create_user_command("AI", function(opts)
-  pcall(require("sidekick.cli").toggle, { })
-end, {
-  desc = "Show Sidekick CLI",
-})
 
 -- Send metadata: file + line or line range (line info after a space)
 vim.api.nvim_create_user_command("AISend", function(opts)
