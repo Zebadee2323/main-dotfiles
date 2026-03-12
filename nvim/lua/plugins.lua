@@ -32,6 +32,7 @@ return require('packer').startup(function(use)
     -- AI
     use 'github/copilot.vim'
     use 'folke/sidekick.nvim'
+    use 'olimorris/codecompanion.nvim'
 
     -- Color Themes
     use 'morhetz/gruvbox'
