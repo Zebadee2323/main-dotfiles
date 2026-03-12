@@ -62,14 +62,6 @@ local function get_repo_relative_path()
   return bufname
 end
 
-local function maybe_restore_visual(opts)
-  if opts.range and opts.line1 and opts.line2 and opts.line2 >= opts.line1 then
-    vim.schedule(function()
-      pcall(vim.cmd, "normal! gv")
-    end)
-  end
-end
-
 local function build_default_ai_chat_opts(opts)
   local chat_helpers = require("codecompanion.interactions.chat.helpers")
   local params = {
@@ -172,47 +164,38 @@ local function send_message_to_chat(chat, msg)
     return
   end
 
-  local source_win = vim.api.nvim_get_current_win()
-
   if not chat.ui:is_visible() then
-    chat.ui:open({ toggled = true })
+    chat.ui:open()
+  elseif chat.ui.winnr and vim.api.nvim_win_is_valid(chat.ui.winnr) then
+    vim.api.nvim_set_current_win(chat.ui.winnr)
   end
 
-  if vim.api.nvim_win_is_valid(source_win) and vim.api.nvim_get_current_win() ~= source_win then
-    vim.api.nvim_set_current_win(source_win)
+  local message_lines = vim.split(msg, "\n", { plain = true, trimempty = false })
+  local line_count = vim.api.nvim_buf_line_count(chat.bufnr)
+  local last_line = vim.api.nvim_buf_get_lines(chat.bufnr, line_count - 1, line_count, false)[1] or ""
+
+  if last_line == "" then
+    vim.api.nvim_buf_set_lines(chat.bufnr, line_count - 1, line_count, false, message_lines)
+  else
+    vim.api.nvim_buf_set_lines(chat.bufnr, line_count, line_count, false, vim.list_extend({ "" }, message_lines))
   end
 
-  local start_line = chat.header_line - 1
-  local existing_lines = vim.api.nvim_buf_get_lines(chat.bufnr, start_line, -1, false)
-  local message_lines = vim.split(msg, "\n", { plain = true })
-
-  if #existing_lines == 1 and existing_lines[1] == "" then
-    existing_lines = {}
+  if chat.ui:is_visible() then
+    chat.ui:follow()
   end
-
-  if #existing_lines > 0 then
-    table.insert(existing_lines, "")
-  end
-
-  vim.list_extend(existing_lines, message_lines)
-  vim.api.nvim_buf_set_lines(chat.bufnr, start_line, -1, false, existing_lines)
 end
 
 local function send_to_codecompanion(opts)
   local msg = build_ai_send_message(opts)
-  vim.schedule(function()
-    local chat = get_target_ai_chat()
+  local chat = get_target_ai_chat()
 
-    if not chat then
-      chat = open_default_ai_chat()
-    end
+  if not chat then
+    chat = open_default_ai_chat()
+  end
 
-    if chat then
-      send_message_to_chat(chat, msg)
-    end
-  end)
-
-  maybe_restore_visual(opts)
+  if chat then
+    send_message_to_chat(chat, msg)
+  end
 end
 
 codecompanion.setup({
