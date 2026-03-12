@@ -66,10 +66,11 @@ local summary_prompt = table.concat({
 local acknowledgement_prompt = table.concat({
   "Read the following user request, extract the intent, and write a short spoken acknowledgement for a Text-To-Speech model.",
   "The acknowledgement should be from the point of view of the assistant and sound casual.",
+  "If a previous assistant response is provided, use it as context so the acknowledgement feels relevant to the ongoing conversation.",
   "Briefly reflect the user's intent and confirm you understand what they want.",
   "Keep it short, at most 2 sentences.",
   "You are speaking to a developer called Ollie, you can sometimes address them directly.",
-  "Original user request:",
+  "Conversation context:",
 }, " ")
 local ai_voice_test_paragraph = (function()
   local text = [[
@@ -510,6 +511,18 @@ local function get_latest_user_request(chat)
   end
 end
 
+local function build_acknowledgement_input(request, previous_response)
+  local parts = {}
+
+  if previous_response and previous_response ~= "" then
+    table.insert(parts, "Previous assistant response:\n" .. previous_response)
+  end
+
+  table.insert(parts, "Latest user request:\n" .. request)
+
+  return acknowledgement_prompt .. "\n\n" .. table.concat(parts, "\n\n")
+end
+
 local function get_target_chat()
   local ok, codecompanion = pcall(require, "codecompanion")
 
@@ -718,6 +731,7 @@ local function acknowledge_and_speak_request(chat, request, request_id)
   local chat_helpers = require("codecompanion.interactions.chat.helpers")
   local summary_params = build_summary_chat_params(chat)
   local summary_model_name = get_summary_model_name() or get_chat_model(chat)
+  local previous_response = get_latest_assistant_response(chat)
 
   local acknowledgement_chat = codecompanion.chat({
     auto_submit = false,
@@ -728,7 +742,7 @@ local function acknowledge_and_speak_request(chat, request, request_id)
     messages = {
       {
         role = "user",
-        content = acknowledgement_prompt .. "\n\n" .. request,
+        content = build_acknowledgement_input(request, previous_response),
       },
     },
     callbacks = {
