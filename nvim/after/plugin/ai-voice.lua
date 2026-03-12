@@ -54,8 +54,18 @@ local summary_prompt = table.concat({
   "Try to keep it quite short, only 3-4 sentences max.",
   "Replace any markdown like syntax with plain english full stops, commas, etc. as appropriate. To better control TTS pacing",
   "Avoid including long file paths, commands or code.",
-  "The person the TTS will be speaking to is called Ollie, you can sometimes address them directly.",
+  "The person you will be speaking to is called Ollie, you can sometimes address them directly.",
   "Original response:",
+}, " ")
+local acknowledgement_prompt = table.concat({
+  "Read the following user request, extract the intent, and write a short spoken acknowledgement for a Text-To-Speech model.",
+  "The acknowledgement should be from the point of view of the assistant and sound casual, warm, and confident.",
+  "Briefly reflect the user's intent and confirm you understand what they want.",
+  "Keep it short, at most 2 sentences.",
+  "Replace any markdown-like syntax with plain English punctuation as appropriate for TTS pacing.",
+  "Avoid including long file paths, commands or code.",
+  "The person you will be speaking to is called Ollie, you can sometimes address them directly.",
+  "Original user request:",
 }, " ")
 local ai_voice_test_paragraph = (function()
   local text = [[
@@ -374,6 +384,45 @@ local function get_latest_assistant_response(chat)
   end
 end
 
+local function get_latest_user_request(chat)
+  local codecompanion_config = require("codecompanion.config")
+  local user_role = codecompanion_config.constants.USER_ROLE
+
+  for i = #chat.messages, 1, -1 do
+    local message = chat.messages[i]
+
+    if message.role == user_role then
+      local content = message.content
+
+      if type(content) == "table" then
+        content = table.concat(vim.tbl_map(function(part)
+          if type(part) == "string" then
+            return part
+          end
+
+          if type(part) == "table" and type(part.text) == "string" then
+            return part.text
+          end
+
+          return ""
+        end, content), "\n")
+      end
+
+      if type(content) == "string" then
+        content = vim.trim(content)
+
+        if content ~= "" then
+          local cleaned = strip_markdown(content)
+
+          if cleaned ~= "" then
+            return cleaned
+          end
+        end
+      end
+    end
+  end
+end
+
 local function get_target_chat()
   local ok, codecompanion = pcall(require, "codecompanion")
 
@@ -577,6 +626,85 @@ local function summarize_and_speak_response(chat, response)
   current_summary_chat = summary_chat
 end
 
+local function acknowledge_and_speak_request(chat, request)
+  local codecompanion = require("codecompanion")
+  local chat_helpers = require("codecompanion.interactions.chat.helpers")
+  local request_id = prepare_speech_request({ cancel_summary = true })
+  local summary_params = build_summary_chat_params(chat)
+  local summary_model_name = get_summary_model_name() or get_chat_model(chat)
+
+  local summary_chat = codecompanion.chat({
+    auto_submit = false,
+    hidden = true,
+    mcp_servers = "none",
+    tools = "none",
+    params = summary_params,
+    messages = {
+      {
+        role = "user",
+        content = acknowledgement_prompt .. "\n\n" .. request,
+      },
+    },
+    callbacks = {
+      on_created = function(summary_result_chat)
+        if summary_result_chat.adapter.type == "acp" then
+          if summary_model_name then
+            summary_result_chat.adapter.defaults = summary_result_chat.adapter.defaults or {}
+            summary_result_chat.adapter.defaults.model = summary_model_name
+          end
+
+          chat_helpers.create_acp_connection(summary_result_chat)
+
+          if summary_model_name and summary_result_chat.acp_connection then
+            summary_result_chat:change_model({ model = summary_model_name })
+          end
+        end
+
+        summary_result_chat:submit()
+      end,
+      on_completed = function(summary_result_chat)
+        if current_summary_chat == summary_result_chat then
+          current_summary_chat = nil
+        end
+
+        if speech_request_id ~= request_id then
+          close_chat(summary_result_chat)
+          return
+        end
+
+        local summary = get_latest_assistant_response(summary_result_chat)
+
+        if summary and summary ~= "" then
+          vim.schedule(function()
+            ai_voice_speak(summary, { keep_summary = true })
+          end)
+        else
+          vim.notify("AI voice acknowledgement returned no assistant response; speaking the latest request instead", vim.log.levels.WARN)
+          vim.schedule(function()
+            ai_voice_speak(request, { keep_summary = true })
+          end)
+        end
+
+        close_chat(summary_result_chat)
+      end,
+      on_cancelled = function(summary_result_chat)
+        if current_summary_chat == summary_result_chat then
+          current_summary_chat = nil
+        end
+
+        close_chat(summary_result_chat)
+      end,
+    },
+  })
+
+  if not summary_chat then
+    vim.notify("AI voice acknowledgement failed: could not create hidden chat", vim.log.levels.ERROR)
+    return
+  end
+
+  current_summary_chat = summary_chat
+end
+
 local function summarize_last_codecompanion_response()
   local chat, err = get_target_chat()
 
@@ -640,6 +768,22 @@ local function attach_ai_voice_to_chat(bufnr, chat)
 
     if response then
       summarize_and_speak_response(current_chat, response)
+    end
+  end)
+
+  chat:add_callback("on_submitted", function(current_chat)
+    if current_chat._ai_voice_hook_generation ~= callback_generation then
+      return
+    end
+
+    if not ai_voice_codecompanion_enabled then
+      return
+    end
+
+    local request = get_latest_user_request(current_chat)
+
+    if request then
+      acknowledge_and_speak_request(current_chat, request)
     end
   end)
 end
