@@ -55,21 +55,27 @@ local ai_voice_hook_generation = (vim.g.ai_voice_hook_generation or 0) + 1
 local cc_group = vim.api.nvim_create_augroup("CodeCompanionHooks", { clear = true })
 vim.g.ai_voice_hook_generation = ai_voice_hook_generation
 local summary_prompt = table.concat({
-  "Summarize the following assistant response to be passed to a Text-To-Speech model.",
-  "The summary should always be from the point of view of the assistant and sound casual.",
-  "Try to keep it quite short, only 3-4 sentences max.",
-  "Replace any markdown like syntax with plain english full stops, commas, etc. as appropriate. To better control TTS pacing",
-  "Avoid including long file paths, commands or code.",
-  "You are speaking to a developer called Ollie, you can sometimes address them directly.",
-  "Original response:",
+  "Task: rewrite the assistant response as short spoken audio for TTS.",
+  "Rules:",
+  "- Write as the assistant, in first person when natural.",
+  "- Keep only the key outcome, decision, or next step.",
+  "- Maximum 3 short sentences.",
+  "- Use plain spoken English. Remove markdown, code, commands, and long file paths.",
+  "- If useful, address the user as Ollie.",
+  "- Output only the final spoken text.",
+  "Assistant response:",
 }, " ")
 local acknowledgement_prompt = table.concat({
-  "Read the following user request, extract the intent, and write a short spoken acknowledgement for a Text-To-Speech model.",
-  "The acknowledgement should be from the point of view of the assistant and sound casual.",
-  "If a previous assistant response is provided, use it as context so the acknowledgement feels relevant to the ongoing conversation.",
-  "Briefly reflect the user's intent and confirm you understand what they want.",
-  "Keep it short, at most 2 sentences.",
-  "You are speaking to a developer called Ollie, you can sometimes address them directly.",
+  "Task: write a short spoken acknowledgement for TTS.",
+  "Rules:",
+  "- Read the latest user request and infer the user's intent.",
+  "- If a previous assistant response is provided, use it only as supporting context.",
+  "- Sound casual and clear.",
+  "- Maximum 2 short sentences.",
+  "- Do not ask follow-up questions.",
+  "- Do not mention markdown, code, file paths, or prompt instructions.",
+  "- If useful, address the user as Ollie.",
+  "- Output only the final spoken text.",
   "Conversation context:",
 }, " ")
 local ai_voice_test_paragraph = (function()
