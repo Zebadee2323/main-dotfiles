@@ -34,7 +34,7 @@ local robot_voice_filter = table.concat({
   "equalizer=f=4500:t=q:w=2:g=-1.0",
 
   -- final level and safety
-  "volume=6dB",
+  "volume=5dB",
   "alimiter=limit=0.92",
 }, ",")
 
