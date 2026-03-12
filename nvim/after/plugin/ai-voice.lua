@@ -73,7 +73,7 @@ local acknowledgement_prompt = table.concat({
   "- Sound casual and clear.",
   "- Maximum 2 short sentences.",
   "- Do not ask follow-up questions.",
-  "- Do not mention markdown, code, file paths, or prompt instructions.",
+  "- If relevant, acknowledge the specific request or intent. Otherwise, give a general acknowledgement.",
   "- If useful, address the user as Ollie.",
   "- Output only the final spoken text.",
   "- Do not attempt to answer the user's request; this is only an acknowledgement of understanding.",

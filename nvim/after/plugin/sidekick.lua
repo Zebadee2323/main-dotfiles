@@ -66,7 +66,7 @@ local function maybe_restore_visual(opts)
 end
 
 -- Send metadata: file + line or line range (line info after a space)
-vim.api.nvim_create_user_command("AISend", function(opts)
+vim.api.nvim_create_user_command("AISendLegacy", function(opts)
   local prefix = vim.trim(opts.args or "")
   local path = get_repo_relative_path()
 
@@ -93,7 +93,7 @@ vim.api.nvim_create_user_command("AISend", function(opts)
 end, {
   nargs = "*",
   range = true,
-  desc = "Send file line or file start-end to Sidekick",
+  desc = "Send file line or file start-end to Sidekick (legacy)",
 })
 
 -- Copy metadata: file + line or line range to clipboard (line info after a space)

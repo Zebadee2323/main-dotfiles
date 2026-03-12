@@ -14,17 +14,75 @@ local function create_or_replace_user_command(name, fn, opts)
   vim.api.nvim_create_user_command(name, fn, opts)
 end
 
-local function open_default_ai_chat()
+local function get_git_root(path)
+  local dir = path and vim.fn.fnamemodify(path, ":p:h") or nil
+  local cmd = dir and ("git -C " .. vim.fn.shellescape(dir) .. " rev-parse --show-toplevel")
+    or "git rev-parse --show-toplevel"
+
+  local ok, lines = pcall(vim.fn.systemlist, cmd)
+  if not ok or type(lines) ~= "table" or #lines == 0 then
+    return nil
+  end
+
+  local root = lines[1]
+  if root == nil or root == "" then
+    return nil
+  end
+
+  return root
+end
+
+local function get_repo_relative_path()
+  local bufname = vim.api.nvim_buf_get_name(0)
+  if bufname == "" then
+    return "[No Name]"
+  end
+
+  local abs_buf = vim.fn.fnamemodify(bufname, ":p")
+  local git_root = get_git_root(abs_buf)
+
+  if git_root then
+    local abs_root = vim.fn.fnamemodify(git_root, ":p"):gsub("[/\\]$", "")
+    local rel = vim.fs.relpath(abs_root, abs_buf)
+
+    if rel then
+      if rel == "" then
+        return "."
+      end
+
+      return rel
+    end
+  end
+
+  local cwd_rel = vim.fn.fnamemodify(bufname, ":.")
+  if cwd_rel ~= "" then
+    return cwd_rel
+  end
+
+  return bufname
+end
+
+local function maybe_restore_visual(opts)
+  if opts.range and opts.line1 and opts.line2 and opts.line2 >= opts.line1 then
+    vim.schedule(function()
+      pcall(vim.cmd, "normal! gv")
+    end)
+  end
+end
+
+local function build_default_ai_chat_opts(opts)
   local chat_helpers = require("codecompanion.interactions.chat.helpers")
   local params = {
     adapter = ai_chat_adapter,
   }
 
+  opts = opts or {}
+
   if not is_acp_adapter(ai_chat_adapter) then
     params.model = ai_chat_model
   end
 
-  return codecompanion.chat({
+  return vim.tbl_deep_extend("force", {
     params = params,
     callbacks = {
       on_created = function(chat)
@@ -44,7 +102,11 @@ local function open_default_ai_chat()
         end, 100)
       end,
     },
-  })
+  }, opts)
+end
+
+local function open_default_ai_chat()
+  return codecompanion.chat(build_default_ai_chat_opts())
 end
 
 local function toggle_default_ai_chat()
@@ -68,6 +130,89 @@ local function toggle_default_ai_chat()
   end
 
   open_default_ai_chat()
+end
+
+local function get_target_ai_chat()
+  local chat_api = require("codecompanion.interactions.chat")
+  local current_buf = vim.api.nvim_get_current_buf()
+
+  if _G.codecompanion_chat_metadata and _G.codecompanion_chat_metadata[current_buf] then
+    return codecompanion.buf_get_chat(current_buf)
+  end
+
+  return chat_api.last_chat()
+end
+
+local function build_ai_send_message(opts)
+  local prefix = vim.trim(opts.args or "")
+  local path = get_repo_relative_path()
+  local body
+
+  if opts.range and opts.line1 and opts.line2 and opts.line2 >= opts.line1 then
+    if opts.line1 == opts.line2 then
+      body = string.format("@%s %d", path, opts.line1)
+    else
+      body = string.format("@%s %d-%d", path, opts.line1, opts.line2)
+    end
+  else
+    local line = vim.api.nvim_win_get_cursor(0)[1]
+    body = string.format("@%s %d", path, line)
+  end
+
+  if prefix ~= "" then
+    return prefix .. "\n\n" .. body
+  end
+
+  return body
+end
+
+local function send_message_to_chat(chat, msg)
+  if chat.current_request then
+    vim.notify("CodeCompanion chat is busy", vim.log.levels.WARN)
+    return
+  end
+
+  local source_win = vim.api.nvim_get_current_win()
+
+  if not chat.ui:is_visible() then
+    chat.ui:open({ toggled = true })
+  end
+
+  if vim.api.nvim_win_is_valid(source_win) and vim.api.nvim_get_current_win() ~= source_win then
+    vim.api.nvim_set_current_win(source_win)
+  end
+
+  local start_line = chat.header_line - 1
+  local existing_lines = vim.api.nvim_buf_get_lines(chat.bufnr, start_line, -1, false)
+  local message_lines = vim.split(msg, "\n", { plain = true })
+
+  if #existing_lines == 1 and existing_lines[1] == "" then
+    existing_lines = {}
+  end
+
+  if #existing_lines > 0 then
+    table.insert(existing_lines, "")
+  end
+
+  vim.list_extend(existing_lines, message_lines)
+  vim.api.nvim_buf_set_lines(chat.bufnr, start_line, -1, false, existing_lines)
+end
+
+local function send_to_codecompanion(opts)
+  local msg = build_ai_send_message(opts)
+  vim.schedule(function()
+    local chat = get_target_ai_chat()
+
+    if not chat then
+      chat = open_default_ai_chat()
+    end
+
+    if chat then
+      send_message_to_chat(chat, msg)
+    end
+  end)
+
+  maybe_restore_visual(opts)
 end
 
 codecompanion.setup({
@@ -125,4 +270,12 @@ create_or_replace_user_command("AI", function()
   toggle_default_ai_chat()
 end, {
   desc = "Toggle CodeCompanion chat with OpenCode gpt-5.4 medium",
+})
+
+create_or_replace_user_command("AISend", function(opts)
+  send_to_codecompanion(opts)
+end, {
+  nargs = "*",
+  range = true,
+  desc = "Append file line or range to CodeCompanion input",
 })
