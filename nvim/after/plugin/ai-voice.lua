@@ -60,17 +60,15 @@ local summary_prompt = table.concat({
   "Try to keep it quite short, only 3-4 sentences max.",
   "Replace any markdown like syntax with plain english full stops, commas, etc. as appropriate. To better control TTS pacing",
   "Avoid including long file paths, commands or code.",
-  "The person you will be speaking to is called Ollie, you can sometimes address them directly.",
+  "You are speaking to a developer called Ollie, you can sometimes address them directly.",
   "Original response:",
 }, " ")
 local acknowledgement_prompt = table.concat({
   "Read the following user request, extract the intent, and write a short spoken acknowledgement for a Text-To-Speech model.",
-  "The acknowledgement should be from the point of view of the assistant and sound casual, warm, and confident.",
+  "The acknowledgement should be from the point of view of the assistant and sound casual.",
   "Briefly reflect the user's intent and confirm you understand what they want.",
   "Keep it short, at most 2 sentences.",
-  "Replace any markdown-like syntax with plain English punctuation as appropriate for TTS pacing.",
-  "Avoid including long file paths, commands or code.",
-  "The person you will be speaking to is called Ollie, you can sometimes address them directly.",
+  "You are speaking to a developer called Ollie, you can sometimes address them directly.",
   "Original user request:",
 }, " ")
 local ai_voice_test_paragraph = (function()
