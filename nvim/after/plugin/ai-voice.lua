@@ -43,8 +43,14 @@ local current_effect_job = nil
 local current_play_job = nil
 local current_wav_path = nil
 local current_summary_chat = nil
+local current_acknowledgement_chat = nil
 local speech_request_id = 0
+local speech_queue = {}
+local pending_acknowledgement_request_id = nil
+local pending_summary_request_id = nil
+local pending_summary_message = nil
 local ai_voice_codecompanion_enabled = true 
+local ai_voice_speak
 local ai_voice_hook_generation = (vim.g.ai_voice_hook_generation or 0) + 1
 local cc_group = vim.api.nvim_create_augroup("CodeCompanionHooks", { clear = true })
 vim.g.ai_voice_hook_generation = ai_voice_hook_generation
@@ -96,6 +102,14 @@ local function cleanup_current_wav()
   end
 end
 
+local function clear_speech_queue()
+  speech_queue = {}
+end
+
+local function has_active_audio_jobs()
+  return current_tts_job ~= nil or current_effect_job ~= nil or current_play_job ~= nil
+end
+
 local function stop_audio_jobs()
   if current_tts_job and vim.fn.jobwait({ current_tts_job }, 0)[1] == -1 then
     vim.fn.jobstop(current_tts_job)
@@ -114,17 +128,32 @@ local function stop_audio_jobs()
   cleanup_current_wav()
 end
 
+local function cancel_hidden_chat(chat)
+  if chat then
+    pcall(function()
+      if chat.current_request then
+        chat:stop()
+      end
+      chat:close()
+    end)
+  end
+end
+
 local function cancel_summary_chat()
   if current_summary_chat then
     local summary_chat = current_summary_chat
     current_summary_chat = nil
 
-    pcall(function()
-      if summary_chat.current_request then
-        summary_chat:stop()
-      end
-      summary_chat:close()
-    end)
+    cancel_hidden_chat(summary_chat)
+  end
+end
+
+local function cancel_acknowledgement_chat()
+  if current_acknowledgement_chat then
+    local acknowledgement_chat = current_acknowledgement_chat
+    current_acknowledgement_chat = nil
+
+    cancel_hidden_chat(acknowledgement_chat)
   end
 end
 
@@ -142,17 +171,44 @@ local function prepare_speech_request(opts)
   opts = opts or {}
   speech_request_id = speech_request_id + 1
 
+  if opts.cancel_acknowledgement then
+    cancel_acknowledgement_chat()
+  end
+
   if opts.cancel_summary then
     cancel_summary_chat()
   end
+
+  if opts.clear_queue then
+    clear_speech_queue()
+  end
+
+  pending_acknowledgement_request_id = nil
+  pending_summary_request_id = nil
+  pending_summary_message = nil
 
   stop_audio_jobs()
 
   return speech_request_id
 end
 
+local function maybe_start_queued_speech()
+  if has_active_audio_jobs() or #speech_queue == 0 then
+    return
+  end
+
+  local next_item = table.remove(speech_queue, 1)
+  if not next_item then
+    return
+  end
+
+  ai_voice_speak(next_item.message, vim.tbl_extend("force", next_item.opts or {}, {
+    keep_queue = true,
+  }))
+end
+
 local function ai_voice_stop()
-  prepare_speech_request({ cancel_summary = true })
+  prepare_speech_request({ cancel_acknowledgement = true, cancel_summary = true, clear_queue = true })
 end
 
 local function set_ai_voice_robot_mode(enabled)
@@ -170,6 +226,7 @@ local function start_audio_playback(wav_path, request_id)
       if speech_request_id == request_id then
         current_play_job = nil
         cleanup_current_wav()
+        maybe_start_queued_speech()
       else
         pcall(vim.fn.delete, wav_path)
       end
@@ -179,6 +236,7 @@ local function start_audio_playback(wav_path, request_id)
   if play_job <= 0 then
     vim.notify("Generated audio at " .. wav_path .. " but failed to start afplay", vim.log.levels.WARN)
     pcall(vim.fn.delete, wav_path)
+    maybe_start_queued_speech()
     return
   end
 
@@ -247,16 +305,26 @@ local function maybe_apply_robot_effects(wav_path, request_id)
   current_effect_job = effect_job
 end
 
-local function ai_voice_speak(message, opts)
+ai_voice_speak = function(message, opts)
   message = vim.trim(message or "")
   if message == "" then
     vim.notify("AIVoice requires a message", vim.log.levels.ERROR)
     return
   end
 
-  local request_id = prepare_speech_request({
-    cancel_summary = not (opts and opts.keep_summary),
-  })
+  local request_id = opts and opts.request_id
+
+  if not request_id and not (opts and opts.keep_queue) then
+    clear_speech_queue()
+  end
+
+  if not request_id then
+    request_id = prepare_speech_request({
+      cancel_summary = not (opts and opts.keep_summary),
+      cancel_acknowledgement = not (opts and opts.keep_summary),
+    })
+  end
+
   local wav_path = vim.fn.tempname() .. ".wav"
   local cmd = {
     "python3",
@@ -296,6 +364,7 @@ local function ai_voice_speak(message, opts)
         if code ~= 0 then
           local msg = #stderr > 0 and table.concat(stderr, "\n") or ("piper exited with code " .. code)
           vim.notify(msg, vim.log.levels.ERROR)
+          maybe_start_queued_speech()
           return
         end
 
@@ -306,12 +375,32 @@ local function ai_voice_speak(message, opts)
 
   if job_id <= 0 then
     vim.notify("Failed to start piper", vim.log.levels.ERROR)
+    maybe_start_queued_speech()
     return
   end
 
   current_tts_job = job_id
   vim.fn.chansend(job_id, message .. "\n")
   vim.fn.chanclose(job_id, "stdin")
+end
+
+local function queue_ai_voice_speak(message, opts)
+  message = vim.trim(message or "")
+  if message == "" then
+    return
+  end
+
+  if has_active_audio_jobs() then
+    table.insert(speech_queue, {
+      message = message,
+      opts = opts,
+    })
+    return
+  end
+
+  ai_voice_speak(message, vim.tbl_extend("force", opts or {}, {
+    keep_queue = true,
+  }))
 end
 
 local function strip_markdown(text)
@@ -547,12 +636,13 @@ local function build_summary_chat_params(chat)
   return params
 end
 
-local function summarize_and_speak_response(chat, response)
+local function summarize_and_speak_response(chat, response, request_id)
   local codecompanion = require("codecompanion")
   local chat_helpers = require("codecompanion.interactions.chat.helpers")
-  local request_id = prepare_speech_request({ cancel_summary = true })
   local summary_params = build_summary_chat_params(chat)
   local summary_model_name = get_summary_model_name() or get_chat_model(chat)
+
+  cancel_summary_chat()
 
   local summary_chat = codecompanion.chat({
     auto_submit = false,
@@ -594,15 +684,14 @@ local function summarize_and_speak_response(chat, response)
         end
 
         local summary = get_latest_assistant_response(summary_result_chat)
+        local spoken_summary = summary and summary ~= "" and summary or response
 
-        if summary and summary ~= "" then
-          vim.schedule(function()
-            ai_voice_speak(summary, { keep_summary = true })
-          end)
+        if pending_acknowledgement_request_id == request_id then
+          pending_summary_request_id = request_id
+          pending_summary_message = spoken_summary
         else
-          vim.notify("AI voice summary returned no assistant response; speaking the latest reply instead", vim.log.levels.WARN)
           vim.schedule(function()
-            ai_voice_speak(response, { keep_summary = true })
+            queue_ai_voice_speak(spoken_summary, { keep_summary = true, request_id = request_id })
           end)
         end
 
@@ -626,14 +715,13 @@ local function summarize_and_speak_response(chat, response)
   current_summary_chat = summary_chat
 end
 
-local function acknowledge_and_speak_request(chat, request)
+local function acknowledge_and_speak_request(chat, request, request_id)
   local codecompanion = require("codecompanion")
   local chat_helpers = require("codecompanion.interactions.chat.helpers")
-  local request_id = prepare_speech_request({ cancel_summary = true })
   local summary_params = build_summary_chat_params(chat)
   local summary_model_name = get_summary_model_name() or get_chat_model(chat)
 
-  local summary_chat = codecompanion.chat({
+  local acknowledgement_chat = codecompanion.chat({
     auto_submit = false,
     hidden = true,
     mcp_servers = "none",
@@ -663,8 +751,8 @@ local function acknowledge_and_speak_request(chat, request)
         summary_result_chat:submit()
       end,
       on_completed = function(summary_result_chat)
-        if current_summary_chat == summary_result_chat then
-          current_summary_chat = nil
+        if current_acknowledgement_chat == summary_result_chat then
+          current_acknowledgement_chat = nil
         end
 
         if speech_request_id ~= request_id then
@@ -673,23 +761,39 @@ local function acknowledge_and_speak_request(chat, request)
         end
 
         local summary = get_latest_assistant_response(summary_result_chat)
+        local acknowledgement = summary and summary ~= "" and summary or request
 
-        if summary and summary ~= "" then
-          vim.schedule(function()
-            ai_voice_speak(summary, { keep_summary = true })
-          end)
-        else
-          vim.notify("AI voice acknowledgement returned no assistant response; speaking the latest request instead", vim.log.levels.WARN)
-          vim.schedule(function()
-            ai_voice_speak(request, { keep_summary = true })
-          end)
-        end
+        pending_acknowledgement_request_id = nil
+
+        vim.schedule(function()
+          queue_ai_voice_speak(acknowledgement, { keep_summary = true, request_id = request_id })
+
+          if pending_summary_request_id == request_id and pending_summary_message then
+            queue_ai_voice_speak(pending_summary_message, { keep_summary = true, request_id = request_id })
+            pending_summary_request_id = nil
+            pending_summary_message = nil
+          end
+        end)
 
         close_chat(summary_result_chat)
       end,
       on_cancelled = function(summary_result_chat)
-        if current_summary_chat == summary_result_chat then
-          current_summary_chat = nil
+        if current_acknowledgement_chat == summary_result_chat then
+          current_acknowledgement_chat = nil
+        end
+
+        if pending_acknowledgement_request_id == request_id then
+          pending_acknowledgement_request_id = nil
+        end
+
+        if pending_summary_request_id == request_id and pending_summary_message then
+          local queued_summary = pending_summary_message
+          pending_summary_request_id = nil
+          pending_summary_message = nil
+
+          vim.schedule(function()
+            queue_ai_voice_speak(queued_summary, { keep_summary = true, request_id = request_id })
+          end)
         end
 
         close_chat(summary_result_chat)
@@ -697,12 +801,26 @@ local function acknowledge_and_speak_request(chat, request)
     },
   })
 
-  if not summary_chat then
+  if not acknowledgement_chat then
+    if pending_acknowledgement_request_id == request_id then
+      pending_acknowledgement_request_id = nil
+    end
+
+    if pending_summary_request_id == request_id and pending_summary_message then
+      local queued_summary = pending_summary_message
+      pending_summary_request_id = nil
+      pending_summary_message = nil
+
+      vim.schedule(function()
+        queue_ai_voice_speak(queued_summary, { keep_summary = true, request_id = request_id })
+      end)
+    end
+
     vim.notify("AI voice acknowledgement failed: could not create hidden chat", vim.log.levels.ERROR)
     return
   end
 
-  current_summary_chat = summary_chat
+  current_acknowledgement_chat = acknowledgement_chat
 end
 
 local function summarize_last_codecompanion_response()
@@ -720,7 +838,13 @@ local function summarize_last_codecompanion_response()
     return
   end
 
-  summarize_and_speak_response(chat, response)
+  local request_id = prepare_speech_request({
+    cancel_acknowledgement = true,
+    cancel_summary = true,
+    clear_queue = true,
+  })
+
+  summarize_and_speak_response(chat, response, request_id)
 end
 
 local function set_ai_voice_codecompanion_enabled(enabled)
@@ -767,7 +891,7 @@ local function attach_ai_voice_to_chat(bufnr, chat)
     local response = get_latest_assistant_response(current_chat)
 
     if response then
-      summarize_and_speak_response(current_chat, response)
+      summarize_and_speak_response(current_chat, response, speech_request_id)
     end
   end)
 
@@ -783,7 +907,14 @@ local function attach_ai_voice_to_chat(bufnr, chat)
     local request = get_latest_user_request(current_chat)
 
     if request then
-      acknowledge_and_speak_request(current_chat, request)
+      local request_id = prepare_speech_request({
+        cancel_acknowledgement = true,
+        cancel_summary = true,
+        clear_queue = true,
+      })
+
+      pending_acknowledgement_request_id = request_id
+      acknowledge_and_speak_request(current_chat, request, request_id)
     end
   end)
 end
