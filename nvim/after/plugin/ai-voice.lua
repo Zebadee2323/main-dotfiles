@@ -1,5 +1,10 @@
 local voice_name = "en_US-hfc_female-medium"
 local voices_dir = vim.fn.expand("~/.config/dotfiles/nvim/after/ai_voices")
+local summary_model_name = "openai/gpt-5.3-codex-spark"
+local piper_length_scale = 1.15
+local piper_noise_scale = 0.667
+local piper_noise_w = 0.8
+local piper_sentence_silence = 0.4
 local current_tts_job = nil
 local current_play_job = nil
 local current_wav_path = nil
@@ -49,14 +54,26 @@ end
 
 local function cancel_summary_chat()
   if current_summary_chat then
-    pcall(function()
-      if current_summary_chat.current_request then
-        current_summary_chat:stop()
-      end
-      current_summary_chat:close()
-    end)
+    local summary_chat = current_summary_chat
     current_summary_chat = nil
+
+    pcall(function()
+      if summary_chat.current_request then
+        summary_chat:stop()
+      end
+      summary_chat:close()
+    end)
   end
+end
+
+local function close_chat(chat)
+  if not chat then
+    return
+  end
+
+  pcall(function()
+    chat:close()
+  end)
 end
 
 local function prepare_speech_request(opts)
@@ -93,6 +110,14 @@ local function ai_voice_speak(message, opts)
     "piper",
     "-m",
     voice_name,
+    "--length-scale",
+    tostring(piper_length_scale),
+    "--noise-scale",
+    tostring(piper_noise_scale),
+    "--noise-w",
+    tostring(piper_noise_w),
+    "--sentence-silence",
+    tostring(piper_sentence_silence),
     "--data-dir",
     voices_dir,
     "-f",
@@ -277,7 +302,7 @@ local function get_summary_model_name()
     return vim.g.ai_voice_summary_model
   end
 
-  return "openai/gpt-5.1-codex-mini"
+  return summary_model_name
 end
 
 local function build_summary_chat_params(chat)
@@ -400,7 +425,7 @@ local function summarize_and_speak_response(chat, response)
         end
 
         if speech_request_id ~= request_id then
-          summary_result_chat:close()
+          close_chat(summary_result_chat)
           return
         end
 
@@ -416,14 +441,14 @@ local function summarize_and_speak_response(chat, response)
           end)
         end
 
-        summary_result_chat:close()
+        close_chat(summary_result_chat)
       end,
       on_cancelled = function(summary_result_chat)
         if current_summary_chat == summary_result_chat then
           current_summary_chat = nil
         end
 
-        summary_result_chat:close()
+        close_chat(summary_result_chat)
       end,
     },
   })
