@@ -1,24 +1,61 @@
 local voice_name = "en_US-hfc_female-medium"
 local voices_dir = vim.fn.expand("~/.config/dotfiles/nvim/after/ai_voices")
-local summary_model_name = "openai/gpt-5.3-codex-spark"
+local summary_model_name = "openai/gpt-5.1-codex-mini"
 local piper_length_scale = 1.15
-local piper_noise_scale = 0.667
-local piper_noise_w = 0.8
-local piper_sentence_silence = 0.4
+local piper_noise_scale = 0.2
+local piper_noise_w = 0.2
+local piper_sentence_silence = 0.5
+local ai_voice_robot_mode = true
+local robot_voice_filter = table.concat({
+  "asplit=3[dry][d1][d2]",
+
+  "[d1]adelay=20|20,volume=0.75[body]",
+
+  "[d2]chorus=0.7:0.9:45|60|75:0.32|0.28|0.22:0.35|0.40|0.45:2.2|2.6|3,"
+  .. "tremolo=7:0.07,"
+  .. "adelay=12|12,"
+  .. "volume=0.7[ai]",
+
+  "[dry][body][ai]amix=3:weights=1 0.8 0.65[mix]",
+
+  "[mix]highpass=f=90",
+  "equalizer=f=180:t=q:w=1.2:g=3",
+  "equalizer=f=3200:t=q:w=1:g=3",
+
+  "acompressor=threshold=-22dB:ratio=2.5:attack=15:release=120",
+
+  "volume=6dB",
+  "alimiter=limit=0.92",
+}, ",")
+
 local current_tts_job = nil
+local current_effect_job = nil
 local current_play_job = nil
 local current_wav_path = nil
 local current_summary_chat = nil
 local speech_request_id = 0
-local ai_voice_codecompanion_enabled = false
+local ai_voice_codecompanion_enabled = true 
+local ai_voice_hook_generation = (vim.g.ai_voice_hook_generation or 0) + 1
 local cc_group = vim.api.nvim_create_augroup("CodeCompanionHooks", { clear = true })
+vim.g.ai_voice_hook_generation = ai_voice_hook_generation
 local summary_prompt = table.concat({
   "Summarize the following assistant response to be passed to a Text-To-Speech model.",
   "The summary should always be from the point of view of the assistant and sound casual.",
   "Try to keep it quite short, only 3-4 sentences max.",
+  "Replace any markdown like syntax with plain english full stops, commas, etc. as appropriate. To better control TTS pacing",
   "Avoid including long file paths, commands or code.",
+  "The person the TTS will be speaking to is called Ollie, you can sometimes address them directly.",
   "Original response:",
 }, " ")
+local ai_voice_test_paragraph = (function()
+  local text = [[
+Good evening, sir. All workshop systems are stable, your calendar has been reduced to the essentials, and the suit diagnostics are comfortably within tolerance.
+I have filtered the usual noise from your inbox, flagged the genuinely urgent items, and left the dramatic ones for your amusement.
+Whenever you are ready, I can assist with the next experiment, the next idea, or the next spectacularly irresponsible decision.
+]]
+
+  return vim.trim(text):gsub("%s+", " ")
+end)()
 
 local function collect_lines(target, data)
   if not data then
@@ -44,6 +81,11 @@ local function stop_audio_jobs()
     vim.fn.jobstop(current_tts_job)
   end
   current_tts_job = nil
+
+  if current_effect_job and vim.fn.jobwait({ current_effect_job }, 0)[1] == -1 then
+    vim.fn.jobstop(current_effect_job)
+  end
+  current_effect_job = nil
 
   if current_play_job and vim.fn.jobwait({ current_play_job }, 0)[1] == -1 then
     vim.fn.jobstop(current_play_job)
@@ -91,6 +133,98 @@ end
 
 local function ai_voice_stop()
   prepare_speech_request({ cancel_summary = true })
+end
+
+local function set_ai_voice_robot_mode(enabled)
+  ai_voice_robot_mode = enabled
+  vim.notify("AI voice robot mode is now " .. (enabled and "enabled" or "disabled"), vim.log.levels.INFO)
+end
+
+local function toggle_ai_voice_robot_mode()
+  set_ai_voice_robot_mode(not ai_voice_robot_mode)
+end
+
+local function start_audio_playback(wav_path, request_id)
+  local play_job = vim.fn.jobstart({ "afplay", wav_path }, {
+    on_exit = function()
+      if speech_request_id == request_id then
+        current_play_job = nil
+        cleanup_current_wav()
+      else
+        pcall(vim.fn.delete, wav_path)
+      end
+    end,
+  })
+
+  if play_job <= 0 then
+    vim.notify("Generated audio at " .. wav_path .. " but failed to start afplay", vim.log.levels.WARN)
+    pcall(vim.fn.delete, wav_path)
+    return
+  end
+
+  current_play_job = play_job
+  current_wav_path = wav_path
+end
+
+local function maybe_apply_robot_effects(wav_path, request_id)
+  if not ai_voice_robot_mode then
+    start_audio_playback(wav_path, request_id)
+    return
+  end
+
+  if vim.fn.executable("ffmpeg") ~= 1 then
+    vim.notify("Robot mode requires ffmpeg; playing original audio", vim.log.levels.WARN)
+    start_audio_playback(wav_path, request_id)
+    return
+  end
+
+  local processed_wav_path = vim.fn.tempname() .. ".wav"
+  local stderr = {}
+  local effect_job = vim.fn.jobstart({
+    "ffmpeg",
+    "-y",
+    "-i",
+    wav_path,
+    "-af",
+    robot_voice_filter,
+    processed_wav_path,
+  }, {
+    stderr_buffered = true,
+    on_stderr = function(_, data)
+      collect_lines(stderr, data)
+    end,
+    on_exit = function(_, code)
+      vim.schedule(function()
+        current_effect_job = nil
+
+        if speech_request_id ~= request_id then
+          pcall(vim.fn.delete, wav_path)
+          pcall(vim.fn.delete, processed_wav_path)
+          return
+        end
+
+        if code ~= 0 then
+          local msg = #stderr > 0 and table.concat(stderr, "\n") or ("ffmpeg exited with code " .. code)
+          vim.notify("Robot mode failed, playing original audio:\n" .. msg, vim.log.levels.WARN)
+          pcall(vim.fn.delete, processed_wav_path)
+          start_audio_playback(wav_path, request_id)
+          return
+        end
+
+        pcall(vim.fn.delete, wav_path)
+        start_audio_playback(processed_wav_path, request_id)
+      end)
+    end,
+  })
+
+  if effect_job <= 0 then
+    vim.notify("Failed to start ffmpeg for robot mode; playing original audio", vim.log.levels.WARN)
+    pcall(vim.fn.delete, processed_wav_path)
+    start_audio_playback(wav_path, request_id)
+    return
+  end
+
+  current_effect_job = effect_job
 end
 
 local function ai_voice_speak(message, opts)
@@ -145,25 +279,7 @@ local function ai_voice_speak(message, opts)
           return
         end
 
-        local play_job = vim.fn.jobstart({ "afplay", wav_path }, {
-          on_exit = function()
-            if speech_request_id == request_id then
-              current_play_job = nil
-              cleanup_current_wav()
-            else
-              pcall(vim.fn.delete, wav_path)
-            end
-          end,
-        })
-
-        if play_job <= 0 then
-          vim.notify("Generated audio at " .. wav_path .. " but failed to start afplay", vim.log.levels.WARN)
-          pcall(vim.fn.delete, wav_path)
-          return
-        end
-
-        current_play_job = play_job
-        current_wav_path = wav_path
+        maybe_apply_robot_effects(wav_path, request_id)
       end)
     end,
   })
@@ -174,7 +290,7 @@ local function ai_voice_speak(message, opts)
   end
 
   current_tts_job = job_id
-  vim.fn.chansend(job_id, { message, "" })
+  vim.fn.chansend(job_id, message .. "\n")
   vim.fn.chanclose(job_id, "stdin")
 end
 
@@ -211,18 +327,37 @@ end
 
 local function get_latest_assistant_response(chat)
   local codecompanion_config = require("codecompanion.config")
+  local llm_role = codecompanion_config.constants.LLM_ROLE
 
   for i = #chat.messages, 1, -1 do
     local message = chat.messages[i]
 
-    if message.role == codecompanion_config.constants.LLM_ROLE and type(message.content) == "string" then
-      local content = vim.trim(message.content)
+    if message.role == llm_role then
+      local content = message.content
 
-      if content ~= "" and not (message.tools and message.tools.calls) then
-        local cleaned = strip_markdown(content)
+      if type(content) == "table" then
+        content = table.concat(vim.tbl_map(function(part)
+          if type(part) == "string" then
+            return part
+          end
 
-        if cleaned ~= "" then
-          return cleaned
+          if type(part) == "table" and type(part.text) == "string" then
+            return part.text
+          end
+
+          return ""
+        end, content), "\n")
+      end
+
+      if type(content) == "string" then
+        content = vim.trim(content)
+
+        if content ~= "" and not (message.tools and message.tools.calls) then
+          local cleaned = strip_markdown(content)
+
+          if cleaned ~= "" then
+            return cleaned
+          end
         end
       end
     end
@@ -353,40 +488,10 @@ local function build_summary_chat_params(chat)
   return params
 end
 
-local function make_fallback_summary(response)
-  local summary = response:gsub("%s+", " ")
-  local sentences = {}
-
-  for sentence in summary:gmatch("[^.!?]+[.!?]?") do
-    sentence = vim.trim(sentence)
-
-    if sentence ~= "" then
-      table.insert(sentences, sentence)
-    end
-
-    if #sentences == 3 then
-      break
-    end
-  end
-
-  summary = table.concat(sentences, " ")
-
-  if summary == "" then
-    summary = vim.trim(response)
-  end
-
-  if #summary > 280 then
-    summary = vim.trim(summary:sub(1, 277)) .. "..."
-  end
-
-  return summary
-end
-
 local function summarize_and_speak_response(chat, response)
   local codecompanion = require("codecompanion")
   local chat_helpers = require("codecompanion.interactions.chat.helpers")
   local request_id = prepare_speech_request({ cancel_summary = true })
-  local fallback_summary = make_fallback_summary(response)
   local summary_params = build_summary_chat_params(chat)
   local summary_model_name = get_summary_model_name() or get_chat_model(chat)
 
@@ -436,8 +541,9 @@ local function summarize_and_speak_response(chat, response)
             ai_voice_speak(summary, { keep_summary = true })
           end)
         else
+          vim.notify("AI voice summary returned no assistant response; speaking the latest reply instead", vim.log.levels.WARN)
           vim.schedule(function()
-            ai_voice_speak(fallback_summary, { keep_summary = true })
+            ai_voice_speak(response, { keep_summary = true })
           end)
         end
 
@@ -454,7 +560,7 @@ local function summarize_and_speak_response(chat, response)
   })
 
   if not summary_chat then
-    ai_voice_speak(fallback_summary)
+    vim.notify("AI voice summary failed: could not create summary chat", vim.log.levels.ERROR)
     return
   end
 
@@ -491,6 +597,43 @@ local function toggle_ai_voice_codecompanion()
   set_ai_voice_codecompanion_enabled(not ai_voice_codecompanion_enabled)
 end
 
+local function attach_ai_voice_to_chat(bufnr, chat)
+  if not chat or chat.hidden then
+    return
+  end
+
+  local ok, attached_generation = pcall(vim.api.nvim_buf_get_var, bufnr, "ai_voice_hook_generation")
+  if ok and attached_generation == ai_voice_hook_generation then
+    return
+  end
+
+  pcall(vim.api.nvim_buf_set_var, bufnr, "ai_voice_hook_generation", ai_voice_hook_generation)
+
+  chat:add_callback("on_completed", function(current_chat)
+    if not ai_voice_codecompanion_enabled then
+      return
+    end
+
+    local response = get_latest_assistant_response(current_chat)
+
+    if response then
+      summarize_and_speak_response(current_chat, response)
+    end
+  end)
+end
+
+local function attach_ai_voice_to_existing_chats(codecompanion)
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(bufnr) then
+      local ok, chat = pcall(codecompanion.buf_get_chat, bufnr)
+
+      if ok and chat then
+        attach_ai_voice_to_chat(bufnr, chat)
+      end
+    end
+  end
+end
+
 local function attach_codecompanion_voice_hook()
   local ok, codecompanion = pcall(require, "codecompanion")
 
@@ -504,23 +647,11 @@ local function attach_codecompanion_voice_hook()
     callback = function(args)
       local chat = codecompanion.buf_get_chat(args.data.bufnr)
 
-      if not chat or chat.hidden then
-        return
-      end
-
-      chat:add_callback("on_completed", function(current_chat)
-        if not ai_voice_codecompanion_enabled then
-          return
-        end
-
-        local response = get_latest_assistant_response(current_chat)
-
-        if response then
-          summarize_and_speak_response(current_chat, response)
-        end
-      end)
+      attach_ai_voice_to_chat(args.data.bufnr, chat)
     end,
   })
+
+  attach_ai_voice_to_existing_chats(codecompanion)
 end
 
 attach_codecompanion_voice_hook()
@@ -572,6 +703,12 @@ end, {
   desc = "Speak a message with piper",
 })
 
+vim.api.nvim_create_user_command("AIVoiceTest", function()
+  ai_voice_speak(ai_voice_test_paragraph)
+end, {
+  desc = "Speak the built-in AI voice test paragraph",
+})
+
 vim.api.nvim_create_user_command("AIVoiceStop", function()
   ai_voice_stop()
 end, {
@@ -615,4 +752,22 @@ vim.api.nvim_create_user_command("AIDisableVoice", function()
   set_ai_voice_codecompanion_enabled(false)
 end, {
   desc = "Disable AI voice for CodeCompanion responses",
+})
+
+vim.api.nvim_create_user_command("AIToggleVoiceRobot", function()
+  toggle_ai_voice_robot_mode()
+end, {
+  desc = "Toggle robot mode for AI voice playback",
+})
+
+vim.api.nvim_create_user_command("AIEnableVoiceRobot", function()
+  set_ai_voice_robot_mode(true)
+end, {
+  desc = "Enable robot mode for AI voice playback",
+})
+
+vim.api.nvim_create_user_command("AIDisableVoiceRobot", function()
+  set_ai_voice_robot_mode(false)
+end, {
+  desc = "Disable robot mode for AI voice playback",
 })
