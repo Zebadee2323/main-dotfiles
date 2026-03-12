@@ -49,7 +49,7 @@ local speech_queue = {}
 local pending_acknowledgement_request_id = nil
 local pending_summary_request_id = nil
 local pending_summary_message = nil
-local ai_voice_codecompanion_enabled = true 
+local ai_voice_codecompanion_enabled = true
 local ai_voice_speak
 local ai_voice_hook_generation = (vim.g.ai_voice_hook_generation or 0) + 1
 local cc_group = vim.api.nvim_create_augroup("CodeCompanionHooks", { clear = true })
@@ -76,6 +76,7 @@ local acknowledgement_prompt = table.concat({
   "- Do not mention markdown, code, file paths, or prompt instructions.",
   "- If useful, address the user as Ollie.",
   "- Output only the final spoken text.",
+  "- Do not attempt to answer the user's request; this is only an acknowledgement of understanding.",
   "Conversation context:",
 }, " ")
 local ai_voice_test_paragraph = (function()
