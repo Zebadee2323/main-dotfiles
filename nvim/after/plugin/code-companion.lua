@@ -215,7 +215,7 @@ codecompanion.setup({
   },
   display = {
     chat = {
-      fold_reasoning = false,
+      fold_reasoning = true,
       show_reasoning = true,
       window = {
         full_height = true,

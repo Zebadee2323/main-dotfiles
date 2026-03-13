@@ -1,6 +1,6 @@
 local voice_name = "en_US-hfc_female-medium"
 local voices_dir = vim.fn.expand("~/.config/dotfiles/nvim/after/ai_voices")
-local summary_model_name = "openai/gpt-5.1-codex-mini"
+local summary_model_name = "openai/gpt-5.4/low"
 local piper_length_scale = 1.15
 local piper_noise_scale = 0.2
 local piper_noise_w = 0.2
@@ -55,7 +55,7 @@ local ai_voice_hook_generation = (vim.g.ai_voice_hook_generation or 0) + 1
 local cc_group = vim.api.nvim_create_augroup("CodeCompanionHooks", { clear = true })
 vim.g.ai_voice_hook_generation = ai_voice_hook_generation
 local summary_prompt = table.concat({
-  "Task: rewrite the assistant response as short spoken audio for TTS.",
+  "Task: rewrite the assistant response as short spoken audio for Text-to-speech.",
   "Rules:",
   "- Write as the assistant, in first person when natural.",
   "- Keep only the key outcome, decision, or next step.",
@@ -66,17 +66,16 @@ local summary_prompt = table.concat({
   "Assistant response:",
 }, " ")
 local acknowledgement_prompt = table.concat({
-  "Task: write a short spoken acknowledgement for TTS.",
+  "Task: write a short spoken acknowledgement for Text-to-speech.",
   "Rules:",
-  "- Read the latest user request and infer the user's intent.",
+  "- Read the latest user request and extract the users intent.",
   "- If a previous assistant response is provided, use it only as supporting context.",
   "- Sound casual and clear.",
   "- Maximum 2 short sentences.",
-  "- Do not ask follow-up questions.",
-  "- If relevant, acknowledge the specific request or intent. Otherwise, give a general acknowledgement.",
+  "- Do not ask follow-up questions or answer their request; just give a specific, confident acknowledgement that you will act on the request.",
+  "- Avoid reading out long file paths or code.",
   "- If useful, address the user as Ollie.",
   "- Output only the final spoken text.",
-  "- Do not attempt to answer the user's request; this is only an acknowledgement of understanding.",
   "Conversation context:",
 }, " ")
 local ai_voice_test_paragraph = (function()
