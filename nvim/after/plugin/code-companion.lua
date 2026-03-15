@@ -14,6 +14,37 @@ local function create_or_replace_user_command(name, fn, opts)
   vim.api.nvim_create_user_command(name, fn, opts)
 end
 
+local function maybe_checktime(buf)
+  if vim.fn.mode() == "c" then
+    return
+  end
+
+  if buf and vim.api.nvim_buf_is_valid(buf) then
+    local name = vim.api.nvim_buf_get_name(buf)
+    if vim.bo[buf].buftype ~= "" or name == "" or vim.uv.fs_stat(name) == nil then
+      return
+    end
+
+    vim.cmd.checktime(buf)
+    return
+  end
+
+  vim.cmd.checktime()
+end
+
+local function setup_external_file_autoreload()
+  vim.o.autoread = true
+
+  local group = vim.api.nvim_create_augroup("CodeCompanionExternalFileReload", { clear = true })
+
+  vim.api.nvim_create_autocmd({ "BufEnter", "CursorHold", "CursorHoldI", "FocusGained", "TermClose" }, {
+    group = group,
+    callback = function(args)
+      maybe_checktime(args.buf)
+    end,
+  })
+end
+
 local function get_git_root(path)
   local dir = path and vim.fn.fnamemodify(path, ":p:h") or nil
   local cmd = dir and ("git -C " .. vim.fn.shellescape(dir) .. " rev-parse --show-toplevel")
@@ -197,6 +228,8 @@ local function send_to_codecompanion(opts)
     send_message_to_chat(chat, msg)
   end
 end
+
+setup_external_file_autoreload()
 
 codecompanion.setup({
   interactions = {
