@@ -8,6 +8,8 @@ local max_animated_file_bytes = 512 * 1024
 local max_animated_changed_lines = 200
 local animation_start_delay_ms = 300
 local animation_step_ms = 70
+local reload_settle_delay_ms = 30
+local reload_retry_count = 6
 
 local function set_highlights()
   vim.api.nvim_set_hl(0, "FancyReopenDiffAddCore", { bg = "#2f8f63", bold = true })
@@ -85,6 +87,74 @@ local function stop_animation_timer(bufnr)
   pcall(timer.close, timer)
 end
 
+local function stop_file_watcher(bufnr)
+  local buffer_state = state[bufnr]
+  if not (buffer_state and buffer_state.watcher) then
+    return
+  end
+
+  local watcher = buffer_state.watcher
+  buffer_state.watcher = nil
+  buffer_state.watcher_path = nil
+
+  pcall(watcher.stop, watcher)
+  pcall(watcher.close, watcher)
+end
+
+local function ensure_file_watcher(bufnr)
+  if not is_normal_file_buffer(bufnr) then
+    stop_file_watcher(bufnr)
+    return
+  end
+
+  local path = vim.api.nvim_buf_get_name(bufnr)
+  local buffer_state = state[bufnr] or {}
+  state[bufnr] = buffer_state
+
+  if path == "" then
+    stop_file_watcher(bufnr)
+    return
+  end
+
+  if buffer_state.watcher and buffer_state.watcher_path == path then
+    return
+  end
+
+  stop_file_watcher(bufnr)
+
+  local watcher = uv.new_fs_event()
+  if not watcher then
+    return
+  end
+
+  local ok = watcher:start(path, {}, function(err)
+    if err then
+      return
+    end
+
+    vim.schedule(function()
+      if not is_normal_file_buffer(bufnr) or vim.bo[bufnr].modified then
+        return
+      end
+
+      local current_path = vim.api.nvim_buf_get_name(bufnr)
+      if current_path == "" then
+        return
+      end
+
+      vim.cmd(string.format("silent! checktime %d", bufnr))
+    end)
+  end)
+
+  if not ok then
+    pcall(watcher.close, watcher)
+    return
+  end
+
+  buffer_state.watcher = watcher
+  buffer_state.watcher_path = path
+end
+
 local function remember_snapshot(bufnr)
   if not is_normal_file_buffer(bufnr) then
     return
@@ -94,6 +164,7 @@ local function remember_snapshot(bufnr)
   state[bufnr].snapshot_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   state[bufnr].snapshot_name = vim.api.nvim_buf_get_name(bufnr)
   state[bufnr].snapshot_stat = file_stat(state[bufnr].snapshot_name)
+  ensure_file_watcher(bufnr)
 end
 
 local function next_generation(bufnr)
@@ -449,7 +520,7 @@ play_animation = function(bufnr, before_lines, after_lines)
   timer:start(animation_start_delay_ms, 0, vim.schedule_wrap(tick))
 end
 
-local function maybe_animate_reload(bufnr)
+local function maybe_animate_reload(bufnr, request_id, retries_left)
   if not is_normal_file_buffer(bufnr) then
     return
   end
@@ -457,6 +528,12 @@ local function maybe_animate_reload(bufnr)
   local current_name = vim.api.nvim_buf_get_name(bufnr)
   local after_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   local buffer_state = state[bufnr]
+  local before_stat = buffer_state and buffer_state.snapshot_stat or nil
+  local after_stat = file_stat(current_name)
+
+  if buffer_state and request_id and buffer_state.reload_request_id ~= request_id then
+    return
+  end
 
   vim.b[bufnr].fancy_reopen_loaded_once = true
 
@@ -469,6 +546,16 @@ local function maybe_animate_reload(bufnr)
   local before_lines = buffer_state.snapshot_lines
 
   if same_lines(before_lines, after_lines) then
+    if retries_left > 0 and not same_file_stat(before_stat, after_stat) then
+      vim.defer_fn(function()
+        local current_state = state[bufnr]
+        if current_state and current_state.reload_request_id == request_id then
+          maybe_animate_reload(bufnr, request_id, retries_left - 1)
+        end
+      end, reload_settle_delay_ms)
+      return
+    end
+
     cancel_animation(bufnr)
     remember_snapshot(bufnr)
     return
@@ -480,6 +567,19 @@ local function maybe_animate_reload(bufnr)
       remember_snapshot(bufnr)
     end
   end)
+end
+
+local function queue_reload_animation(bufnr)
+  state[bufnr] = state[bufnr] or {}
+  state[bufnr].reload_request_id = (state[bufnr].reload_request_id or 0) + 1
+
+  local request_id = state[bufnr].reload_request_id
+  vim.defer_fn(function()
+    local buffer_state = state[bufnr]
+    if buffer_state and buffer_state.reload_request_id == request_id then
+      maybe_animate_reload(bufnr, request_id, reload_retry_count)
+    end
+  end, reload_settle_delay_ms)
 end
 
 local function build_modified_test_line(line)
@@ -551,7 +651,12 @@ end
 vim.api.nvim_create_autocmd("BufReadPost", {
   group = vim.api.nvim_create_augroup("FancyReopenDiff", { clear = true }),
   callback = function(args)
+    if not is_normal_file_buffer(args.buf) then
+      return
+    end
+
     if vim.b[args.buf].fancy_reopen_loaded_once then
+      queue_reload_animation(args.buf)
       return
     end
 
@@ -585,6 +690,8 @@ vim.api.nvim_create_autocmd("BufEnter", {
 
     if not buffer_state or not buffer_state.snapshot_lines or buffer_state.snapshot_name ~= current_name then
       remember_snapshot(args.buf)
+    else
+      ensure_file_watcher(args.buf)
     end
   end,
 })
@@ -592,7 +699,16 @@ vim.api.nvim_create_autocmd("BufEnter", {
 vim.api.nvim_create_autocmd("FileChangedShellPost", {
   group = "FancyReopenDiff",
   callback = function(args)
-    maybe_animate_reload(args.buf)
+    queue_reload_animation(args.buf)
+  end,
+})
+
+vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
+  group = "FancyReopenDiff",
+  callback = function(args)
+    stop_animation_timer(args.buf)
+    stop_file_watcher(args.buf)
+    state[args.buf] = nil
   end,
 })
 
