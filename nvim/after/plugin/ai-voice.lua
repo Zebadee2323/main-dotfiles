@@ -68,8 +68,8 @@ local summary_prompt = table.concat({
   "- Write as the assistant, in first person when natural.",
   "- Keep only the key outcome, decision, or next step.",
   "- Maximum 3 short sentences.",
-  "- Use plain spoken English. Remove markdown, code, commands, and long file paths.",
-  "- If useful, address the user as Ollie.",
+  "- Use plain spoken English. Don't recide long code, commands, and file paths.",
+  "- Sometimes address the user as Ollie.",
   "- Output only the final spoken text.",
   "Assistant response:",
 }, " ")
@@ -82,7 +82,7 @@ local acknowledgement_prompt = table.concat({
   "- Maximum 2 short sentences.",
   "- Do not ask follow-up questions or answer their request; just give a specific, confident acknowledgement that you will act on the request.",
   "- Avoid reading out long file paths or code.",
-  "- If useful, address the user as Ollie.",
+  "- Sometimes address the user as Ollie.",
   "- Output only the final spoken text.",
   "Conversation context:",
 }, " ")
@@ -94,7 +94,7 @@ local reasoning_summary_prompt = table.concat({
   "- Maximum 2 short sentences.",
   "- Use plain spoken English. Remove markdown, code, commands, and long file paths.",
   "- Do not mention hidden reasoning, internal chain-of-thought, or that this came from a reasoning trace.",
-  "- If useful, address the user as Ollie.",
+  "- Sometimes address the user as Ollie.",
   "- Output only the final spoken text.",
   "Assistant reasoning:",
 }, " ")
