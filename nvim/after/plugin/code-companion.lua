@@ -127,6 +127,68 @@ local function get_repo_relative_path()
   return bufname
 end
 
+local function resolve_acp_model_id(connection, desired_model)
+  if not connection or type(desired_model) ~= "string" or desired_model == "" then
+    return nil
+  end
+
+  local models = connection.get_models and connection:get_models() or nil
+  if not models then
+    return nil
+  end
+
+  for _, model in ipairs(models.availableModels or {}) do
+    if model.modelId == desired_model then
+      return model.modelId
+    end
+  end
+
+  local desired_model_lower = desired_model:lower()
+
+  for _, model in ipairs(models.availableModels or {}) do
+    if model.modelId and model.modelId:lower():find(desired_model_lower, 1, true) then
+      return model.modelId
+    end
+  end
+
+  return nil
+end
+
+local function apply_default_acp_chat_model(chat, chat_helpers)
+  if chat.adapter.type ~= "acp" then
+    return
+  end
+
+  chat.adapter.defaults = chat.adapter.defaults or {}
+  chat.adapter.defaults.model = ai_chat_model
+
+  if not chat.acp_connection then
+    chat_helpers.create_acp_connection(chat)
+  end
+
+  local connection = chat.acp_connection
+  if not connection then
+    return
+  end
+
+  local model_id = resolve_acp_model_id(connection, ai_chat_model)
+  if not model_id then
+    vim.schedule(function()
+      vim.notify(string.format("OpenCode model `%s` is unavailable for this session", ai_chat_model), vim.log.levels.WARN)
+    end)
+    chat:update_metadata()
+    return
+  end
+
+  local models = connection.get_models and connection:get_models() or nil
+  if models and models.currentModelId == model_id then
+    chat:update_metadata()
+    return
+  end
+
+  chat:change_model({ model = model_id })
+end
+
 local function build_default_ai_chat_opts(opts)
   local chat_helpers = require("codecompanion.interactions.chat.helpers")
   local params = {
@@ -143,20 +205,7 @@ local function build_default_ai_chat_opts(opts)
     params = params,
     callbacks = {
       on_created = function(chat)
-        if chat.adapter.type ~= "acp" then
-          return
-        end
-
-        chat.adapter.defaults = chat.adapter.defaults or {}
-        chat.adapter.defaults.model = ai_chat_model
-
-        chat_helpers.create_acp_connection(chat)
-
-        vim.defer_fn(function()
-          if chat.acp_connection then
-            chat:change_model({ model = ai_chat_model })
-          end
-        end, 100)
+        apply_default_acp_chat_model(chat, chat_helpers)
       end,
     },
   }, opts)
@@ -170,16 +219,91 @@ local function open_default_ai_chat()
   return codecompanion.chat(build_default_ai_chat_args())
 end
 
+local function get_acp_session_args(adapter)
+  local config = require("codecompanion.config")
+  local session_args = {
+    cwd = vim.fn.getcwd(),
+    mcpServers = adapter.defaults and adapter.defaults.mcpServers,
+  }
+
+  if session_args.mcpServers == "inherit_from_config" and config.mcp.opts.acp_enabled then
+    session_args.mcpServers = require("codecompanion.mcp").transform_to_acp()
+  end
+
+  return session_args
+end
+
+local function restore_ai_chat_session(chat, session, opts)
+  opts = opts or {}
+
+  local attempts_remaining = opts.attempts or 40
+  local delay = opts.delay or 100
+  local chat_helpers = require("codecompanion.interactions.chat.helpers")
+  local acp_commands = require("codecompanion.interactions.chat.acp.commands")
+  local acp_methods = require("codecompanion.acp.methods")
+
+  local function try_restore()
+    if not chat or not session or chat.adapter.type ~= "acp" then
+      return
+    end
+
+    if not chat.acp_connection then
+      chat_helpers.create_acp_connection(chat)
+    end
+
+    local connection = chat.acp_connection
+    if not connection or not connection.session_id then
+      attempts_remaining = attempts_remaining - 1
+      if attempts_remaining <= 0 then
+        vim.notify("Timed out waiting for the OpenCode session to initialize", vim.log.levels.ERROR)
+        return
+      end
+
+      vim.defer_fn(try_restore, delay)
+      return
+    end
+
+    local ok, result = pcall(connection.send_rpc_request, connection, acp_methods.SESSION_LOAD, vim.tbl_extend(
+      "force",
+      get_acp_session_args(chat.adapter),
+      { sessionId = session.id }
+    ))
+
+    if not ok or result == nil then
+      vim.notify(string.format("Failed to restore OpenCode session %s", session.id), vim.log.levels.ERROR)
+      return
+    end
+
+    connection.session_id = session.id
+    chat.acp_session_id = session.id
+
+    if type(result) == "table" then
+      if result.models then
+        connection._models = result.models
+      end
+      if result.modes then
+        connection._modes = result.modes
+      end
+    end
+
+    acp_commands.link_buffer_to_session(chat.bufnr, session.id)
+    apply_default_acp_chat_model(chat, chat_helpers)
+    chat:set_title(string.format("[CodeCompanion] %s", session.title))
+    chat:update_metadata()
+
+    vim.notify(string.format("Restored OpenCode session %s", session.id), vim.log.levels.INFO)
+  end
+
+  try_restore()
+end
+
 local function open_default_ai_chat_session(session)
   local chat = require("codecompanion.interactions.chat").new(vim.tbl_deep_extend("force", build_default_ai_chat_args(), {
-    acp_session_id = session.id,
     title = string.format("[CodeCompanion] %s", session.title),
   }))
 
-  if chat and chat.ui then
-    vim.schedule(function()
-      vim.notify(string.format("Restored OpenCode session %s", session.id), vim.log.levels.INFO)
-    end)
+  if chat then
+    restore_ai_chat_session(chat, session)
   end
 
   return chat
