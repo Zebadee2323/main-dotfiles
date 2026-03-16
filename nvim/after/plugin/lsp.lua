@@ -1,5 +1,36 @@
 local lsp_zero = require('lsp-zero')
 local blink_caps = require('blink.cmp').get_lsp_capabilities()
+local default_references_handler = vim.lsp.handlers['textDocument/references']
+
+vim.lsp.handlers['textDocument/references'] = function(err, result, ctx, config)
+    local ok, response = pcall(default_references_handler, err, result, ctx, config)
+    if ok then
+        return response
+    end
+
+    if type(result) ~= 'table' then
+        error(response)
+    end
+
+    local filtered = vim.tbl_filter(function(item)
+        return type(item) ~= 'table'
+            or type(item.uri) ~= 'string'
+            or not vim.startswith(item.uri, 'roslyn-source-generated://')
+    end, result)
+
+    if #filtered == #result then
+        error(response)
+    end
+
+    vim.schedule(function()
+        vim.notify(
+            'Skipped source-generated Roslyn references that could not be loaded',
+            vim.log.levels.WARN
+        )
+    end)
+
+    return default_references_handler(err, filtered, ctx, config)
+end
 
 lsp_zero.set_server_config({
     capabilities = blink_caps,

@@ -3,6 +3,40 @@ local codecompanion = require("codecompanion")
 local ai_chat_adapter = "opencode"
 local ai_chat_model = "openai/gpt-5.4/medium"
 
+do
+  local ACPHandler = require("codecompanion.interactions.chat.acp.handler")
+
+  if not ACPHandler._user_supports_acp_session_restore then
+    local original_ensure_connection = ACPHandler.ensure_connection
+
+    ACPHandler.ensure_connection = function(self)
+      if not self.chat.acp_connection and self.chat.acp_session_id then
+        self.chat.acp_connection = require("codecompanion.acp").new({
+          adapter = self.chat.adapter,
+          session_id = self.chat.acp_session_id,
+        })
+
+        local connected = self.chat.acp_connection:connect_and_initialize()
+        if not connected then
+          return false
+        end
+
+        if self.chat.acp_connection.session_id then
+          local acp_commands = require("codecompanion.interactions.chat.acp.commands")
+          acp_commands.link_buffer_to_session(self.chat.bufnr, self.chat.acp_connection.session_id)
+        end
+
+        self.chat:update_metadata()
+        return true
+      end
+
+      return original_ensure_connection(self)
+    end
+
+    ACPHandler._user_supports_acp_session_restore = true
+  end
+end
+
 local function is_acp_adapter(name)
   local ok, config = pcall(require, "codecompanion.config")
 
@@ -128,8 +162,27 @@ local function build_default_ai_chat_opts(opts)
   }, opts)
 end
 
+local function build_default_ai_chat_args(opts)
+  return build_default_ai_chat_opts(opts or {})
+end
+
 local function open_default_ai_chat()
-  return codecompanion.chat(build_default_ai_chat_opts())
+  return codecompanion.chat(build_default_ai_chat_args())
+end
+
+local function open_default_ai_chat_session(session)
+  local chat = require("codecompanion.interactions.chat").new(vim.tbl_deep_extend("force", build_default_ai_chat_args(), {
+    acp_session_id = session.id,
+    title = string.format("[CodeCompanion] %s", session.title),
+  }))
+
+  if chat and chat.ui then
+    vim.schedule(function()
+      vim.notify(string.format("Restored OpenCode session %s", session.id), vim.log.levels.INFO)
+    end)
+  end
+
+  return chat
 end
 
 local function toggle_default_ai_chat()
@@ -229,6 +282,56 @@ local function send_to_codecompanion(opts)
   end
 end
 
+local function list_opencode_sessions()
+  local lines = vim.fn.systemlist("opencode session list")
+  if vim.v.shell_error ~= 0 then
+    vim.notify("Failed to list OpenCode sessions", vim.log.levels.ERROR)
+    return {}
+  end
+
+  local sessions = {}
+  for _, line in ipairs(lines) do
+    if line:match("^ses_") then
+      local id, rest = line:match("^(ses_%S+)%s+(.+)$")
+      if id and rest then
+        local title, updated = rest:match("^(.-)%s%s+([^%s].-)%s*$")
+        table.insert(sessions, {
+          id = id,
+          title = vim.trim(title or rest),
+          updated = vim.trim(updated or ""),
+        })
+      end
+    end
+  end
+
+  return sessions
+end
+
+local function restore_opencode_session()
+  local sessions = list_opencode_sessions()
+  if vim.tbl_isempty(sessions) then
+    vim.notify("No OpenCode sessions found", vim.log.levels.WARN)
+    return
+  end
+
+  vim.ui.select(sessions, {
+    prompt = "Restore OpenCode session",
+    format_item = function(item)
+      if item.updated ~= "" then
+        return string.format("%s [%s]", item.title, item.updated)
+      end
+
+      return item.title
+    end,
+  }, function(choice)
+    if not choice then
+      return
+    end
+
+    open_default_ai_chat_session(choice)
+  end)
+end
+
 setup_external_file_autoreload()
 
 codecompanion.setup({
@@ -294,4 +397,10 @@ end, {
   nargs = "*",
   range = true,
   desc = "Append file line or range to CodeCompanion input",
+})
+
+create_or_replace_user_command("AIRestore", function()
+  restore_opencode_session()
+end, {
+  desc = "List and restore an OpenCode session in CodeCompanion",
 })
