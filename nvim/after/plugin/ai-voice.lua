@@ -1,6 +1,6 @@
 local voice_name = "cori-high"
 local voices_dir = vim.fn.expand("~/.config/dotfiles/nvim/after/ai_voices")
-local summary_model_name = "openai/gpt-5.4/low"
+local summary_model_name = "openai/gpt-5.2/low"
 local piper_length_scale = 1.0
 local piper_noise_scale = 0.2
 local piper_noise_w = 0.2
