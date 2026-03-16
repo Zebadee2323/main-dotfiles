@@ -10,6 +10,7 @@ local animation_start_delay_ms = 300
 local animation_step_ms = 70
 local reload_settle_delay_ms = 30
 local reload_retry_count = 6
+local watcher_checktime_debounce_ms = 120
 
 vim.o.autoread = true
 
@@ -49,6 +50,10 @@ local function is_normal_file_buffer(bufnr)
   return vim.api.nvim_buf_is_valid(bufnr)
     and vim.bo[bufnr].buftype == ""
     and vim.api.nvim_buf_get_name(bufnr) ~= ""
+end
+
+local function is_buffer_visible(bufnr)
+  return is_normal_file_buffer(bufnr) and #vim.fn.win_findbuf(bufnr) > 0
 end
 
 local function file_stat(path)
@@ -103,8 +108,31 @@ local function stop_file_watcher(bufnr)
   pcall(watcher.close, watcher)
 end
 
+local function schedule_checktime(bufnr, delay_ms)
+  if not is_normal_file_buffer(bufnr) or vim.bo[bufnr].modified then
+    return
+  end
+
+  state[bufnr] = state[bufnr] or {}
+  state[bufnr].checktime_request_id = (state[bufnr].checktime_request_id or 0) + 1
+
+  local request_id = state[bufnr].checktime_request_id
+  vim.defer_fn(function()
+    local buffer_state = state[bufnr]
+    if not buffer_state or buffer_state.checktime_request_id ~= request_id then
+      return
+    end
+
+    if not is_normal_file_buffer(bufnr) or vim.bo[bufnr].modified then
+      return
+    end
+
+    vim.cmd(string.format("silent! checktime %d", bufnr))
+  end, delay_ms or 0)
+end
+
 local function ensure_file_watcher(bufnr)
-  if not is_normal_file_buffer(bufnr) then
+  if not is_buffer_visible(bufnr) then
     stop_file_watcher(bufnr)
     return
   end
@@ -135,7 +163,8 @@ local function ensure_file_watcher(bufnr)
     end
 
     vim.schedule(function()
-      if not is_normal_file_buffer(bufnr) or vim.bo[bufnr].modified then
+      if not is_buffer_visible(bufnr) then
+        stop_file_watcher(bufnr)
         return
       end
 
@@ -144,7 +173,7 @@ local function ensure_file_watcher(bufnr)
         return
       end
 
-      vim.cmd(string.format("silent! checktime %d", bufnr))
+      schedule_checktime(bufnr, watcher_checktime_debounce_ms)
     end)
   end)
 
@@ -272,9 +301,10 @@ local function render_deleted_hunks(bufnr, before_lines, hunks)
     local old_start = hunk[1]
     local old_count = hunk[2]
     local new_start = hunk[3]
+    local new_count = hunk[4]
     local row = math.min(math.max(new_start - 1, 0), last_row)
 
-    if old_count > 0 then
+    if old_count > 0 and new_count == 0 then
       local virt_lines = {}
       local capped = math.min(old_count, 6)
 
@@ -344,7 +374,7 @@ local function changed_line_count(hunks)
   return total
 end
 
-local function should_skip_animation(bufnr, before_lines, after_lines, hunks)
+local function should_skip_animation_for_buffer(bufnr, before_lines, after_lines)
   if math.max(#before_lines, #after_lines) > max_animated_file_lines then
     return true
   end
@@ -360,6 +390,10 @@ local function should_skip_animation(bufnr, before_lines, after_lines, hunks)
     return true
   end
 
+  return false
+end
+
+local function should_skip_animation_for_hunks(hunks)
   return changed_line_count(hunks) > max_animated_changed_lines
 end
 
@@ -441,6 +475,10 @@ play_animation = function(bufnr, before_lines, after_lines)
     return
   end
 
+  if should_skip_animation_for_buffer(bufnr, before_lines, after_lines) then
+    return
+  end
+
   local raw_hunks = vim.diff(joined(before_lines), joined(after_lines), {
     result_type = "indices",
     algorithm = "histogram",
@@ -459,7 +497,7 @@ play_animation = function(bufnr, before_lines, after_lines)
     return
   end
 
-  if should_skip_animation(bufnr, before_lines, after_lines, hunks) then
+  if should_skip_animation_for_hunks(hunks) then
     return
   end
 
@@ -689,11 +727,27 @@ vim.api.nvim_create_autocmd("BufEnter", {
 
     local buffer_state = state[args.buf]
     local current_name = vim.api.nvim_buf_get_name(args.buf)
+    local current_stat = file_stat(current_name)
 
     if not buffer_state or not buffer_state.snapshot_lines or buffer_state.snapshot_name ~= current_name then
       remember_snapshot(args.buf)
     else
       ensure_file_watcher(args.buf)
+
+      if not vim.bo[args.buf].modified and buffer_state.snapshot_stat and current_stat
+        and not same_file_stat(buffer_state.snapshot_stat, current_stat)
+      then
+        schedule_checktime(args.buf, 0)
+      end
+    end
+  end,
+})
+
+vim.api.nvim_create_autocmd({ "BufHidden", "BufLeave" }, {
+  group = "FancyReopenDiff",
+  callback = function(args)
+    if not is_buffer_visible(args.buf) then
+      stop_file_watcher(args.buf)
     end
   end,
 })

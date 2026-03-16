@@ -80,7 +80,7 @@ local acknowledgement_prompt = table.concat({
   "- Read the latest user request and extract the users intent.",
   "- If a previous assistant response is provided, use it only as supporting context.",
   --"- Sound casual and clear.",
-  "- Maximum 2 short sentences.",
+  "- Maximum 1 short sentence.",
   "- Do not ask follow-up questions or answer their request; just give a specific, confident acknowledgement that you will act on the request.",
   "- Avoid reading out long file paths or code.",
   "- Sometimes address the user as Ollie.",
