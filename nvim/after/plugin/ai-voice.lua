@@ -70,6 +70,7 @@ local summary_prompt = table.concat({
   "- Maximum 3 short sentences.",
   "- Use plain spoken English. Don't recide long code, commands, and file paths.",
   "- Sometimes address the user as Ollie.",
+  "- Sometimes be humorous or use lighthearted language if it fits the context, but don't force it.",
   "- Output only the final spoken text.",
   "Assistant response:",
 }, " ")
@@ -83,6 +84,7 @@ local acknowledgement_prompt = table.concat({
   "- Do not ask follow-up questions or answer their request; just give a specific, confident acknowledgement that you will act on the request.",
   "- Avoid reading out long file paths or code.",
   "- Sometimes address the user as Ollie.",
+  "- Sometimes be humorous or use lighthearted language if it fits the context, but don't force it.",
   "- Output only the final spoken text.",
   "Conversation context:",
 }, " ")
