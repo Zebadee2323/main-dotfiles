@@ -44,17 +44,21 @@ local current_play_job = nil
 local current_wav_path = nil
 local current_summary_chat = nil
 local current_summary_chat_key = nil
+local current_reasoning_summary_chat = nil
+local current_reasoning_summary_chat_key = nil
 local current_acknowledgement_chat = nil
 local current_acknowledgement_chat_key = nil
 local speech_request_id = 0
 local speech_queue = {}
 local pending_acknowledgement_request_id = nil
 local pending_summary_request_id = nil
-local pending_summary_message = nil
+local pending_summary_messages = {}
 local ai_voice_codecompanion_enabled = true
+local ai_voice_reasoning_voice_enabled = vim.g.ai_voice_reasoning_voice_enabled == true
 local ai_voice_speak
 local queue_ai_voice_speak
 local get_latest_assistant_response
+local reasoning_callbacks_patched = false
 local ai_voice_hook_generation = (vim.g.ai_voice_hook_generation or 0) + 1
 local cc_group = vim.api.nvim_create_augroup("CodeCompanionHooks", { clear = true })
 vim.g.ai_voice_hook_generation = ai_voice_hook_generation
@@ -81,6 +85,18 @@ local acknowledgement_prompt = table.concat({
   "- If useful, address the user as Ollie.",
   "- Output only the final spoken text.",
   "Conversation context:",
+}, " ")
+local reasoning_summary_prompt = table.concat({
+  "Task: rewrite the assistant reasoning as a short spoken progress update for Text-to-speech.",
+  "Rules:",
+  "- Summarize only the high-level approach, checks, or decisions.",
+  "- Do not quote the full reasoning verbatim.",
+  "- Maximum 2 short sentences.",
+  "- Use plain spoken English. Remove markdown, code, commands, and long file paths.",
+  "- Do not mention hidden reasoning, internal chain-of-thought, or that this came from a reasoning trace.",
+  "- If useful, address the user as Ollie.",
+  "- Output only the final spoken text.",
+  "Assistant reasoning:",
 }, " ")
 local ai_voice_test_paragraph = (function()
   local text = [[
@@ -194,6 +210,16 @@ local function close_summary_chat()
   end
 end
 
+local function close_reasoning_summary_chat()
+  if current_reasoning_summary_chat then
+    local reasoning_chat = current_reasoning_summary_chat
+    current_reasoning_summary_chat = nil
+    current_reasoning_summary_chat_key = nil
+
+    cancel_hidden_chat(reasoning_chat)
+  end
+end
+
 local function acknowledgement_chat_key(params, model_name)
   params = params or {}
 
@@ -209,6 +235,11 @@ local function cancel_summary_chat()
   if current_summary_chat then
     stop_hidden_chat(current_summary_chat)
     reset_hidden_chat(current_summary_chat)
+  end
+
+  if current_reasoning_summary_chat then
+    stop_hidden_chat(current_reasoning_summary_chat)
+    reset_hidden_chat(current_reasoning_summary_chat)
   end
 end
 
@@ -251,7 +282,7 @@ local function prepare_speech_request(opts)
 
   pending_acknowledgement_request_id = nil
   pending_summary_request_id = nil
-  pending_summary_message = nil
+  pending_summary_messages = {}
 
   stop_audio_jobs()
 
@@ -500,6 +531,38 @@ local function strip_markdown(text)
   return vim.trim(cleaned)
 end
 
+local function normalize_message_text(content)
+  if type(content) == "table" then
+    content = table.concat(vim.tbl_map(function(part)
+      if type(part) == "string" then
+        return part
+      end
+
+      if type(part) == "table" and type(part.text) == "string" then
+        return part.text
+      end
+
+      return ""
+    end, content), "\n")
+  end
+
+  if type(content) ~= "string" then
+    return nil
+  end
+
+  content = vim.trim(content)
+  if content == "" then
+    return nil
+  end
+
+  local cleaned = strip_markdown(content)
+  if cleaned == "" then
+    return nil
+  end
+
+  return cleaned
+end
+
 get_latest_assistant_response = function(chat)
   local codecompanion_config = require("codecompanion.config")
   local llm_role = codecompanion_config.constants.LLM_ROLE
@@ -508,35 +571,108 @@ get_latest_assistant_response = function(chat)
     local message = chat.messages[i]
 
     if message.role == llm_role then
-      local content = message.content
-
-      if type(content) == "table" then
-        content = table.concat(vim.tbl_map(function(part)
-          if type(part) == "string" then
-            return part
-          end
-
-          if type(part) == "table" and type(part.text) == "string" then
-            return part.text
-          end
-
-          return ""
-        end, content), "\n")
-      end
-
-      if type(content) == "string" then
-        content = vim.trim(content)
-
-        if content ~= "" and not (message.tools and message.tools.calls) then
-          local cleaned = strip_markdown(content)
-
-          if cleaned ~= "" then
-            return cleaned
-          end
+      if not (message.tools and message.tools.calls) then
+        local cleaned = normalize_message_text(message.content)
+        if cleaned then
+          return cleaned
         end
       end
     end
   end
+end
+
+local function get_latest_assistant_reasoning(chat)
+  local codecompanion_config = require("codecompanion.config")
+  local llm_role = codecompanion_config.constants.LLM_ROLE
+
+  for i = #chat.messages, 1, -1 do
+    local message = chat.messages[i]
+
+    if message.role == llm_role and message.reasoning then
+      local cleaned = normalize_message_text(message.reasoning)
+      if cleaned then
+        return cleaned
+      end
+    end
+  end
+end
+
+local function patch_codecompanion_reasoning_callbacks()
+  if reasoning_callbacks_patched then
+    return
+  end
+
+  local ok, acp_handler = pcall(require, "codecompanion.interactions.chat.acp.handler")
+  if not ok then
+    return
+  end
+
+  if acp_handler._ai_voice_reasoning_patched then
+    reasoning_callbacks_patched = true
+    return
+  end
+
+  local function emit_reasoning_turn(handler, kind)
+    if not (handler and handler.chat and handler.reasoning) then
+      return
+    end
+
+    local start_idx = (handler._ai_voice_reasoning_emit_index or 0) + 1
+    if start_idx > #handler.reasoning then
+      return
+    end
+
+    local parts = {}
+    for i = start_idx, #handler.reasoning do
+      parts[#parts + 1] = handler.reasoning[i]
+    end
+
+    handler._ai_voice_reasoning_emit_index = #handler.reasoning
+
+    local reasoning = normalize_message_text(table.concat(parts, ""))
+    if not reasoning then
+      return
+    end
+
+    handler.chat:dispatch("on_reasoning_turn_completed", {
+      kind = kind,
+      reasoning = reasoning,
+    })
+  end
+
+  local original_new = acp_handler.new
+  acp_handler.new = function(chat)
+    local handler = original_new(chat)
+    handler._ai_voice_reasoning_emit_index = 0
+    return handler
+  end
+
+  local original_handle_tool_call = acp_handler.handle_tool_call
+  acp_handler.handle_tool_call = function(self, tool_call)
+    local result = original_handle_tool_call(self, tool_call)
+    if tool_call and tool_call.status == "completed" then
+      emit_reasoning_turn(self, "tool_completed")
+    end
+    return result
+  end
+
+  local original_handle_tool_update = acp_handler.handle_tool_update
+  acp_handler.handle_tool_update = function(self, tool_call)
+    local result = original_handle_tool_update(self, tool_call)
+    if tool_call and tool_call.status == "completed" then
+      emit_reasoning_turn(self, "tool_completed")
+    end
+    return result
+  end
+
+  local original_handle_completion = acp_handler.handle_completion
+  acp_handler.handle_completion = function(self, stop_reason)
+    emit_reasoning_turn(self, "completion")
+    return original_handle_completion(self, stop_reason)
+  end
+
+  acp_handler._ai_voice_reasoning_patched = true
+  reasoning_callbacks_patched = true
 end
 
 local function get_latest_user_request(chat)
@@ -591,13 +727,15 @@ local function build_acknowledgement_input(request, previous_response)
 end
 
 local function flush_pending_summary_for_request(request_id)
-  if pending_summary_request_id == request_id and pending_summary_message then
-    local queued_summary = pending_summary_message
+  if pending_summary_request_id == request_id and #pending_summary_messages > 0 then
+    local queued_summaries = vim.deepcopy(pending_summary_messages)
     pending_summary_request_id = nil
-    pending_summary_message = nil
+    pending_summary_messages = {}
 
     vim.schedule(function()
-      queue_ai_voice_speak(queued_summary, { keep_summary = true, request_id = request_id })
+      for _, queued_summary in ipairs(queued_summaries) do
+        queue_ai_voice_speak(queued_summary, { keep_summary = true, request_id = request_id })
+      end
     end)
   end
 end
@@ -644,11 +782,7 @@ local function create_acknowledgement_chat(summary_params, summary_model_name)
         vim.schedule(function()
           queue_ai_voice_speak(acknowledgement, { keep_summary = true, request_id = request_id })
 
-          if pending_summary_request_id == request_id and pending_summary_message then
-            queue_ai_voice_speak(pending_summary_message, { keep_summary = true, request_id = request_id })
-            pending_summary_request_id = nil
-            pending_summary_message = nil
-          end
+          flush_pending_summary_for_request(request_id)
         end)
 
         if ack_chat._ai_voice_reusable then
@@ -787,6 +921,74 @@ local function create_summary_chat(summary_params, summary_model_name)
   })
 end
 
+local function create_reasoning_summary_chat(summary_params, summary_model_name)
+  local codecompanion = require("codecompanion")
+  local chat_helpers = require("codecompanion.interactions.chat.helpers")
+
+  return codecompanion.chat({
+    auto_submit = false,
+    hidden = true,
+    mcp_servers = "none",
+    tools = "none",
+    params = summary_params,
+    messages = {},
+    callbacks = {
+      on_created = function(reasoning_chat)
+        if reasoning_chat.adapter.type == "acp" then
+          if summary_model_name then
+            reasoning_chat.adapter.defaults = reasoning_chat.adapter.defaults or {}
+            reasoning_chat.adapter.defaults.model = summary_model_name
+          end
+
+          chat_helpers.create_acp_connection(reasoning_chat)
+
+          if summary_model_name and reasoning_chat.acp_connection then
+            reasoning_chat:change_model({ model = summary_model_name })
+          end
+        end
+      end,
+      on_completed = function(reasoning_chat)
+        local request_id = reasoning_chat._ai_voice_request_id
+        local source_reasoning = reasoning_chat._ai_voice_source_text
+
+        if speech_request_id ~= request_id then
+          reset_hidden_chat(reasoning_chat)
+          return
+        end
+
+        local summary = get_latest_assistant_response(reasoning_chat)
+        local spoken_summary = summary and summary ~= "" and summary or source_reasoning
+
+        if pending_acknowledgement_request_id == request_id then
+          pending_summary_request_id = request_id
+          table.insert(pending_summary_messages, spoken_summary)
+        else
+          vim.schedule(function()
+            queue_ai_voice_speak(spoken_summary, { keep_summary = true, request_id = request_id })
+          end)
+        end
+
+        if reasoning_chat._ai_voice_reusable then
+          reset_hidden_chat(reasoning_chat)
+        elseif current_reasoning_summary_chat == reasoning_chat then
+          close_reasoning_summary_chat()
+        else
+          cancel_hidden_chat(reasoning_chat)
+        end
+      end,
+      on_cancelled = function(reasoning_chat)
+        if reasoning_chat._ai_voice_reusable then
+          reset_hidden_chat(reasoning_chat)
+        elseif current_reasoning_summary_chat == reasoning_chat then
+          close_reasoning_summary_chat()
+        else
+          cancel_hidden_chat(reasoning_chat)
+        end
+      end,
+    },
+  })
+end
+
 local function get_or_create_summary_chat(summary_params, summary_model_name)
   local can_reuse = hidden_chat_supports_reuse(summary_params)
 
@@ -824,6 +1026,45 @@ local function get_or_create_summary_chat(summary_params, summary_model_name)
   summary_chat._ai_voice_reusable = true
 
   return summary_chat
+end
+
+local function get_or_create_reasoning_summary_chat(summary_params, summary_model_name)
+  local can_reuse = hidden_chat_supports_reuse(summary_params)
+
+  if not can_reuse then
+    close_reasoning_summary_chat()
+    local reasoning_chat = create_reasoning_summary_chat(summary_params, summary_model_name)
+    if reasoning_chat then
+      reasoning_chat._ai_voice_reusable = false
+      current_reasoning_summary_chat = reasoning_chat
+      current_reasoning_summary_chat_key = nil
+    end
+    return reasoning_chat
+  end
+
+  local key = acknowledgement_chat_key(summary_params, summary_model_name)
+
+  if current_reasoning_summary_chat then
+    local invalid = not vim.api.nvim_buf_is_valid(current_reasoning_summary_chat.bufnr)
+    if invalid or current_reasoning_summary_chat_key ~= key then
+      close_reasoning_summary_chat()
+    end
+  end
+
+  if current_reasoning_summary_chat then
+    return current_reasoning_summary_chat
+  end
+
+  local reasoning_chat = create_reasoning_summary_chat(summary_params, summary_model_name)
+  if not reasoning_chat then
+    return nil
+  end
+
+  current_reasoning_summary_chat = reasoning_chat
+  current_reasoning_summary_chat_key = key
+  reasoning_chat._ai_voice_reusable = true
+
+  return reasoning_chat
 end
 
 local function get_target_chat()
@@ -977,6 +1218,33 @@ local function summarize_and_speak_response(chat, response, request_id)
   summary_chat:submit()
 end
 
+local function summarize_and_speak_reasoning(chat, reasoning, request_id)
+  local summary_params = build_summary_chat_params(chat)
+  local summary_model_name = get_summary_model_name() or get_chat_model(chat)
+  local reasoning_chat = get_or_create_reasoning_summary_chat(summary_params, summary_model_name)
+
+  if not reasoning_chat then
+    vim.notify("AI voice reasoning summary failed: could not create summary chat", vim.log.levels.ERROR)
+    return
+  end
+
+  reset_hidden_chat(reasoning_chat)
+
+  reasoning_chat._ai_voice_request_id = request_id
+  reasoning_chat._ai_voice_source_text = reasoning
+  reasoning_chat.messages = {
+    {
+      role = "user",
+      content = reasoning_summary_prompt .. "\n\n" .. reasoning,
+    },
+  }
+
+  reasoning_chat.ui:render(reasoning_chat.buffer_context, reasoning_chat.messages, {
+    stop_context_insertion = true,
+  })
+  reasoning_chat:submit()
+end
+
 local function acknowledge_and_speak_request(chat, request, request_id)
   local summary_params = build_summary_chat_params(chat)
   local summary_model_name = get_summary_model_name() or get_chat_model(chat)
@@ -1048,6 +1316,18 @@ local function toggle_ai_voice_codecompanion()
   set_ai_voice_codecompanion_enabled(not ai_voice_codecompanion_enabled)
 end
 
+local function set_ai_voice_reasoning_voice_enabled(enabled)
+  ai_voice_reasoning_voice_enabled = enabled
+  vim.notify(
+    "AI voice reasoning summaries are now " .. (enabled and "enabled" or "disabled"),
+    vim.log.levels.INFO
+  )
+end
+
+local function toggle_ai_voice_reasoning_voice()
+  set_ai_voice_reasoning_voice_enabled(not ai_voice_reasoning_voice_enabled)
+end
+
 local function create_or_replace_user_command(name, fn, opts)
   pcall(vim.api.nvim_del_user_command, name)
   vim.api.nvim_create_user_command(name, fn, opts)
@@ -1078,10 +1358,38 @@ local function attach_ai_voice_to_chat(bufnr, chat)
     end
 
     local response = get_latest_assistant_response(current_chat)
+    local request_id = speech_request_id
+
+    if ai_voice_reasoning_voice_enabled then
+      local reasoning = get_latest_assistant_reasoning(current_chat)
+
+      if reasoning and current_chat._ai_voice_reasoning_spoken_request_id ~= request_id then
+        summarize_and_speak_reasoning(current_chat, reasoning, request_id)
+      end
+    end
 
     if response then
-      summarize_and_speak_response(current_chat, response, speech_request_id)
+      summarize_and_speak_response(current_chat, response, request_id)
     end
+  end)
+
+  chat:add_callback("on_reasoning_turn_completed", function(current_chat, args)
+    if current_chat._ai_voice_hook_generation ~= callback_generation then
+      return
+    end
+
+    if not ai_voice_codecompanion_enabled or not ai_voice_reasoning_voice_enabled then
+      return
+    end
+
+    local reasoning = args and args.reasoning
+    if not reasoning then
+      return
+    end
+
+    local request_id = speech_request_id
+    current_chat._ai_voice_reasoning_spoken_request_id = request_id
+    summarize_and_speak_reasoning(current_chat, reasoning, request_id)
   end)
 
   chat:add_callback("on_submitted", function(current_chat)
@@ -1126,6 +1434,8 @@ local function attach_codecompanion_voice_hook()
   if not ok then
     return
   end
+
+  patch_codecompanion_reasoning_callbacks()
 
   vim.api.nvim_create_autocmd({ "User" }, {
     pattern = "CodeCompanionChatCreated",
@@ -1244,6 +1554,24 @@ create_or_replace_user_command("AIToggleVoiceRobot", function()
   toggle_ai_voice_robot_mode()
 end, {
   desc = "Toggle robot mode for AI voice playback",
+})
+
+create_or_replace_user_command("AIToggleVoiceReasoning", function()
+  toggle_ai_voice_reasoning_voice()
+end, {
+  desc = "Toggle AI voice summaries for CodeCompanion reasoning",
+})
+
+create_or_replace_user_command("AIEnableVoiceReasoning", function()
+  set_ai_voice_reasoning_voice_enabled(true)
+end, {
+  desc = "Enable AI voice summaries for CodeCompanion reasoning",
+})
+
+create_or_replace_user_command("AIDisableVoiceReasoning", function()
+  set_ai_voice_reasoning_voice_enabled(false)
+end, {
+  desc = "Disable AI voice summaries for CodeCompanion reasoning",
 })
 
 create_or_replace_user_command("AIEnableVoiceRobot", function()

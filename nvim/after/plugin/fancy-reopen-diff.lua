@@ -310,24 +310,22 @@ local function render_segment_row(bufnr, segment, row, is_core)
   })
 end
 
-local function render_change_frame(bufnr, segments, distance)
+local function segment_row_distance(segment, row)
+  if row >= segment.center_low and row <= segment.center_high then
+    return 0
+  end
+
+  return math.min(math.abs(row - segment.center_low), math.abs(row - segment.center_high))
+end
+
+local function render_change_frame(bufnr, segments, cleared_distance)
   vim.api.nvim_buf_clear_namespace(bufnr, add_namespace, 0, -1)
 
   for _, segment in ipairs(segments) do
-    if distance == 0 then
-      for row = segment.center_low, segment.center_high do
-        render_segment_row(bufnr, segment, row, true)
-      end
-    else
-      local upper = segment.center_low - distance
-      local lower = segment.center_high + distance
-
-      if upper >= segment.start_row then
-        render_segment_row(bufnr, segment, upper, false)
-      end
-
-      if lower <= segment.end_row and lower ~= upper then
-        render_segment_row(bufnr, segment, lower, false)
+    for row = segment.start_row, segment.end_row do
+      local distance = segment_row_distance(segment, row)
+      if distance > cleared_distance then
+        render_segment_row(bufnr, segment, row, distance == 0)
       end
     end
   end
@@ -396,7 +394,7 @@ play_animation = function(bufnr, before_lines, after_lines)
   local target_line = largest_hunk_target(hunks)
   local restore_modifiable = vim.bo[bufnr].modifiable
   local max_distance = 0
-  local distance = 0
+  local distance = -1
 
   state[bufnr] = state[bufnr] or {}
   state[bufnr].restore_modifiable = restore_modifiable
