@@ -3,14 +3,22 @@ local delete_namespace = vim.api.nvim_create_namespace("fancy_reopen_diff_delete
 local state = {}
 local uv = vim.uv or vim.loop
 local play_animation
+local max_animated_file_lines = 5000
+local max_animated_file_bytes = 512 * 1024
+local max_animated_changed_lines = 200
+local animation_start_delay_ms = 300
+local animation_step_ms = 70
 
 local function set_highlights()
   vim.api.nvim_set_hl(0, "FancyReopenDiffAddCore", { bg = "#2f8f63", bold = true })
   vim.api.nvim_set_hl(0, "FancyReopenDiffAddTrail", { bg = "#194532" })
+  vim.api.nvim_set_hl(0, "FancyReopenDiffChangeCore", { bg = "#b58900", bold = true })
+  vim.api.nvim_set_hl(0, "FancyReopenDiffChangeTrail", { bg = "#5c4b16" })
   vim.api.nvim_set_hl(0, "FancyReopenDiffDelete", { bg = "#4a1f24", fg = "#ffb8c0" })
   vim.api.nvim_set_hl(0, "FancyReopenDiffDeleteInline", { bg = "#4a1f24", fg = "#ffb8c0" })
   vim.api.nvim_set_hl(0, "FancyReopenDiffDeletePrefix", { fg = "#ff6b7d", bold = true })
   vim.api.nvim_set_hl(0, "FancyReopenDiffAddSign", { fg = "#63d297" })
+  vim.api.nvim_set_hl(0, "FancyReopenDiffChangeSign", { fg = "#ffd75f" })
 end
 
 set_highlights()
@@ -62,6 +70,19 @@ local function clear_animation(bufnr)
     vim.api.nvim_buf_clear_namespace(bufnr, add_namespace, 0, -1)
     vim.api.nvim_buf_clear_namespace(bufnr, delete_namespace, 0, -1)
   end
+end
+
+local function stop_animation_timer(bufnr)
+  local buffer_state = state[bufnr]
+  if not (buffer_state and buffer_state.timer) then
+    return
+  end
+
+  local timer = buffer_state.timer
+  buffer_state.timer = nil
+
+  pcall(timer.stop, timer)
+  pcall(timer.close, timer)
 end
 
 local function remember_snapshot(bufnr)
@@ -207,11 +228,12 @@ local function render_deleted_hunks(bufnr, before_lines, hunks)
   end
 end
 
-local function build_add_segments(bufnr, hunks)
+local function build_change_segments(bufnr, hunks)
   local segments = {}
   local line_count = vim.api.nvim_buf_line_count(bufnr)
 
   for _, hunk in ipairs(hunks) do
+    local old_count = hunk[2]
     local new_start = hunk[3]
     local new_count = hunk[4]
 
@@ -225,6 +247,7 @@ local function build_add_segments(bufnr, hunks)
         local center_high = start_row + math.floor(span / 2)
 
         segments[#segments + 1] = {
+          kind = old_count > 0 and "change" or "add",
           start_row = start_row,
           end_row = end_row,
           center_low = center_low,
@@ -238,34 +261,73 @@ local function build_add_segments(bufnr, hunks)
   return segments
 end
 
-local function render_segment_row(bufnr, row, hl_group)
+local function changed_line_count(hunks)
+  local total = 0
+
+  for _, hunk in ipairs(hunks) do
+    total = total + math.max(hunk[2], hunk[4])
+  end
+
+  return total
+end
+
+local function should_skip_animation(bufnr, before_lines, after_lines, hunks)
+  if math.max(#before_lines, #after_lines) > max_animated_file_lines then
+    return true
+  end
+
+  local buffer_state = state[bufnr]
+  local before_stat = buffer_state and buffer_state.snapshot_stat or nil
+  local current_name = vim.api.nvim_buf_get_name(bufnr)
+  local after_stat = file_stat(current_name)
+
+  if (before_stat and before_stat.size and before_stat.size > max_animated_file_bytes)
+    or (after_stat and after_stat.size and after_stat.size > max_animated_file_bytes)
+  then
+    return true
+  end
+
+  return changed_line_count(hunks) > max_animated_changed_lines
+end
+
+local function segment_highlights(segment, is_core)
+  if segment.kind == "change" then
+    return is_core and "FancyReopenDiffChangeCore" or "FancyReopenDiffChangeTrail", "FancyReopenDiffChangeSign"
+  end
+
+  return is_core and "FancyReopenDiffAddCore" or "FancyReopenDiffAddTrail", "FancyReopenDiffAddSign"
+end
+
+local function render_segment_row(bufnr, segment, row, is_core)
+  local line_hl_group, sign_hl_group = segment_highlights(segment, is_core)
+
   vim.api.nvim_buf_set_extmark(bufnr, add_namespace, row, 0, {
     priority = 250,
     sign_text = "▎",
-    sign_hl_group = "FancyReopenDiffAddSign",
-    line_hl_group = hl_group,
+    sign_hl_group = sign_hl_group,
+    line_hl_group = line_hl_group,
     hl_eol = true,
   })
 end
 
-local function render_add_frame(bufnr, segments, distance)
+local function render_change_frame(bufnr, segments, distance)
   vim.api.nvim_buf_clear_namespace(bufnr, add_namespace, 0, -1)
 
   for _, segment in ipairs(segments) do
     if distance == 0 then
       for row = segment.center_low, segment.center_high do
-        render_segment_row(bufnr, row, "FancyReopenDiffAddCore")
+        render_segment_row(bufnr, segment, row, true)
       end
     else
       local upper = segment.center_low - distance
       local lower = segment.center_high + distance
 
       if upper >= segment.start_row then
-        render_segment_row(bufnr, upper, "FancyReopenDiffAddTrail")
+        render_segment_row(bufnr, segment, upper, false)
       end
 
       if lower <= segment.end_row and lower ~= upper then
-        render_segment_row(bufnr, lower, "FancyReopenDiffAddTrail")
+        render_segment_row(bufnr, segment, lower, false)
       end
     end
   end
@@ -276,6 +338,7 @@ local function finish_animation(bufnr, generation, restore_modifiable)
     return
   end
 
+  stop_animation_timer(bufnr)
   clear_animation(bufnr)
 
   if vim.api.nvim_buf_is_valid(bufnr) then
@@ -288,6 +351,7 @@ end
 
 local function cancel_animation(bufnr)
   next_generation(bufnr)
+  stop_animation_timer(bufnr)
   clear_animation(bufnr)
 
   local buffer_state = state[bufnr]
@@ -299,6 +363,7 @@ end
 
 play_animation = function(bufnr, before_lines, after_lines)
   local generation = next_generation(bufnr)
+  stop_animation_timer(bufnr)
   clear_animation(bufnr)
 
   if same_lines(before_lines, after_lines) then
@@ -323,17 +388,20 @@ play_animation = function(bufnr, before_lines, after_lines)
     return
   end
 
-  local add_segments = build_add_segments(bufnr, hunks)
+  if should_skip_animation(bufnr, before_lines, after_lines, hunks) then
+    return
+  end
+
+  local change_segments = build_change_segments(bufnr, hunks)
   local target_line = largest_hunk_target(hunks)
   local restore_modifiable = vim.bo[bufnr].modifiable
-  local start_delay_ms = 300
-  local step_ms = 70
   local max_distance = 0
+  local distance = 0
 
   state[bufnr] = state[bufnr] or {}
   state[bufnr].restore_modifiable = restore_modifiable
 
-  for _, segment in ipairs(add_segments) do
+  for _, segment in ipairs(change_segments) do
     max_distance = math.max(max_distance, segment.max_distance)
   end
 
@@ -341,26 +409,46 @@ play_animation = function(bufnr, before_lines, after_lines)
   center_windows_on_line(bufnr, target_line)
   render_deleted_hunks(bufnr, before_lines, hunks)
 
-  if vim.tbl_isempty(add_segments) then
-    vim.defer_fn(function()
+  if vim.tbl_isempty(change_segments) then
+    local timer = uv.new_timer()
+    if not timer then
       finish_animation(bufnr, generation, restore_modifiable)
-    end, start_delay_ms + 420)
+      return
+    end
+
+    state[bufnr].timer = timer
+    timer:start(animation_start_delay_ms + 420, 0, vim.schedule_wrap(function()
+      finish_animation(bufnr, generation, restore_modifiable)
+    end))
     return
   end
 
-  for distance = 0, max_distance + 1 do
-    vim.defer_fn(function()
-      if current_generation(bufnr) ~= generation or not vim.api.nvim_buf_is_valid(bufnr) then
-        return
-      end
-
-      render_add_frame(bufnr, add_segments, distance)
-    end, start_delay_ms + (step_ms * distance))
+  local timer = uv.new_timer()
+  if not timer then
+    finish_animation(bufnr, generation, restore_modifiable)
+    return
   end
 
-  vim.defer_fn(function()
-    finish_animation(bufnr, generation, restore_modifiable)
-  end, start_delay_ms + (step_ms * (max_distance + 2)))
+  state[bufnr].timer = timer
+  local function tick()
+    if current_generation(bufnr) ~= generation or not vim.api.nvim_buf_is_valid(bufnr) then
+      stop_animation_timer(bufnr)
+      return
+    end
+
+    render_change_frame(bufnr, change_segments, distance)
+    distance = distance + 1
+
+    if distance > max_distance + 1 then
+      finish_animation(bufnr, generation, restore_modifiable)
+      return
+    end
+
+    timer:stop()
+    timer:start(animation_step_ms, 0, vim.schedule_wrap(tick))
+  end
+
+  timer:start(animation_start_delay_ms, 0, vim.schedule_wrap(tick))
 end
 
 local function maybe_animate_reload(bufnr)
@@ -394,6 +482,72 @@ local function maybe_animate_reload(bufnr)
       remember_snapshot(bufnr)
     end
   end)
+end
+
+local function build_modified_test_line(line)
+  if line == "" then
+    return "Fancy reopen diff modified line"
+  end
+
+  return line .. " -- modified"
+end
+
+local function test_reopen_animation(opts)
+  local bufnr = vim.api.nvim_get_current_buf()
+  opts = opts or {}
+
+  if not is_normal_file_buffer(bufnr) then
+    vim.notify("Fancy reopen diff test requires a normal file buffer", vim.log.levels.WARN)
+    return
+  end
+
+  local after_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local before_lines = vim.deepcopy(after_lines)
+  local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+  local has_range = opts.range and opts.line1 and opts.line2 and opts.line2 >= opts.line1
+  local mode = vim.trim(opts.args or "")
+
+  if mode == "" then
+    mode = has_range and "change" or "add"
+  end
+
+  if #after_lines == 0 then
+    before_lines = {}
+    after_lines = { "Fancy reopen diff test line" }
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, after_lines)
+  elseif has_range and mode == "change" then
+    local start_idx = math.max(opts.line1, 1)
+    local end_idx = math.min(opts.line2, #before_lines)
+
+    if start_idx > end_idx then
+      vim.notify("Fancy reopen diff test range is empty", vim.log.levels.WARN)
+      return
+    end
+
+    for i = start_idx, end_idx do
+      before_lines[i] = build_modified_test_line(before_lines[i])
+    end
+  elseif has_range then
+    local start_idx = math.max(opts.line1, 1)
+    local end_idx = math.min(opts.line2, #before_lines)
+
+    if start_idx > end_idx then
+      vim.notify("Fancy reopen diff test range is empty", vim.log.levels.WARN)
+      return
+    end
+
+    for _ = start_idx, end_idx do
+      table.remove(before_lines, start_idx)
+    end
+  elseif mode == "change" then
+    before_lines[math.min(cursor_line, #before_lines)] = build_modified_test_line(before_lines[math.min(cursor_line, #before_lines)])
+  elseif #before_lines == 1 then
+    before_lines[1] = ""
+  else
+    table.remove(before_lines, math.min(cursor_line, #before_lines))
+  end
+
+  play_animation(bufnr, before_lines, after_lines)
 end
 
 vim.api.nvim_create_autocmd("BufReadPost", {
@@ -442,4 +596,12 @@ vim.api.nvim_create_autocmd("FileChangedShellPost", {
   callback = function(args)
     maybe_animate_reload(args.buf)
   end,
+})
+
+vim.api.nvim_create_user_command("FancyReopenDiffTest", function(opts)
+  test_reopen_animation(opts)
+end, {
+  nargs = "?",
+  range = true,
+  desc = "Preview the fancy reopen diff animation in the current buffer (add or change)",
 })
