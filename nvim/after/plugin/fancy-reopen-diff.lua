@@ -11,6 +11,8 @@ local animation_step_ms = 70
 local reload_settle_delay_ms = 30
 local reload_retry_count = 6
 
+vim.o.autoread = true
+
 local function set_highlights()
   vim.api.nvim_set_hl(0, "FancyReopenDiffAddCore", { bg = "#2f8f63", bold = true })
   vim.api.nvim_set_hl(0, "FancyReopenDiffAddTrail", { bg = "#194532" })
