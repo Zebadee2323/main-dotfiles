@@ -48,6 +48,7 @@ local current_acknowledgement_chat = nil
 local current_acknowledgement_chat_key = nil
 local speech_request_id = 0
 local speech_queue = {}
+local voice_playback_active = false
 local pending_acknowledgement_request_id = nil
 local pending_response_summary_request_id = nil
 local pending_response_summary_messages = {}
@@ -106,6 +107,24 @@ local function collect_lines(target, data)
   end
 end
 
+local function fire_user_event(pattern, data)
+  vim.schedule(function()
+    pcall(vim.api.nvim_exec_autocmds, "User", {
+      pattern = pattern,
+      data = data or {},
+    })
+  end)
+end
+
+local function set_voice_playback_active(active, data)
+  if voice_playback_active == active then
+    return
+  end
+
+  voice_playback_active = active
+  fire_user_event(active and "AIVoicePlaybackStarted" or "AIVoicePlaybackStopped", data)
+end
+
 local function cleanup_current_wav()
   if current_wav_path then
     pcall(vim.fn.delete, current_wav_path)
@@ -136,6 +155,7 @@ local function stop_audio_jobs()
     vim.fn.jobstop(current_play_job)
   end
   current_play_job = nil
+  set_voice_playback_active(false, { request_id = speech_request_id })
   cleanup_current_wav()
 end
 
@@ -291,6 +311,8 @@ end
 local function start_audio_playback(wav_path, request_id)
   local play_job = vim.fn.jobstart({ "afplay", wav_path }, {
     on_exit = function()
+      set_voice_playback_active(false, { request_id = request_id })
+
       if speech_request_id == request_id then
         current_play_job = nil
         cleanup_current_wav()
@@ -310,6 +332,10 @@ local function start_audio_playback(wav_path, request_id)
 
   current_play_job = play_job
   current_wav_path = wav_path
+  set_voice_playback_active(true, {
+    request_id = request_id,
+    wav_path = wav_path,
+  })
 end
 
 local function maybe_apply_robot_effects(wav_path, request_id)
