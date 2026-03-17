@@ -60,6 +60,7 @@ local ai_voice_codecompanion_enabled = true
 local ai_voice_speak
 local queue_ai_voice_speak
 local get_latest_assistant_response
+local cleanup_hidden_chat_session
 local ai_voice_hook_generation = (vim.g.ai_voice_hook_generation or 0) + 1
 local cc_group = vim.api.nvim_create_augroup("CodeCompanionHooks", { clear = true })
 vim.g.ai_voice_hook_generation = ai_voice_hook_generation
@@ -170,6 +171,7 @@ local function cancel_hidden_chat(chat)
       if chat.current_request then
         chat:stop()
       end
+      cleanup_hidden_chat_session(chat)
       chat:close()
     end)
   end
@@ -201,6 +203,26 @@ local function reset_hidden_chat(chat)
   end
 end
 
+cleanup_hidden_chat_session = function(chat)
+  if not (chat and chat.adapter and chat.adapter.type == "acp") then
+    return
+  end
+
+  local session_id = chat.acp_session_id
+
+  if chat.acp_connection then
+    session_id = chat.acp_connection.session_id or session_id
+    pcall(chat.acp_connection.disconnect, chat.acp_connection)
+    chat.acp_connection = nil
+  end
+
+  chat.acp_session_id = nil
+
+  if chat.adapter.name == "opencode" and session_id and vim.fn.executable("opencode") == 1 then
+    vim.fn.jobstart({ "opencode", "session", "delete", session_id })
+  end
+end
+
 local function close_acknowledgement_chat()
   if current_acknowledgement_chat then
     local acknowledgement_chat = current_acknowledgement_chat
@@ -221,6 +243,26 @@ local function close_response_summary_chat()
   end
 end
 
+local function finalize_acknowledgement_chat(ack_chat)
+  if ack_chat._ai_voice_reusable then
+    reset_hidden_chat(ack_chat)
+  elseif current_acknowledgement_chat == ack_chat then
+    close_acknowledgement_chat()
+  else
+    cancel_hidden_chat(ack_chat)
+  end
+end
+
+local function finalize_response_summary_chat(response_summary_chat)
+  if response_summary_chat._ai_voice_reusable then
+    reset_hidden_chat(response_summary_chat)
+  elseif current_response_summary_chat == response_summary_chat then
+    close_response_summary_chat()
+  else
+    cancel_hidden_chat(response_summary_chat)
+  end
+end
+
 local function acknowledgement_chat_key(params, model_name)
   params = params or {}
 
@@ -235,6 +277,7 @@ end
 local function cancel_response_summary_chat()
   if current_response_summary_chat then
     stop_hidden_chat(current_response_summary_chat)
+    cleanup_hidden_chat_session(current_response_summary_chat)
     reset_hidden_chat(current_response_summary_chat)
   end
 end
@@ -242,6 +285,7 @@ end
 local function cancel_acknowledgement_chat()
   if current_acknowledgement_chat then
     stop_hidden_chat(current_acknowledgement_chat)
+    cleanup_hidden_chat_session(current_acknowledgement_chat)
     reset_hidden_chat(current_acknowledgement_chat)
   end
 end
@@ -257,7 +301,7 @@ local function close_chat(chat)
 end
 
 local function hidden_chat_supports_reuse(params)
-  return true
+  return not (params and params.adapter == "opencode")
 end
 
 local function prepare_speech_request(opts)
@@ -671,7 +715,7 @@ local function create_acknowledgement_chat(response_summary_params, response_sum
         local request_id = ack_chat._ai_voice_request_id
 
         if speech_request_id ~= request_id then
-          reset_hidden_chat(ack_chat)
+          finalize_acknowledgement_chat(ack_chat)
           return
         end
 
@@ -686,13 +730,7 @@ local function create_acknowledgement_chat(response_summary_params, response_sum
           flush_pending_response_summaries(request_id)
         end)
 
-        if ack_chat._ai_voice_reusable then
-          reset_hidden_chat(ack_chat)
-        elseif current_acknowledgement_chat == ack_chat then
-          close_acknowledgement_chat()
-        else
-          cancel_hidden_chat(ack_chat)
-        end
+        finalize_acknowledgement_chat(ack_chat)
       end,
       on_cancelled = function(ack_chat)
         local request_id = ack_chat._ai_voice_request_id
@@ -703,13 +741,7 @@ local function create_acknowledgement_chat(response_summary_params, response_sum
 
         flush_pending_response_summaries(request_id)
 
-        if ack_chat._ai_voice_reusable then
-          reset_hidden_chat(ack_chat)
-        elseif current_acknowledgement_chat == ack_chat then
-          close_acknowledgement_chat()
-        else
-          cancel_hidden_chat(ack_chat)
-        end
+        finalize_acknowledgement_chat(ack_chat)
       end,
     },
   })
@@ -785,7 +817,7 @@ local function create_response_summary_chat(response_summary_params, response_su
         local source_response = response_summary_chat._ai_voice_source_text
 
         if speech_request_id ~= request_id then
-          reset_hidden_chat(response_summary_chat)
+          finalize_response_summary_chat(response_summary_chat)
           return
         end
 
@@ -801,22 +833,10 @@ local function create_response_summary_chat(response_summary_params, response_su
           end)
         end
 
-        if response_summary_chat._ai_voice_reusable then
-          reset_hidden_chat(response_summary_chat)
-        elseif current_response_summary_chat == response_summary_chat then
-          close_response_summary_chat()
-        else
-          cancel_hidden_chat(response_summary_chat)
-        end
+        finalize_response_summary_chat(response_summary_chat)
       end,
       on_cancelled = function(response_summary_chat)
-        if response_summary_chat._ai_voice_reusable then
-          reset_hidden_chat(response_summary_chat)
-        elseif current_response_summary_chat == response_summary_chat then
-          close_response_summary_chat()
-        else
-          cancel_hidden_chat(response_summary_chat)
-        end
+        finalize_response_summary_chat(response_summary_chat)
       end,
     },
   })
