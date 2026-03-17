@@ -1,5 +1,8 @@
 local voice_name = "cori-high"
 local voices_dir = vim.fn.expand("~/.config/dotfiles/nvim/after/ai_voices")
+local ai_voice_audio_dir = vim.fn.stdpath("cache") .. "/ai-voice"
+local raw_wav_path = ai_voice_audio_dir .. "/latest.wav"
+local processed_wav_path = ai_voice_audio_dir .. "/latest-robot.wav"
 local response_summary_model_name = "openai/gpt-5.4/low"
 local piper_length_scale = 1.0
 local piper_noise_scale = 0.2
@@ -42,6 +45,7 @@ local current_tts_job = nil
 local current_effect_job = nil
 local current_play_job = nil
 local current_wav_path = nil
+local last_spoken_message = nil
 local current_response_summary_chat = nil
 local current_response_summary_chat_key = nil
 local current_acknowledgement_chat = nil
@@ -126,10 +130,11 @@ local function set_voice_playback_active(active, data)
 end
 
 local function cleanup_current_wav()
-  if current_wav_path then
-    pcall(vim.fn.delete, current_wav_path)
-    current_wav_path = nil
-  end
+  current_wav_path = nil
+end
+
+local function ensure_ai_voice_audio_dir()
+  vim.fn.mkdir(ai_voice_audio_dir, "p")
 end
 
 local function clear_speech_queue()
@@ -317,15 +322,12 @@ local function start_audio_playback(wav_path, request_id)
         current_play_job = nil
         cleanup_current_wav()
         maybe_start_queued_speech()
-      else
-        pcall(vim.fn.delete, wav_path)
       end
     end,
   })
 
   if play_job <= 0 then
     vim.notify("Generated audio at " .. wav_path .. " but failed to start afplay", vim.log.levels.WARN)
-    pcall(vim.fn.delete, wav_path)
     maybe_start_queued_speech()
     return
   end
@@ -350,7 +352,6 @@ local function maybe_apply_robot_effects(wav_path, request_id)
     return
   end
 
-  local processed_wav_path = vim.fn.tempname() .. ".wav"
   local stderr = {}
   local effect_job = vim.fn.jobstart({
     "ffmpeg",
@@ -370,20 +371,16 @@ local function maybe_apply_robot_effects(wav_path, request_id)
         current_effect_job = nil
 
         if speech_request_id ~= request_id then
-          pcall(vim.fn.delete, wav_path)
-          pcall(vim.fn.delete, processed_wav_path)
           return
         end
 
         if code ~= 0 then
           local msg = #stderr > 0 and table.concat(stderr, "\n") or ("ffmpeg exited with code " .. code)
           vim.notify("Robot mode failed, playing original audio:\n" .. msg, vim.log.levels.WARN)
-          pcall(vim.fn.delete, processed_wav_path)
           start_audio_playback(wav_path, request_id)
           return
         end
 
-        pcall(vim.fn.delete, wav_path)
         start_audio_playback(processed_wav_path, request_id)
       end)
     end,
@@ -391,7 +388,6 @@ local function maybe_apply_robot_effects(wav_path, request_id)
 
   if effect_job <= 0 then
     vim.notify("Failed to start ffmpeg for robot mode; playing original audio", vim.log.levels.WARN)
-    pcall(vim.fn.delete, processed_wav_path)
     start_audio_playback(wav_path, request_id)
     return
   end
@@ -406,6 +402,8 @@ ai_voice_speak = function(message, opts)
     return
   end
 
+  last_spoken_message = message
+
   local request_id = opts and opts.request_id
 
   if not request_id and not (opts and opts.keep_queue) then
@@ -419,7 +417,8 @@ ai_voice_speak = function(message, opts)
     })
   end
 
-  local wav_path = vim.fn.tempname() .. ".wav"
+  ensure_ai_voice_audio_dir()
+
   local cmd = {
     "python3",
     "-m",
@@ -437,7 +436,7 @@ ai_voice_speak = function(message, opts)
     "--data-dir",
     voices_dir,
     "-f",
-    wav_path,
+    raw_wav_path,
   }
 
   local stderr = {}
@@ -449,7 +448,6 @@ ai_voice_speak = function(message, opts)
     on_exit = function(_, code)
       vim.schedule(function()
         if speech_request_id ~= request_id then
-          pcall(vim.fn.delete, wav_path)
           return
         end
 
@@ -462,7 +460,7 @@ ai_voice_speak = function(message, opts)
           return
         end
 
-        maybe_apply_robot_effects(wav_path, request_id)
+        maybe_apply_robot_effects(raw_wav_path, request_id)
       end)
     end,
   })
@@ -1073,6 +1071,15 @@ local function speak_last_codecompanion_response_summary()
   speak_response_summary(chat, response, request_id)
 end
 
+local function replay_last_audio_message()
+  if not last_spoken_message then
+    vim.notify("No previous AI voice message available to replay", vim.log.levels.WARN)
+    return
+  end
+
+  ai_voice_speak(last_spoken_message)
+end
+
 local function set_ai_voice_codecompanion_enabled(enabled)
   ai_voice_codecompanion_enabled = enabled
   vim.notify(
@@ -1258,6 +1265,12 @@ create_or_replace_user_command("AIVoiceSummary", function()
   speak_last_codecompanion_response_summary()
 end, {
   desc = "Summarize the latest CodeCompanion reply and speak it",
+})
+
+create_or_replace_user_command("AIVoiceReplay", function()
+  replay_last_audio_message()
+end, {
+  desc = "Replay the last AI voice message",
 })
 
 create_or_replace_user_command("AIToggleVoice", function()
