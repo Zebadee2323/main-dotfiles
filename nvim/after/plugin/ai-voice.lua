@@ -1137,6 +1137,11 @@ local function attach_ai_voice_to_chat(bufnr, chat)
       return
     end
 
+    if _G.ai_walkthrough_handle_codecompanion_response
+      and _G.ai_walkthrough_handle_codecompanion_response(current_chat) then
+      return
+    end
+
     if not ai_voice_codecompanion_enabled then
       return
     end
