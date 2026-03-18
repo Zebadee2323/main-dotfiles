@@ -13,6 +13,8 @@ local islist = vim.islist or vim.tbl_islist
 local walkthrough_augroup = vim.api.nvim_create_augroup("ai_walkthrough", { clear = true })
 local walkthrough_highlight_ns = vim.api.nvim_create_namespace("ai_walkthrough_active_step")
 local walkthrough_highlight_group = "AIWalkthroughStep"
+local walkthrough_description_highlight_group = "AIWalkthroughDescription"
+local walkthrough_description_border_group = "AIWalkthroughDescriptionBorder"
 
 local playback_state = {
   active = false,
@@ -28,9 +30,12 @@ local playback_state = {
   display_window = nil,
   display_window_created = false,
   highlighted_buffer = nil,
+  description_buffer = nil,
+  description_window = nil,
 }
 
 local last_walkthrough = nil
+local pending_walkthrough_start_opts = nil
 
 local function create_or_replace_user_command(name, fn, opts)
   pcall(vim.api.nvim_del_user_command, name)
@@ -63,6 +68,16 @@ local function set_walkthrough_highlight()
   vim.api.nvim_set_hl(0, walkthrough_highlight_group, {
     bg = "#16381e",
     fg = "NONE",
+  })
+
+  vim.api.nvim_set_hl(0, walkthrough_description_highlight_group, {
+    bg = "#0f1720",
+    fg = "#d7e3f4",
+  })
+
+  vim.api.nvim_set_hl(0, walkthrough_description_border_group, {
+    bg = "#0f1720",
+    fg = "#4f6b8a",
   })
 end
 
@@ -193,13 +208,30 @@ local function send_message_to_chat(chat, msg)
   end
 
   local message_lines = vim.split(msg, "\n", { plain = true, trimempty = false })
+  local was_locked = not vim.bo[chat.bufnr].modifiable
+
+  if was_locked and chat.ui and chat.ui.unlock_buf then
+    chat.ui:unlock_buf()
+  end
+
   local line_count = vim.api.nvim_buf_line_count(chat.bufnr)
   local last_line = vim.api.nvim_buf_get_lines(chat.bufnr, line_count - 1, line_count, false)[1] or ""
 
-  if last_line == "" then
-    vim.api.nvim_buf_set_lines(chat.bufnr, line_count - 1, line_count, false, message_lines)
-  else
-    vim.api.nvim_buf_set_lines(chat.bufnr, line_count, line_count, false, vim.list_extend({ "" }, message_lines))
+  local ok, err = pcall(function()
+    if last_line == "" then
+      vim.api.nvim_buf_set_lines(chat.bufnr, line_count - 1, line_count, false, message_lines)
+    else
+      vim.api.nvim_buf_set_lines(chat.bufnr, line_count, line_count, false, vim.list_extend({ "" }, message_lines))
+    end
+  end)
+
+  if was_locked and chat.ui and chat.ui.lock_buf then
+    chat.ui:lock_buf()
+  end
+
+  if not ok then
+    vim.notify("AI walkthrough could not write to the chat buffer: " .. tostring(err), vim.log.levels.WARN)
+    return false
   end
 
   if chat.ui:is_visible() then
@@ -211,7 +243,6 @@ end
 
 local function build_walkthrough_message(opts)
   local query = trim(opts.args or "")
-  local context_anchor = build_context_anchor(opts)
   local lines = {
     "You are creating an editor walkthrough for the user's query.",
     "Reply with valid YAML only.",
@@ -238,14 +269,6 @@ local function build_walkthrough_message(opts)
     "```",
   }
 
-  -- if context_anchor then
-  --   vim.list_extend(lines, {
-  --     "",
-  --     "Current editor context:",
-  --     context_anchor,
-  --   })
-  -- end
-
   vim.list_extend(lines, {
     "",
     "User query:",
@@ -255,19 +278,14 @@ local function build_walkthrough_message(opts)
   return table.concat(lines, "\n")
 end
 
-local function send_walkthrough_request(opts)
-  local query = trim(opts.args or "")
-  if query == "" then
-    vim.notify("AIWalkthrough requires a query", vim.log.levels.ERROR)
-    return
-  end
-
+local function send_walkthrough_request(opts, start_opts)
   local chat, err = get_target_chat()
   if not chat then
     vim.notify(err, vim.log.levels.WARN)
     return
   end
 
+  pending_walkthrough_start_opts = vim.deepcopy(start_opts or {})
   send_message_to_chat(chat, build_walkthrough_message(opts))
 end
 
@@ -888,6 +906,151 @@ local function clear_active_step_highlight()
   playback_state.highlighted_buffer = nil
 end
 
+local function close_walkthrough_description_box()
+  if playback_state.description_window and vim.api.nvim_win_is_valid(playback_state.description_window) then
+    pcall(vim.api.nvim_win_close, playback_state.description_window, true)
+  end
+
+  if playback_state.description_buffer and vim.api.nvim_buf_is_valid(playback_state.description_buffer) then
+    pcall(vim.api.nvim_buf_delete, playback_state.description_buffer, { force = true })
+  end
+
+  playback_state.description_window = nil
+  playback_state.description_buffer = nil
+end
+
+local function wrap_text(text, width)
+  local lines = {}
+
+  for _, paragraph in ipairs(vim.split(text, "\n", { plain = true, trimempty = false })) do
+    local current = ""
+
+    for word in paragraph:gmatch("%S+") do
+      local candidate = current == "" and word or (current .. " " .. word)
+      if vim.fn.strdisplaywidth(candidate) <= width then
+        current = candidate
+      else
+        if current ~= "" then
+          table.insert(lines, current)
+        end
+
+        if vim.fn.strdisplaywidth(word) <= width then
+          current = word
+        else
+          local chunk = ""
+          for _, char in ipairs(vim.split(word, "\\zs")) do
+            local next_chunk = chunk .. char
+            if vim.fn.strdisplaywidth(next_chunk) > width and chunk ~= "" then
+              table.insert(lines, chunk)
+              chunk = char
+            else
+              chunk = next_chunk
+            end
+          end
+          current = chunk
+        end
+      end
+    end
+
+    if current ~= "" then
+      table.insert(lines, current)
+    elseif paragraph == "" then
+      table.insert(lines, "")
+    end
+  end
+
+  if #lines == 0 then
+    return { "" }
+  end
+
+  return lines
+end
+
+local function get_window_relative_line_row(winid, line)
+  if not (winid and vim.api.nvim_win_is_valid(winid)) then
+    return nil
+  end
+
+  local ok, pos = pcall(vim.fn.screenpos, winid, line, 1)
+  local win_pos = vim.fn.win_screenpos(winid)
+  if ok and type(pos) == "table" and pos.row and pos.row > 0 and type(win_pos) == "table" and win_pos[1] then
+    return math.max(0, pos.row - win_pos[1])
+  end
+
+  local view = vim.api.nvim_win_call(winid, function()
+    return vim.fn.winsaveview()
+  end)
+  return math.max(0, line - (view.topline or 1))
+end
+
+local function show_walkthrough_description_box(winid, line_start, description)
+  close_walkthrough_description_box()
+
+  if not (winid and vim.api.nvim_win_is_valid(winid)) then
+    return false
+  end
+
+  local width = vim.api.nvim_win_get_width(winid)
+  local height = vim.api.nvim_win_get_height(winid)
+  local max_inner_width = width - 4
+  if max_inner_width < 16 or height < 3 then
+    return false
+  end
+
+  local inner_width = math.min(math.max(24, math.floor(width * 0.35)), max_inner_width)
+  if inner_width < 16 then
+    return false
+  end
+
+  local wrapped = wrap_text(description, inner_width)
+  local box_height = math.min(#wrapped, math.max(1, height - 2))
+  local display_lines = vim.list_slice(wrapped, 1, box_height)
+  local start_row = get_window_relative_line_row(winid, line_start) or 0
+  local outer_height = box_height + 2
+  local row = math.max(0, math.min(start_row - outer_height, math.max(0, height - outer_height)))
+  local col = math.max(0, width - inner_width - 2)
+
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  if not bufnr then
+    return false
+  end
+
+  vim.bo[bufnr].bufhidden = "wipe"
+  vim.bo[bufnr].modifiable = true
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, display_lines)
+  vim.bo[bufnr].modifiable = false
+
+  local ok_float, float_win = pcall(vim.api.nvim_open_win, bufnr, false, {
+    relative = "win",
+    win = winid,
+    row = row,
+    col = col,
+    width = inner_width,
+    height = box_height,
+    style = "minimal",
+    border = "rounded",
+    focusable = false,
+    noautocmd = true,
+    zindex = 150,
+  })
+
+  if not ok_float then
+    pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+    return false
+  end
+
+  vim.wo[float_win].wrap = true
+  vim.wo[float_win].winhl = table.concat({
+    "Normal:" .. walkthrough_description_highlight_group,
+    "NormalFloat:" .. walkthrough_description_highlight_group,
+    "FloatBorder:" .. walkthrough_description_border_group,
+  }, ",")
+
+  playback_state.description_buffer = bufnr
+  playback_state.description_window = float_win
+  return true
+end
+
 local function highlight_walkthrough_step(bufnr, line_start, line_end)
   clear_active_step_highlight()
 
@@ -950,6 +1113,7 @@ end
 
 local function reset_playback_state()
   clear_active_step_highlight()
+  close_walkthrough_description_box()
   playback_state.active = false
   playback_state.steps = nil
   playback_state.index = 0
@@ -962,6 +1126,8 @@ local function reset_playback_state()
   playback_state.display_window = nil
   playback_state.display_window_created = false
   playback_state.highlighted_buffer = nil
+  playback_state.description_buffer = nil
+  playback_state.description_window = nil
 end
 
 local function stop_walkthrough(opts)
@@ -1047,10 +1213,12 @@ local function show_walkthrough_step(step)
     local bufnr = vim.api.nvim_win_get_buf(winid)
     highlight_walkthrough_step(bufnr, step.line_start, step.line_end)
     focus_walkthrough_range(winid, step.line_start, step.line_end)
+    show_walkthrough_description_box(winid, step.line_start, step.description)
   end)
 
   if not ok then
     clear_active_step_highlight()
+    close_walkthrough_description_box()
     return false, err
   end
 
@@ -1180,6 +1348,24 @@ local function continue_walkthrough()
   run_walkthrough_step(playback_state.index + 1)
 end
 
+local function pause_walkthrough()
+  if not playback_state.active or not playback_state.steps then
+    vim.notify("No AI walkthrough is currently running", vim.log.levels.WARN)
+    return
+  end
+
+  playback_state.pause_after_step = true
+
+  if playback_state.waiting_for_voice then
+    vim.notify("AI walkthrough will pause after the current step", vim.log.levels.INFO)
+    return
+  end
+
+  stop_timer()
+  playback_state.paused_for_continue = true
+  vim.notify("AI walkthrough paused", vim.log.levels.INFO)
+end
+
 local function replay_walkthrough_step(index)
   if not playback_state.active or not playback_state.steps then
     vim.notify("No AI walkthrough is currently running", vim.log.levels.WARN)
@@ -1223,12 +1409,16 @@ local function handle_walkthrough_response(chat)
 
   local steps, err = parse_walkthrough_response(response)
   if not steps then
+    pending_walkthrough_start_opts = nil
     vim.notify("AI walkthrough response detected, but it could not be parsed: " .. err, vim.log.levels.WARN)
     return true
   end
 
+  local start_opts = pending_walkthrough_start_opts or {}
+  pending_walkthrough_start_opts = nil
+
   vim.defer_fn(function()
-    start_walkthrough(steps)
+    start_walkthrough(steps, start_opts)
   end, 20)
 
   return true
@@ -1242,9 +1432,19 @@ set_walkthrough_highlight()
 create_or_replace_user_command("AIWalkthrough", function(opts)
   send_walkthrough_request(opts)
 end, {
-  nargs = "+",
+  nargs = "*",
   range = true,
   desc = "Append an AI walkthrough prompt to the active CodeCompanion chat",
+})
+
+create_or_replace_user_command("AIWalkthroughSlow", function(opts)
+  send_walkthrough_request(opts, {
+    pause_after_step = true,
+  })
+end, {
+  nargs = "*",
+  range = true,
+  desc = "Append an AI walkthrough prompt and start playback in slow mode",
 })
 
 create_or_replace_user_command("AIWalkthroughStop", function()
@@ -1287,6 +1487,12 @@ create_or_replace_user_command("AIWalkthroughContinue", function()
   continue_walkthrough()
 end, {
   desc = "Continue a paused AI walkthrough",
+})
+
+create_or_replace_user_command("AIWalkthroughPause", function()
+  pause_walkthrough()
+end, {
+  desc = "Pause the active AI walkthrough after the current step",
 })
 
 create_or_replace_user_command("AIWalkthroughPrevious", function()
