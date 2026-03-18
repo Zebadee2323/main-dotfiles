@@ -44,59 +44,13 @@ require("roslyn").setup({
     silent = false,
 })
 
-do
-    local group = vim.api.nvim_create_augroup("user-roslyn-source-generated", { clear = true })
-
-    local function roslyn_client(bufnr)
-        local clients = vim.lsp.get_clients({ name = "roslyn", bufnr = bufnr })
-        if clients[1] then
-            return clients[1]
-        end
-
-        clients = vim.lsp.get_clients({ name = "roslyn" })
-        return clients[1]
-    end
-
-    for _, autocmd in ipairs(vim.api.nvim_get_autocmds({ group = "roslyn.nvim", event = "BufReadCmd" })) do
-        if autocmd.pattern == "roslyn-source-generated://*" then
-            vim.api.nvim_del_autocmd(autocmd.id)
-        end
-    end
-
-    vim.api.nvim_create_autocmd("BufReadCmd", {
-        group = group,
-        pattern = { "roslyn-source-generated://*" },
-        callback = function(args)
-            vim.bo[args.buf].modifiable = true
-            vim.bo[args.buf].swapfile = false
-            vim.bo[args.buf].buftype = "nofile"
-            vim.bo[args.buf].bufhidden = "wipe"
-            vim.bo[args.buf].filetype = "cs"
-
-            local client = roslyn_client(args.buf)
-            assert(client, "Must have a `roslyn` client to load roslyn source generated file")
-
-            local content
-            client:request("sourceGeneratedDocument/_roslyn_getText", {
-                textDocument = { uri = args.match },
-                resultId = nil,
-            }, function(err, result)
-                assert(not err, vim.inspect(err))
-                content = (result and result.text) or ""
-
-                local normalized = string.gsub(content, "\r\n", "\n")
-                local source_lines = vim.split(normalized, "\n", { plain = true })
-                vim.api.nvim_buf_set_lines(args.buf, 0, -1, false, source_lines)
-                vim.b[args.buf].resultId = result and result.resultId or nil
-                vim.bo[args.buf].modifiable = false
-            end, args.buf)
-
-            vim.wait(1000, function()
-                return content ~= nil
-            end)
-        end,
-    })
-end
+vim.api.nvim_create_autocmd("BufRead", {
+  pattern = { "roslyn-source-generated//:*" },
+  callback = function(ev)
+    vim.bo[ev.buf].buftype = "nofile"
+    vim.bo[ev.buf].bufhidden = "wipe"
+  end,
+})
 
 -- :RoslynNudgeProject [optional/path/to/File.cs]
 -- Finds the .csproj that references the file and notifies Roslyn to reload just that project.

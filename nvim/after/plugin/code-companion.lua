@@ -312,6 +312,88 @@ local function get_target_ai_chat()
   return chat_api.last_chat()
 end
 
+local function set_current_ai_chat_model(opts)
+  opts = opts or {}
+
+  local chat = get_target_ai_chat()
+  if not chat then
+    vim.notify("No active CodeCompanion chat found", vim.log.levels.WARN)
+    return
+  end
+
+  local desired_model = vim.trim(opts.args or "")
+
+  if chat.adapter.type == "acp" then
+    local chat_helpers = require("codecompanion.interactions.chat.helpers")
+
+    if not chat.acp_connection then
+      chat_helpers.create_acp_connection(chat)
+    end
+
+    local connection = chat.acp_connection
+    if not connection then
+      vim.notify("OpenCode session is not connected", vim.log.levels.ERROR)
+      return
+    end
+
+    local models = connection.get_models and connection:get_models() or nil
+    local available_models = models and models.availableModels or {}
+
+    if vim.tbl_isempty(available_models) then
+      vim.notify("No models reported for this OpenCode session", vim.log.levels.WARN)
+      return
+    end
+
+    local function apply_model(model_id)
+      chat.adapter.defaults = chat.adapter.defaults or {}
+      chat.adapter.defaults.model = model_id
+      chat:change_model({ model = model_id })
+      vim.notify(string.format("CodeCompanion model set to %s", model_id), vim.log.levels.INFO)
+    end
+
+    if desired_model ~= "" then
+      local resolved_model = resolve_acp_model_id(connection, desired_model)
+      if not resolved_model then
+        vim.notify(string.format("Model `%s` is unavailable for this OpenCode session", desired_model), vim.log.levels.WARN)
+        return
+      end
+
+      apply_model(resolved_model)
+      return
+    end
+
+    vim.ui.select(available_models, {
+      prompt = "Select CodeCompanion model",
+      format_item = function(item)
+        return item.modelId
+      end,
+    }, function(choice)
+      if not choice or not choice.modelId then
+        return
+      end
+
+      apply_model(choice.modelId)
+    end)
+
+    return
+  end
+
+  if desired_model == "" then
+    vim.notify("Provide a model name, for example: :AIModel openai/gpt-5.4/medium", vim.log.levels.INFO)
+    return
+  end
+
+  chat.adapter.model = desired_model
+  chat.adapter.defaults = chat.adapter.defaults or {}
+  chat.adapter.defaults.model = desired_model
+  if chat.change_model then
+    chat:change_model({ model = desired_model })
+  else
+    chat:update_metadata()
+  end
+  vim.notify(string.format("CodeCompanion model set to %s", desired_model), vim.log.levels.INFO)
+end
+
 local function build_ai_send_message(opts)
   local prefix = vim.trim(opts.args or "")
   local path = get_repo_relative_path()
@@ -457,25 +539,6 @@ codecompanion.setup({
   },
 })
 
-vim.api.nvim_create_user_command("CodeCompanionChatModel", function()
-  local bufnr = vim.api.nvim_get_current_buf()
-  local metadata = _G.codecompanion_chat_metadata and _G.codecompanion_chat_metadata[bufnr]
-
-  if not metadata and _G.codecompanion_current_context then
-    metadata = _G.codecompanion_chat_metadata[_G.codecompanion_current_context]
-  end
-
-  local adapter = metadata and metadata.adapter
-  if not adapter then
-    vim.notify("No active CodeCompanion chat buffer found", vim.log.levels.WARN)
-    return
-  end
-
-  vim.notify(string.format("CodeCompanion adapter: %s | model: %s", adapter.name, adapter.model))
-end, {
-  desc = "Show the active CodeCompanion chat adapter and model",
-})
-
 create_or_replace_user_command("AI", function()
   toggle_default_ai_chat()
 end, {
@@ -494,4 +557,32 @@ create_or_replace_user_command("AIRestore", function()
   restore_opencode_session()
 end, {
   desc = "List and restore an OpenCode session in CodeCompanion",
+})
+
+create_or_replace_user_command("AIModel", function(opts)
+  set_current_ai_chat_model(opts)
+end, {
+  nargs = "?",
+  complete = function()
+    local chat = get_target_ai_chat()
+    if not chat or chat.adapter.type ~= "acp" then
+      return {}
+    end
+
+    local chat_helpers = require("codecompanion.interactions.chat.helpers")
+    if not chat.acp_connection then
+      chat_helpers.create_acp_connection(chat)
+    end
+
+    local connection = chat.acp_connection
+    local models = connection and connection.get_models and connection:get_models() or nil
+    local items = {}
+
+    for _, model in ipairs(models and models.availableModels or {}) do
+      table.insert(items, model.modelId)
+    end
+
+    return items
+  end,
+  desc = "Change the active CodeCompanion chat model",
 })
