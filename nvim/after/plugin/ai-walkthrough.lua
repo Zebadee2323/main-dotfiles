@@ -21,6 +21,8 @@ local playback_state = {
   timer = nil,
   waiting_for_voice = false,
   voice_started = false,
+  pause_after_step = false,
+  paused_for_continue = false,
   focus_state = nil,
   display_state = nil,
   display_window = nil,
@@ -801,9 +803,12 @@ local function create_display_window(base_window)
     return nil
   end
 
+  local base_bufnr = vim.api.nvim_win_get_buf(base_window)
+  local split_cmd = is_chat_buffer(base_bufnr) and "botright vnew" or "vsplit"
+
   pcall(vim.api.nvim_set_current_win, base_window)
 
-  local ok = pcall(vim.cmd, "vsplit")
+  local ok = pcall(vim.cmd, split_cmd)
   if not ok then
     return nil
   end
@@ -950,6 +955,8 @@ local function reset_playback_state()
   playback_state.index = 0
   playback_state.waiting_for_voice = false
   playback_state.voice_started = false
+  playback_state.pause_after_step = false
+  playback_state.paused_for_continue = false
   playback_state.focus_state = nil
   playback_state.display_state = nil
   playback_state.display_window = nil
@@ -1087,6 +1094,7 @@ local function run_walkthrough_step(index)
   end
 
   playback_state.index = index
+  playback_state.paused_for_continue = false
 
   local shown, err = show_walkthrough_step(step)
   if not shown then
@@ -1101,13 +1109,20 @@ local function run_walkthrough_step(index)
   if not invoke_user_command("AIVoice", { step.description }) then
     playback_state.waiting_for_voice = false
     vim.notify("AI walkthrough could not start voice playback", vim.log.levels.WARN)
-    schedule_next_step(get_post_voice_delay_ms(), function()
-      run_walkthrough_step(index + 1)
-    end)
+
+    if playback_state.pause_after_step then
+      playback_state.paused_for_continue = true
+    else
+      schedule_next_step(get_post_voice_delay_ms(), function()
+        run_walkthrough_step(index + 1)
+      end)
+    end
   end
 end
 
-local function start_walkthrough(steps)
+local function start_walkthrough(steps, opts)
+  opts = opts or {}
+
   stop_walkthrough({
     stop_voice = true,
     force_stop_voice = true,
@@ -1120,6 +1135,8 @@ local function start_walkthrough(steps)
   playback_state.active = true
   playback_state.steps = vim.deepcopy(steps)
   playback_state.index = 0
+  playback_state.pause_after_step = opts.pause_after_step == true
+  playback_state.paused_for_continue = false
   playback_state.focus_state = capture_window_state(vim.api.nvim_get_current_win())
 
   local first_step = playback_state.steps[1]
@@ -1139,6 +1156,65 @@ local function start_walkthrough(steps)
   return true
 end
 
+local function continue_walkthrough()
+  if not playback_state.active or not playback_state.steps then
+    vim.notify("No AI walkthrough is currently running", vim.log.levels.WARN)
+    return
+  end
+
+  if playback_state.waiting_for_voice then
+    vim.notify("AI walkthrough is still narrating the current step", vim.log.levels.WARN)
+    return
+  end
+
+  if not playback_state.pause_after_step then
+    vim.notify("AI walkthrough is not paused for manual continuation", vim.log.levels.WARN)
+    return
+  end
+
+  if not playback_state.paused_for_continue then
+    vim.notify("AI walkthrough is not waiting for continue", vim.log.levels.WARN)
+    return
+  end
+
+  run_walkthrough_step(playback_state.index + 1)
+end
+
+local function replay_walkthrough_step(index)
+  if not playback_state.active or not playback_state.steps then
+    vim.notify("No AI walkthrough is currently running", vim.log.levels.WARN)
+    return
+  end
+
+  local step = playback_state.steps[index]
+  if not step then
+    vim.notify("No previous AI walkthrough step is available", vim.log.levels.WARN)
+    return
+  end
+
+  stop_timer()
+  playback_state.paused_for_continue = false
+  playback_state.waiting_for_voice = false
+  playback_state.voice_started = false
+  invoke_user_command("AIVoiceStop")
+  run_walkthrough_step(index)
+end
+
+local function previous_walkthrough_step()
+  if not playback_state.active or not playback_state.steps then
+    vim.notify("No AI walkthrough is currently running", vim.log.levels.WARN)
+    return
+  end
+
+  local previous_index = playback_state.index - 1
+  if previous_index < 1 then
+    vim.notify("Already at the first AI walkthrough step", vim.log.levels.WARN)
+    return
+  end
+
+  replay_walkthrough_step(previous_index)
+end
+
 local function handle_walkthrough_response(chat)
   local response = get_latest_assistant_raw_response(chat)
   if not response or not has_walkthrough_identifier(response) then
@@ -1151,7 +1227,10 @@ local function handle_walkthrough_response(chat)
     return true
   end
 
-  start_walkthrough(steps)
+  vim.defer_fn(function()
+    start_walkthrough(steps)
+  end, 20)
+
   return true
 end
 
@@ -1191,6 +1270,31 @@ end, {
   desc = "Repeat the last AI walkthrough",
 })
 
+create_or_replace_user_command("AIWalkthroughRepeatSlow", function()
+  if not last_walkthrough or #last_walkthrough == 0 then
+    vim.notify("No AI walkthrough is available to repeat", vim.log.levels.WARN)
+    return
+  end
+
+  start_walkthrough(last_walkthrough, {
+    pause_after_step = true,
+  })
+end, {
+  desc = "Repeat the last AI walkthrough, pausing after each step",
+})
+
+create_or_replace_user_command("AIWalkthroughContinue", function()
+  continue_walkthrough()
+end, {
+  desc = "Continue a paused AI walkthrough",
+})
+
+create_or_replace_user_command("AIWalkthroughPrevious", function()
+  previous_walkthrough_step()
+end, {
+  desc = "Replay the previous AI walkthrough step",
+})
+
 vim.api.nvim_create_autocmd("User", {
   group = walkthrough_augroup,
   pattern = "AIVoicePlaybackStarted",
@@ -1215,9 +1319,13 @@ vim.api.nvim_create_autocmd("User", {
     playback_state.waiting_for_voice = false
     playback_state.voice_started = false
 
-    schedule_next_step(get_post_voice_delay_ms(), function()
-      run_walkthrough_step(next_index)
-    end)
+    if playback_state.pause_after_step then
+      playback_state.paused_for_continue = true
+    else
+      schedule_next_step(get_post_voice_delay_ms(), function()
+        run_walkthrough_step(next_index)
+      end)
+    end
   end,
 })
 
