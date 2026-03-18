@@ -56,6 +56,7 @@ return require('packer').startup(function(use)
         'kdheepak/lazygit.nvim',
         requires = { { 'nvim-lua/plenary.nvim' } }
     }
+    use 'lewis6991/gitsigns.nvim'
 
     -- Lsp
     use 'neovim/nvim-lspconfig'
