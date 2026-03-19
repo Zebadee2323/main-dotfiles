@@ -19,6 +19,8 @@ local walkthrough_temp_keymaps = {
   { lhs = "<C-Space>", rhs = "<Cmd>AIWalkthroughToggle<CR>", desc = "Toggle AI walkthrough playback" },
   { lhs = "<C-h>", rhs = "<Cmd>AIWalkthroughPrev<CR>", desc = "Replay previous AI walkthrough step" },
   { lhs = "<C-l>", rhs = "<Cmd>AIWalkthroughNext<CR>", desc = "Advance AI walkthrough by one step" },
+  { lhs = "<C-j>", rhs = "<Cmd>AIWalkthroughWindow<CR>", desc = "Open AI walkthrough browser" },
+  { lhs = "<C-k>", rhs = "<Cmd>AIWalkthroughParent<CR>", desc = "Jump to parent AI walkthrough step" },
 }
 local saved_walkthrough_keymaps = {}
 
@@ -39,6 +41,8 @@ local playback_state = {
   highlighted_buffer = nil,
   description_buffer = nil,
   description_window = nil,
+  browser_buffer = nil,
+  browser_window = nil,
 }
 
 local last_walkthrough = nil
@@ -46,6 +50,7 @@ local pending_walkthrough_request = nil
 local next_walkthrough_step_id = 1
 local find_step_index_by_id
 local pause_walkthrough
+local render_walkthrough_browser_window
 
 local function create_or_replace_user_command(name, fn, opts)
   pcall(vim.api.nvim_del_user_command, name)
@@ -359,6 +364,27 @@ local function build_enquiry_message(step, query)
   return table.concat(lines, "\n")
 end
 
+local function build_instruction_message(step, instruction)
+  local lines = {
+    "You are helping with a user's instruction about a single step from an existing text editor walkthrough.",
+    "The user's name is Ollie",
+    "Do not reply with YAML unless the user explicitly asks for it.",
+    "Use the current walkthrough step as the main context for your response.",
+    "Stay tightly scoped to the same part of the codebase unless the instruction clearly requires adjacent context.",
+    "",
+    "Current step:",
+    string.format("path: %s", step.path),
+    string.format("line_start: %d", step.line_start),
+    string.format("line_end: %d", step.line_end),
+    string.format("description: %s", step.description),
+    "",
+    "User instruction:",
+    instruction,
+  }
+
+  return table.concat(lines, "\n")
+end
+
 local function send_walkthrough_request(opts, start_opts)
   local chat, err = get_target_chat()
   if not chat then
@@ -385,14 +411,10 @@ local function request_walkthrough_enquiry(opts)
   pause_walkthrough()
 
   local query = trim(opts.args or "")
-  if query == "" then
-    vim.notify("AIWalkthroughEnquire requires a question", vim.log.levels.WARN)
-    return
-  end
 
   local current_step = playback_state.steps[playback_state.index]
   if not current_step then
-    vim.notify("No current AI walkthrough step is available to enquire about", vim.log.levels.WARN)
+    vim.notify("No current AI walkthrough step is available to thread from", vim.log.levels.WARN)
     return
   end
 
@@ -410,6 +432,31 @@ local function request_walkthrough_enquiry(opts)
   if not send_message_to_chat(chat, build_enquiry_message(current_step, query)) then
     pending_walkthrough_request = nil
   end
+end
+
+local function request_walkthrough_instruction(opts)
+  if not playback_state.active or not playback_state.steps then
+    vim.notify("No AI walkthrough is currently running", vim.log.levels.WARN)
+    return
+  end
+
+  pause_walkthrough()
+
+  local instruction = trim(opts.args or "")
+
+  local current_step = playback_state.steps[playback_state.index]
+  if not current_step then
+    vim.notify("No current AI walkthrough step is available to instruct against", vim.log.levels.WARN)
+    return
+  end
+
+  local chat, err = get_target_chat()
+  if not chat then
+    vim.notify(err, vim.log.levels.WARN)
+    return
+  end
+
+  send_message_to_chat(chat, build_instruction_message(current_step, instruction))
 end
 
 local function flatten_message_content(content)
@@ -1137,6 +1184,28 @@ local function close_walkthrough_description_box()
   playback_state.description_buffer = nil
 end
 
+local function close_walkthrough_browser_window()
+  if playback_state.browser_window and vim.api.nvim_win_is_valid(playback_state.browser_window) then
+    pcall(vim.api.nvim_win_close, playback_state.browser_window, true)
+  end
+
+  if playback_state.browser_buffer and vim.api.nvim_buf_is_valid(playback_state.browser_buffer) then
+    pcall(vim.api.nvim_buf_delete, playback_state.browser_buffer, { force = true })
+  end
+
+  playback_state.browser_window = nil
+  playback_state.browser_buffer = nil
+end
+
+local function focus_walkthrough_browser_window()
+  if playback_state.browser_window and vim.api.nvim_win_is_valid(playback_state.browser_window) then
+    pcall(vim.api.nvim_set_current_win, playback_state.browser_window)
+    return true
+  end
+
+  return false
+end
+
 local function wrap_text(text, width)
   local lines = {}
 
@@ -1206,7 +1275,9 @@ local function build_walkthrough_description_lines(step_index, description, widt
   local steps = playback_state.steps or {}
   local current_step = steps[step_index] or {}
   local parent_index = current_step.parent_id and find_step_index_by_id(steps, current_step.parent_id) or nil
-  local lines = {}
+  local lines = {
+    string.format("Step %d/%d", step_index, total_steps),
+  }
 
   if parent_index then
     local child_index = 0
@@ -1223,8 +1294,6 @@ local function build_walkthrough_description_lines(step_index, description, widt
 
     table.insert(lines, string.format("Parent: Step %d", parent_index))
     table.insert(lines, string.format("Child Step %d/%d", child_index, child_total))
-  else
-    table.insert(lines, string.format("Step %d/%d", step_index, total_steps))
   end
 
   table.insert(lines, "")
@@ -1364,6 +1433,7 @@ end
 local function reset_playback_state()
   clear_active_step_highlight()
   close_walkthrough_description_box()
+  close_walkthrough_browser_window()
   unregister_walkthrough_keymaps()
   playback_state.active = false
   playback_state.steps = nil
@@ -1380,6 +1450,8 @@ local function reset_playback_state()
   playback_state.highlighted_buffer = nil
   playback_state.description_buffer = nil
   playback_state.description_window = nil
+  playback_state.browser_buffer = nil
+  playback_state.browser_window = nil
 end
 
 local function stop_walkthrough(opts)
@@ -1421,7 +1493,11 @@ end
 
 local function finish_walkthrough()
   stop_timer()
-  reset_playback_state()
+  playback_state.waiting_for_voice = false
+  playback_state.voice_started = false
+  playback_state.pause_after_step = true
+  playback_state.paused_for_continue = true
+  playback_state.auto_pause_at_index = nil
   vim.notify("AI walkthrough complete", vim.log.levels.INFO)
 end
 
@@ -1517,6 +1593,10 @@ local function run_walkthrough_step(index)
 
   playback_state.index = index
   playback_state.paused_for_continue = false
+
+  if playback_state.browser_window and vim.api.nvim_win_is_valid(playback_state.browser_window) then
+    render_walkthrough_browser_window()
+  end
 
   local shown, err = show_walkthrough_step(step)
   if not shown then
@@ -1746,6 +1826,95 @@ local function previous_walkthrough_step()
   replay_walkthrough_step(previous_index)
 end
 
+local function jump_to_parent_walkthrough_step()
+  if not playback_state.active or not playback_state.steps then
+    vim.notify("No AI walkthrough is currently running", vim.log.levels.WARN)
+    return
+  end
+
+  local current_step = playback_state.steps[playback_state.index]
+  if not current_step then
+    vim.notify("No current AI walkthrough step is available", vim.log.levels.WARN)
+    return
+  end
+
+  if current_step.parent_id == nil then
+    vim.notify("Current AI walkthrough step has no parent", vim.log.levels.INFO)
+    return
+  end
+
+  local parent_index = find_step_index_by_id(playback_state.steps, current_step.parent_id)
+  if not parent_index then
+    vim.notify("Parent AI walkthrough step could not be found", vim.log.levels.WARN)
+    return
+  end
+
+  replay_walkthrough_step(parent_index)
+end
+
+local function get_step_depth(steps, index)
+  local depth = 0
+  local seen = {}
+  local current_index = index
+
+  while current_index and current_index >= 1 and steps[current_index] do
+    local parent_id = steps[current_index].parent_id
+    if parent_id == nil then
+      break
+    end
+
+    local parent_index = find_step_index_by_id(steps, parent_id)
+    if not parent_index or seen[parent_index] then
+      break
+    end
+
+    seen[parent_index] = true
+    depth = depth + 1
+    current_index = parent_index
+  end
+
+  return depth
+end
+
+local function remove_walkthrough_branch(step_id)
+  local current_steps = playback_state.steps
+  if type(current_steps) ~= "table" or #current_steps == 0 then
+    return nil, nil, 0
+  end
+
+  local remove_index = find_step_index_by_id(current_steps, step_id)
+  if not remove_index then
+    return nil, nil, 0
+  end
+
+  local descendants = collect_descendant_step_ids(current_steps, step_id)
+  local removed_count = 0
+  local remaining = {}
+  local current_step_id = current_steps[playback_state.index] and current_steps[playback_state.index].id or nil
+
+  for _, step in ipairs(current_steps) do
+    if descendants[step.id] ~= nil then
+      removed_count = removed_count + 1
+    else
+      table.insert(remaining, vim.deepcopy(step))
+    end
+  end
+
+  playback_state.steps = remaining
+  last_walkthrough = vim.deepcopy(remaining)
+
+  local next_index = nil
+  if current_step_id then
+    next_index = find_step_index_by_id(remaining, current_step_id)
+  end
+
+  if not next_index and #remaining > 0 then
+    next_index = math.min(remove_index, #remaining)
+  end
+
+  return remaining, next_index, removed_count
+end
+
 find_step_index_by_id = function(steps, step_id)
   if type(steps) ~= "table" then
     return nil
@@ -1837,6 +2006,316 @@ local function remove_current_walkthrough_enquiry()
   replay_walkthrough_step(anchor_index)
 end
 
+local function shorten_walkthrough_path(path)
+  path = tostring(path or "")
+  if path == "" then
+    return path
+  end
+
+  local separator = path:match("\\") and "\\" or "/"
+  local parts = vim.split(path, separator, { plain = true, trimempty = false })
+
+  if #parts <= 4 then
+    return path
+  end
+
+  if separator == "\\" and parts[1]:match("^[A-Za-z]:$") then
+    return table.concat({ parts[1], "...", parts[#parts - 2], parts[#parts - 1], parts[#parts] }, separator)
+  end
+
+  if parts[1] == "" then
+    return table.concat({ "", "...", parts[#parts - 2], parts[#parts - 1], parts[#parts] }, separator)
+  end
+
+  return table.concat({ parts[1], "...", parts[#parts - 2], parts[#parts - 1], parts[#parts] }, separator)
+end
+
+local function remove_walkthrough_step_ids(step_ids)
+  local current_steps = playback_state.steps
+  if type(current_steps) ~= "table" or #current_steps == 0 then
+    return nil, nil, 0
+  end
+
+  local removed_count = 0
+  local remaining = {}
+  local current_step_id = current_steps[playback_state.index] and current_steps[playback_state.index].id or nil
+  local first_removed_index = nil
+
+  for index, step in ipairs(current_steps) do
+    if step_ids[step.id] then
+      removed_count = removed_count + 1
+      if not first_removed_index then
+        first_removed_index = index
+      end
+    else
+      table.insert(remaining, vim.deepcopy(step))
+    end
+  end
+
+  playback_state.steps = remaining
+  last_walkthrough = vim.deepcopy(remaining)
+
+  local next_index = nil
+  if current_step_id then
+    next_index = find_step_index_by_id(remaining, current_step_id)
+  end
+
+  if not next_index and #remaining > 0 then
+    next_index = math.min(first_removed_index or #remaining, #remaining)
+  end
+
+  return remaining, next_index, removed_count
+end
+
+local function build_walkthrough_browser_lines()
+  local steps = playback_state.steps or {}
+  local lines = {
+    "AI Walkthrough",
+    "<Enter>: jump  d/x: delete step tree  D: delete siblings  Q: end walkthrough  q: close",
+    "",
+  }
+  local line_to_step_index = {}
+
+  for index, step in ipairs(steps) do
+    local depth = get_step_depth(steps, index)
+    local marker = index == playback_state.index and ">" or " "
+    local label = step.parent_id and "Child" or "Step"
+    local summary = trim(step.description):gsub("%s+", " ")
+    local display_path = shorten_walkthrough_path(step.path)
+    if vim.fn.strdisplaywidth(summary) > 72 then
+      summary = vim.fn.strcharpart(summary, 0, 69) .. "..."
+    end
+
+    local text = string.format("%s%s[%d] %s %s:%d - %s", marker, string.rep("  ", depth), index, label, display_path, step.line_start, summary)
+    table.insert(lines, text)
+    line_to_step_index[#lines] = index
+  end
+
+  return lines, line_to_step_index
+end
+
+render_walkthrough_browser_window = function()
+  if not playback_state.browser_buffer or not vim.api.nvim_buf_is_valid(playback_state.browser_buffer) then
+    return false
+  end
+
+  local lines, line_to_step_index = build_walkthrough_browser_lines()
+  vim.bo[playback_state.browser_buffer].modifiable = true
+  vim.api.nvim_buf_set_lines(playback_state.browser_buffer, 0, -1, false, lines)
+  vim.bo[playback_state.browser_buffer].modifiable = false
+  vim.b[playback_state.browser_buffer].ai_walkthrough_line_to_step_index = line_to_step_index
+
+  if playback_state.browser_window and vim.api.nvim_win_is_valid(playback_state.browser_window) then
+    local target_line = 4
+    for line_number, step_index in pairs(line_to_step_index) do
+      if step_index == playback_state.index then
+        target_line = line_number
+        break
+      end
+    end
+
+    pcall(vim.api.nvim_win_set_cursor, playback_state.browser_window, { target_line, 0 })
+  end
+
+  return true
+end
+
+local function browser_window_step_index()
+  if not playback_state.browser_buffer or not vim.api.nvim_buf_is_valid(playback_state.browser_buffer) then
+    return nil
+  end
+
+  local cursor = vim.api.nvim_win_get_cursor(0)
+  local mapping = vim.b[playback_state.browser_buffer].ai_walkthrough_line_to_step_index or {}
+  return mapping[cursor[1]]
+end
+
+local function browser_window_jump_to_step()
+  local step_index = browser_window_step_index()
+  if not step_index then
+    return
+  end
+
+  close_walkthrough_browser_window()
+  replay_walkthrough_step(step_index)
+end
+
+local function browser_window_delete_step()
+  local step_index = browser_window_step_index()
+  local steps = playback_state.steps or {}
+  local step = step_index and steps[step_index] or nil
+  if not step then
+    return
+  end
+
+  stop_timer()
+  playback_state.waiting_for_voice = false
+  playback_state.voice_started = false
+  playback_state.paused_for_continue = false
+  playback_state.auto_pause_at_index = nil
+  invoke_user_command("AIVoiceStop")
+
+  local remaining, next_index, removed_count = remove_walkthrough_branch(step.id)
+  if removed_count == 0 then
+    return
+  end
+
+  if not remaining or #remaining == 0 then
+    stop_walkthrough({
+      stop_voice = false,
+      restore_display = true,
+      restore_focus = true,
+      close_created_window = true,
+      notify = true,
+    })
+    vim.notify("Removed the final AI walkthrough step tree", vim.log.levels.INFO)
+    return
+  end
+
+  render_walkthrough_browser_window()
+
+  if next_index then
+    replay_walkthrough_step(next_index)
+    render_walkthrough_browser_window()
+  end
+
+  focus_walkthrough_browser_window()
+
+  vim.notify(string.format("Removed %d AI walkthrough step%s", removed_count, removed_count == 1 and "" or "s"), vim.log.levels.INFO)
+end
+
+local function browser_window_delete_siblings()
+  local step_index = browser_window_step_index()
+  local steps = playback_state.steps or {}
+  local step = step_index and steps[step_index] or nil
+  if not step then
+    return
+  end
+
+  stop_timer()
+  playback_state.waiting_for_voice = false
+  playback_state.voice_started = false
+  playback_state.paused_for_continue = false
+  playback_state.auto_pause_at_index = nil
+  invoke_user_command("AIVoiceStop")
+
+  local remove_ids = {}
+
+  for _, candidate in ipairs(steps) do
+    if candidate.parent_id == step.parent_id then
+      local descendants = collect_descendant_step_ids(steps, candidate.id)
+      for descendant_id in pairs(descendants) do
+        remove_ids[descendant_id] = true
+      end
+    end
+  end
+
+  local remaining, next_index, removed_count = remove_walkthrough_step_ids(remove_ids)
+  if removed_count == 0 then
+    return
+  end
+
+  if not remaining or #remaining == 0 then
+    stop_walkthrough({
+      stop_voice = false,
+      restore_display = true,
+      restore_focus = true,
+      close_created_window = true,
+      notify = true,
+    })
+    vim.notify("Removed the final AI walkthrough sibling group", vim.log.levels.INFO)
+    return
+  end
+
+  render_walkthrough_browser_window()
+
+  if next_index then
+    replay_walkthrough_step(next_index)
+    render_walkthrough_browser_window()
+  end
+
+  focus_walkthrough_browser_window()
+
+  vim.notify(string.format("Removed %d AI walkthrough sibling step%s", removed_count, removed_count == 1 and "" or "s"), vim.log.levels.INFO)
+end
+
+local function browser_window_stop_walkthrough()
+  close_walkthrough_browser_window()
+
+  vim.schedule(function()
+    stop_walkthrough({
+      stop_voice = true,
+      restore_display = true,
+      restore_focus = true,
+      close_created_window = true,
+      notify = true,
+    })
+  end)
+end
+
+local function open_walkthrough_browser_window()
+  if not playback_state.active or not playback_state.steps or #playback_state.steps == 0 then
+    vim.notify("No AI walkthrough is currently running", vim.log.levels.WARN)
+    return
+  end
+
+  if playback_state.browser_window and vim.api.nvim_win_is_valid(playback_state.browser_window) then
+    render_walkthrough_browser_window()
+    pcall(vim.api.nvim_set_current_win, playback_state.browser_window)
+    return
+  end
+
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  if not bufnr then
+    return
+  end
+
+  local width = math.max(60, math.min(vim.o.columns - 2, math.floor(vim.o.columns * 0.95)))
+  local height = math.min(math.max(10, #playback_state.steps + 4), math.max(8, vim.o.lines - 6))
+  local row = math.max(1, math.floor((vim.o.lines - height) / 2) - 1)
+  local col = math.max(1, math.floor((vim.o.columns - width) / 2))
+
+  local ok, winid = pcall(vim.api.nvim_open_win, bufnr, true, {
+    relative = "editor",
+    row = row,
+    col = col,
+    width = width,
+    height = height,
+    style = "minimal",
+    border = "rounded",
+    title = " AI Walkthrough ",
+    title_pos = "center",
+    zindex = 200,
+  })
+
+  if not ok then
+    pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+    return
+  end
+
+  playback_state.browser_buffer = bufnr
+  playback_state.browser_window = winid
+
+  vim.bo[bufnr].bufhidden = "wipe"
+  vim.bo[bufnr].buftype = "nofile"
+  vim.bo[bufnr].swapfile = false
+  vim.bo[bufnr].modifiable = false
+  vim.wo[winid].cursorline = true
+  vim.wo[winid].wrap = false
+
+  local opts = { buffer = bufnr, silent = true, nowait = true }
+  vim.keymap.set("n", "q", close_walkthrough_browser_window, opts)
+  vim.keymap.set("n", "<Esc>", close_walkthrough_browser_window, opts)
+  vim.keymap.set("n", "Q", browser_window_stop_walkthrough, opts)
+  vim.keymap.set("n", "<CR>", browser_window_jump_to_step, opts)
+  vim.keymap.set("n", "d", browser_window_delete_step, opts)
+  vim.keymap.set("n", "x", browser_window_delete_step, opts)
+  vim.keymap.set("n", "dd", browser_window_delete_step, opts)
+  vim.keymap.set("n", "D", browser_window_delete_siblings, opts)
+
+  render_walkthrough_browser_window()
+end
+
 local function insert_walkthrough_steps(parent_step_id, new_steps)
   if type(new_steps) ~= "table" or #new_steps == 0 then
     return false
@@ -1881,6 +2360,9 @@ local function insert_walkthrough_steps(parent_step_id, new_steps)
 
   playback_state.steps = combined
   last_walkthrough = vim.deepcopy(combined)
+  if playback_state.browser_window and vim.api.nvim_win_is_valid(playback_state.browser_window) then
+    render_walkthrough_browser_window()
+  end
   return #prepared_steps
 end
 
@@ -2093,17 +2575,30 @@ end, {
   desc = "Replay the previous AI walkthrough step",
 })
 
+create_or_replace_user_command("AIWalkthroughParent", function()
+  jump_to_parent_walkthrough_step()
+end, {
+  desc = "Jump to the parent AI walkthrough step",
+})
+
 create_or_replace_user_command("AIWalkthroughPrevious", function()
   previous_walkthrough_step()
 end, {
   desc = "Replay the previous AI walkthrough step",
 })
 
-create_or_replace_user_command("AIWalkthroughEnquire", function(opts)
+create_or_replace_user_command("AIWalkthroughThread", function(opts)
   request_walkthrough_enquiry(opts)
 end, {
   nargs = "*",
-  desc = "Ask AI a follow-up question about the current walkthrough step",
+  desc = "Create an AI follow-up thread from the current walkthrough step",
+})
+
+create_or_replace_user_command("AIWalkthroughInstruct", function(opts)
+  request_walkthrough_instruction(opts)
+end, {
+  nargs = "*",
+  desc = "Send an instruction to AI using the current walkthrough step as context",
 })
 
 create_or_replace_user_command("AIWalkthroughRemoveEnquiry", function()
@@ -2116,6 +2611,12 @@ create_or_replace_user_command("AIWalkthroughRestart", function()
   reset_walkthrough()
 end, {
   desc = "Restart the active AI walkthrough from the first step",
+})
+
+create_or_replace_user_command("AIWalkthroughWindow", function()
+  open_walkthrough_browser_window()
+end, {
+  desc = "Open a floating window for browsing AI walkthrough steps",
 })
 
 create_or_replace_user_command("AIWalkthroughExport", function(opts)
