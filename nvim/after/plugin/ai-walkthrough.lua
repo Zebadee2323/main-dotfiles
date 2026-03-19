@@ -16,11 +16,11 @@ local walkthrough_highlight_group = "AIWalkthroughStep"
 local walkthrough_description_highlight_group = "AIWalkthroughDescription"
 local walkthrough_description_border_group = "AIWalkthroughDescriptionBorder"
 local walkthrough_temp_keymaps = {
-  { lhs = "<C-Space>", rhs = "<Cmd>AIWalkthroughToggle<CR>", desc = "Toggle AI walkthrough playback" },
-  { lhs = "<C-h>", rhs = "<Cmd>AIWalkthroughPrev<CR>", desc = "Replay previous AI walkthrough step" },
-  { lhs = "<C-l>", rhs = "<Cmd>AIWalkthroughNext<CR>", desc = "Advance AI walkthrough by one step" },
-  { lhs = "<C-j>", rhs = "<Cmd>AIWalkthroughWindow<CR>", desc = "Open AI walkthrough browser" },
-  { lhs = "<C-k>", rhs = "<Cmd>AIWalkthroughParent<CR>", desc = "Jump to parent AI walkthrough step" },
+  { lhs = "<C-Space>", rhs = "<Cmd>AIWalkToggle<CR>", desc = "Toggle AI walkthrough playback" },
+  { lhs = "<C-h>", rhs = "<Cmd>AIWalkPrev<CR>", desc = "Replay previous AI walkthrough step" },
+  { lhs = "<C-l>", rhs = "<Cmd>AIWalkNext<CR>", desc = "Advance AI walkthrough by one step" },
+  { lhs = "<C-j>", rhs = "<Cmd>AIWalkWindow<CR>", desc = "Open AI walkthrough browser" },
+  { lhs = "<C-k>", rhs = "<Cmd>AIWalkParent<CR>", desc = "Jump to parent AI walkthrough step" },
 }
 local saved_walkthrough_keymaps = {}
 
@@ -49,6 +49,7 @@ local last_walkthrough = nil
 local pending_walkthrough_request = nil
 local next_walkthrough_step_id = 1
 local find_step_index_by_id
+local collect_descendant_step_ids
 local pause_walkthrough
 local render_walkthrough_browser_window
 
@@ -1717,13 +1718,13 @@ local function continue_walkthrough(step_number)
   if step_number ~= nil then
     target_index = tonumber(step_number)
     if not target_index then
-      vim.notify("AIWalkthroughContinue step must be a number", vim.log.levels.WARN)
+      vim.notify("AIWalkContinue step must be a number", vim.log.levels.WARN)
       return
     end
 
     target_index = math.floor(target_index)
     if target_index < 1 then
-      vim.notify("AIWalkthroughContinue step must be at least 1", vim.log.levels.WARN)
+      vim.notify("AIWalkContinue step must be at least 1", vim.log.levels.WARN)
       return
     end
   end
@@ -1929,7 +1930,7 @@ find_step_index_by_id = function(steps, step_id)
   return nil
 end
 
-local function collect_descendant_step_ids(steps, ancestor_step_id)
+collect_descendant_step_ids = function(steps, ancestor_step_id)
   local descendants = {}
   local changed = true
 
@@ -2424,7 +2425,7 @@ local function export_walkthrough(file_arg)
 
   local target = trim(file_arg or "")
   if target == "" then
-    vim.notify("AIWalkthroughExport requires a file path", vim.log.levels.WARN)
+    vim.notify("AIWalkExport requires a file path", vim.log.levels.WARN)
     return
   end
 
@@ -2454,7 +2455,7 @@ end
 local function import_walkthrough(file_arg)
   local target = trim(file_arg or "")
   if target == "" then
-    vim.notify("AIWalkthroughImport requires a file path", vim.log.levels.WARN)
+    vim.notify("AIWalkImport requires a file path", vim.log.levels.WARN)
     return
   end
 
@@ -2485,7 +2486,7 @@ _G.ai_walkthrough_stop_current = stop_walkthrough
 
 set_walkthrough_highlight()
 
-create_or_replace_user_command("AIWalkthrough", function(opts)
+create_or_replace_user_command("AIWalk", function(opts)
   send_walkthrough_request(opts)
 end, {
   nargs = "*",
@@ -2493,7 +2494,7 @@ end, {
   desc = "Append an AI walkthrough prompt to the active CodeCompanion chat",
 })
 
-create_or_replace_user_command("AIWalkthroughSlow", function(opts)
+create_or_replace_user_command("AIWalkSlow", function(opts)
   send_walkthrough_request(opts, {
     pause_after_step = true,
   })
@@ -2503,7 +2504,7 @@ end, {
   desc = "Append an AI walkthrough prompt and start playback in slow mode",
 })
 
-create_or_replace_user_command("AIWalkthroughStop", function()
+create_or_replace_user_command("AIWalkStop", function()
   stop_walkthrough({
     stop_voice = true,
     restore_display = true,
@@ -2515,7 +2516,7 @@ end, {
   desc = "Stop the active AI walkthrough",
 })
 
-create_or_replace_user_command("AIWalkthroughRepeat", function()
+create_or_replace_user_command("AIWalkRepeat", function()
   if not last_walkthrough or #last_walkthrough == 0 then
     vim.notify("No AI walkthrough is available to repeat", vim.log.levels.WARN)
     return
@@ -2526,7 +2527,7 @@ end, {
   desc = "Repeat the last AI walkthrough",
 })
 
-create_or_replace_user_command("AIWalkthroughRepeatSlow", function()
+create_or_replace_user_command("AIWalkRepeatSlow", function()
   if not last_walkthrough or #last_walkthrough == 0 then
     vim.notify("No AI walkthrough is available to repeat", vim.log.levels.WARN)
     return
@@ -2539,13 +2540,13 @@ end, {
   desc = "Repeat the last AI walkthrough, pausing after each step",
 })
 
-create_or_replace_user_command("AIWalkthroughNext", function()
+create_or_replace_user_command("AIWalkNext", function()
   next_walkthrough_step()
 end, {
   desc = "Advance a paused AI walkthrough by one step",
 })
 
-create_or_replace_user_command("AIWalkthroughContinue", function(opts)
+create_or_replace_user_command("AIWalkContinue", function(opts)
   local step_number = trim(opts.args or "")
   if step_number == "" then
     step_number = nil
@@ -2557,69 +2558,69 @@ end, {
   desc = "Resume automatic AI walkthrough playback, optionally pausing again at a step",
 })
 
-create_or_replace_user_command("AIWalkthroughToggle", function()
+create_or_replace_user_command("AIWalkToggle", function()
   toggle_walkthrough_playback()
 end, {
   desc = "Toggle AI walkthrough playback",
 })
 
-create_or_replace_user_command("AIWalkthroughPause", function()
+create_or_replace_user_command("AIWalkPause", function()
   pause_walkthrough()
 end, {
   desc = "Pause the active AI walkthrough after the current step",
 })
 
-create_or_replace_user_command("AIWalkthroughPrev", function()
+create_or_replace_user_command("AIWalkPrev", function()
   previous_walkthrough_step()
 end, {
   desc = "Replay the previous AI walkthrough step",
 })
 
-create_or_replace_user_command("AIWalkthroughParent", function()
+create_or_replace_user_command("AIWalkParent", function()
   jump_to_parent_walkthrough_step()
 end, {
   desc = "Jump to the parent AI walkthrough step",
 })
 
-create_or_replace_user_command("AIWalkthroughPrevious", function()
+create_or_replace_user_command("AIWalkPrevious", function()
   previous_walkthrough_step()
 end, {
   desc = "Replay the previous AI walkthrough step",
 })
 
-create_or_replace_user_command("AIWalkthroughThread", function(opts)
+create_or_replace_user_command("AIWalkThread", function(opts)
   request_walkthrough_enquiry(opts)
 end, {
   nargs = "*",
   desc = "Create an AI follow-up thread from the current walkthrough step",
 })
 
-create_or_replace_user_command("AIWalkthroughInstruct", function(opts)
+create_or_replace_user_command("AIWalkInstruct", function(opts)
   request_walkthrough_instruction(opts)
 end, {
   nargs = "*",
   desc = "Send an instruction to AI using the current walkthrough step as context",
 })
 
-create_or_replace_user_command("AIWalkthroughRemoveEnquiry", function()
+create_or_replace_user_command("AIWalkRemoveEnquiry", function()
   remove_current_walkthrough_enquiry()
 end, {
   desc = "Remove enquiry steps for the current walkthrough branch",
 })
 
-create_or_replace_user_command("AIWalkthroughRestart", function()
+create_or_replace_user_command("AIWalkRestart", function()
   reset_walkthrough()
 end, {
   desc = "Restart the active AI walkthrough from the first step",
 })
 
-create_or_replace_user_command("AIWalkthroughWindow", function()
+create_or_replace_user_command("AIWalkWindow", function()
   open_walkthrough_browser_window()
 end, {
   desc = "Open a floating window for browsing AI walkthrough steps",
 })
 
-create_or_replace_user_command("AIWalkthroughExport", function(opts)
+create_or_replace_user_command("AIWalkExport", function(opts)
   export_walkthrough(opts.args)
 end, {
   nargs = 1,
@@ -2627,7 +2628,7 @@ end, {
   desc = "Export the current AI walkthrough to a YAML file",
 })
 
-create_or_replace_user_command("AIWalkthroughImport", function(opts)
+create_or_replace_user_command("AIWalkImport", function(opts)
   import_walkthrough(opts.args)
 end, {
   nargs = 1,
