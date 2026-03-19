@@ -56,6 +56,7 @@ local voice_playback_active = false
 local pending_acknowledgement_request_id = nil
 local pending_response_summary_request_id = nil
 local pending_response_summary_messages = {}
+local ai_voice_enabled = vim.g.ai_voice_enabled ~= false
 local ai_voice_codecompanion_enabled = true
 local ai_voice_speak
 local queue_ai_voice_speak
@@ -63,7 +64,14 @@ local get_latest_assistant_response
 local cleanup_hidden_chat_session
 local ai_voice_hook_generation = (vim.g.ai_voice_hook_generation or 0) + 1
 local cc_group = vim.api.nvim_create_augroup("CodeCompanionHooks", { clear = true })
+vim.g.ai_voice_enabled = ai_voice_enabled
 vim.g.ai_voice_hook_generation = ai_voice_hook_generation
+
+local function is_ai_voice_enabled()
+  return ai_voice_enabled
+end
+
+_G.ai_voice_is_enabled = is_ai_voice_enabled
 local response_summary_prompt = table.concat({
   "Task: rewrite the assistant response as short spoken audio for Text-to-speech.",
   "Rules:",
@@ -440,6 +448,10 @@ local function maybe_apply_robot_effects(wav_path, request_id)
 end
 
 ai_voice_speak = function(message, opts)
+  if not ai_voice_enabled then
+    return false
+  end
+
   message = vim.trim(message or "")
   if message == "" then
     vim.notify("AIVoice requires a message", vim.log.levels.ERROR)
@@ -1100,16 +1112,25 @@ local function replay_last_audio_message()
   ai_voice_speak(last_spoken_message)
 end
 
-local function set_ai_voice_codecompanion_enabled(enabled)
-  ai_voice_codecompanion_enabled = enabled
-  vim.notify(
-    "AI voice CodeCompanion responses are now " .. (enabled and "enabled" or "disabled"),
-    vim.log.levels.INFO
-  )
+local function set_ai_voice_enabled(enabled)
+  ai_voice_enabled = enabled == true
+  vim.g.ai_voice_enabled = ai_voice_enabled
+  vim.notify("AI voice is now " .. (ai_voice_enabled and "enabled" or "disabled"), vim.log.levels.INFO)
 end
 
-local function toggle_ai_voice_codecompanion()
-  set_ai_voice_codecompanion_enabled(not ai_voice_codecompanion_enabled)
+local function set_ai_voice_codecompanion_enabled(enabled, opts)
+  opts = opts or {}
+  ai_voice_codecompanion_enabled = enabled
+  if opts.notify ~= false then
+    vim.notify(
+      "AI voice CodeCompanion responses are now " .. (enabled and "enabled" or "disabled"),
+      vim.log.levels.INFO
+    )
+  end
+end
+
+local function toggle_ai_voice_codecompanion(opts)
+  set_ai_voice_codecompanion_enabled(not ai_voice_codecompanion_enabled, opts)
 end
 
 local function create_or_replace_user_command(name, fn, opts)
@@ -1299,21 +1320,29 @@ end, {
 })
 
 create_or_replace_user_command("AIToggleVoice", function()
-  toggle_ai_voice_codecompanion()
+  set_ai_voice_enabled(not ai_voice_enabled)
+  toggle_ai_voice_codecompanion({ notify = false })
+
+  if not ai_voice_enabled then
+    ai_voice_stop()
+  end
 end, {
-  desc = "Toggle AI voice for CodeCompanion responses",
+  desc = "Toggle AI voice playback",
 })
 
 create_or_replace_user_command("AIEnableVoice", function()
-  set_ai_voice_codecompanion_enabled(true)
+  set_ai_voice_enabled(true)
+  set_ai_voice_codecompanion_enabled(true, { notify = false })
 end, {
-  desc = "Enable AI voice for CodeCompanion responses",
+  desc = "Enable AI voice playback",
 })
 
 create_or_replace_user_command("AIDisableVoice", function()
-  set_ai_voice_codecompanion_enabled(false)
+  set_ai_voice_enabled(false)
+  set_ai_voice_codecompanion_enabled(false, { notify = false })
+  ai_voice_stop()
 end, {
-  desc = "Disable AI voice for CodeCompanion responses",
+  desc = "Disable AI voice playback",
 })
 
 create_or_replace_user_command("AIToggleVoiceRobot", function()

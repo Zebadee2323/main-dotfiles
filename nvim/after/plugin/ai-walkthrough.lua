@@ -105,7 +105,40 @@ local function get_post_voice_delay_ms()
     return math.max(0, math.floor(delay_seconds * 1000))
   end
 
-  return 2000
+  return 1500
+end
+
+local function get_voice_disabled_extra_delay_ms()
+  local delay_ms = tonumber(vim.g.ai_walkthrough_voice_disabled_extra_delay_ms)
+  if delay_ms ~= nil then
+    return math.max(0, math.floor(delay_ms))
+  end
+
+  local delay_seconds = tonumber(vim.g.ai_walkthrough_voice_disabled_extra_delay_seconds)
+  if delay_seconds ~= nil then
+    return math.max(0, math.floor(delay_seconds * 1000))
+  end
+
+  return 3000
+end
+
+local function get_inter_step_delay_ms(opts)
+  opts = opts or {}
+
+  local delay_ms = get_post_voice_delay_ms()
+  if opts.voice_disabled then
+    delay_ms = delay_ms + get_voice_disabled_extra_delay_ms()
+  end
+
+  return delay_ms
+end
+
+local function is_ai_voice_enabled()
+  if type(_G.ai_voice_is_enabled) == "function" then
+    return _G.ai_voice_is_enabled()
+  end
+
+  return vim.g.ai_voice_enabled ~= false
 end
 
 local function set_walkthrough_highlight()
@@ -1580,6 +1613,7 @@ local function schedule_next_step(delay_ms, callback)
 end
 
 local should_pause_after_current_step
+local advance_walkthrough_step
 
 local function run_walkthrough_step(index)
   if not playback_state.active or not playback_state.steps then
@@ -1606,6 +1640,18 @@ local function run_walkthrough_step(index)
     return
   end
 
+  if not is_ai_voice_enabled() then
+    if should_pause_after_current_step() then
+      playback_state.paused_for_continue = true
+    else
+      schedule_next_step(get_inter_step_delay_ms({ voice_disabled = true }), function()
+        run_walkthrough_step(index + 1)
+      end)
+    end
+
+    return
+  end
+
   playback_state.waiting_for_voice = true
   playback_state.voice_started = false
 
@@ -1616,7 +1662,7 @@ local function run_walkthrough_step(index)
     if should_pause_after_current_step() then
       playback_state.paused_for_continue = true
     else
-      schedule_next_step(get_post_voice_delay_ms(), function()
+      schedule_next_step(get_inter_step_delay_ms(), function()
         run_walkthrough_step(index + 1)
       end)
     end
@@ -1684,13 +1730,12 @@ local function next_walkthrough_step()
   end
 
   if playback_state.waiting_for_voice then
-    stop_timer()
-    playback_state.waiting_for_voice = false
-    playback_state.voice_started = false
-    playback_state.paused_for_continue = false
-    playback_state.auto_pause_at_index = nil
-    invoke_user_command("AIVoiceStop")
-    run_walkthrough_step(playback_state.index + 1)
+    advance_walkthrough_step(playback_state.index + 1)
+    return
+  end
+
+  if playback_state.timer then
+    advance_walkthrough_step(playback_state.index + 1)
     return
   end
 
@@ -1705,7 +1750,7 @@ local function next_walkthrough_step()
   end
 
   playback_state.auto_pause_at_index = nil
-  run_walkthrough_step(playback_state.index + 1)
+  advance_walkthrough_step(playback_state.index + 1)
 end
 
 local function continue_walkthrough(step_number)
@@ -1800,6 +1845,31 @@ local function replay_walkthrough_step(index)
   local step = playback_state.steps[index]
   if not step then
     vim.notify("No previous AI walkthrough step is available", vim.log.levels.WARN)
+    return
+  end
+
+  stop_timer()
+  playback_state.paused_for_continue = false
+  playback_state.auto_pause_at_index = nil
+  playback_state.waiting_for_voice = false
+  playback_state.voice_started = false
+  invoke_user_command("AIVoiceStop")
+  run_walkthrough_step(index)
+end
+
+advance_walkthrough_step = function(index)
+  if not playback_state.active or not playback_state.steps then
+    vim.notify("No AI walkthrough is currently running", vim.log.levels.WARN)
+    return
+  end
+
+  local step = playback_state.steps[index]
+  if not step then
+    if index > (playback_state.index or 0) then
+      finish_walkthrough()
+    else
+      vim.notify("No AI walkthrough step is available", vim.log.levels.WARN)
+    end
     return
   end
 
@@ -2663,7 +2733,7 @@ vim.api.nvim_create_autocmd("User", {
     if should_pause_after_current_step() then
       playback_state.paused_for_continue = true
     else
-      schedule_next_step(get_post_voice_delay_ms(), function()
+      schedule_next_step(get_inter_step_delay_ms(), function()
         run_walkthrough_step(next_index)
       end)
     end
