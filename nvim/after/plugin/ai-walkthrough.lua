@@ -15,6 +15,12 @@ local walkthrough_highlight_ns = vim.api.nvim_create_namespace("ai_walkthrough_a
 local walkthrough_highlight_group = "AIWalkthroughStep"
 local walkthrough_description_highlight_group = "AIWalkthroughDescription"
 local walkthrough_description_border_group = "AIWalkthroughDescriptionBorder"
+local walkthrough_temp_keymaps = {
+  { lhs = "<C-Space>", rhs = "<Cmd>AIWalkthroughToggle<CR>", desc = "Toggle AI walkthrough playback" },
+  { lhs = "<C-h>", rhs = "<Cmd>AIWalkthroughPrev<CR>", desc = "Replay previous AI walkthrough step" },
+  { lhs = "<C-l>", rhs = "<Cmd>AIWalkthroughNext<CR>", desc = "Advance AI walkthrough by one step" },
+}
+local saved_walkthrough_keymaps = {}
 
 local playback_state = {
   active = false,
@@ -25,6 +31,7 @@ local playback_state = {
   voice_started = false,
   pause_after_step = false,
   paused_for_continue = false,
+  auto_pause_at_index = nil,
   focus_state = nil,
   display_state = nil,
   display_window = nil,
@@ -35,11 +42,42 @@ local playback_state = {
 }
 
 local last_walkthrough = nil
-local pending_walkthrough_start_opts = nil
+local pending_walkthrough_request = nil
+local next_walkthrough_step_id = 1
+local find_step_index_by_id
+local pause_walkthrough
 
 local function create_or_replace_user_command(name, fn, opts)
   pcall(vim.api.nvim_del_user_command, name)
   vim.api.nvim_create_user_command(name, fn, opts)
+end
+
+local function unregister_walkthrough_keymaps()
+  for _, keymap in ipairs(walkthrough_temp_keymaps) do
+    pcall(vim.keymap.del, "n", keymap.lhs)
+
+    local saved = saved_walkthrough_keymaps[keymap.lhs]
+    if saved then
+      pcall(vim.fn.mapset, saved.mode or "n", false, saved)
+      saved_walkthrough_keymaps[keymap.lhs] = nil
+    end
+  end
+end
+
+local function register_walkthrough_keymaps()
+  for _, keymap in ipairs(walkthrough_temp_keymaps) do
+    if not saved_walkthrough_keymaps[keymap.lhs] then
+      local existing = vim.fn.maparg(keymap.lhs, "n", false, true)
+      if type(existing) == "table" and not vim.tbl_isempty(existing) then
+        saved_walkthrough_keymaps[keymap.lhs] = existing
+      end
+    end
+
+    vim.keymap.set("n", keymap.lhs, keymap.rhs, {
+      desc = keymap.desc,
+      silent = true,
+    })
+  end
 end
 
 local function trim(value)
@@ -244,7 +282,8 @@ end
 local function build_walkthrough_message(opts)
   local query = trim(opts.args or "")
   local lines = {
-    "You are creating an editor walkthrough for the user's query.",
+    "You are creating a text editor walkthrough for the user's query.",
+    "The user's name is Ollie",
     "Reply with valid YAML only.",
     "The response must include the exact identifier comment `# ai-walkthrough` immediately before the YAML array.",
     "Return a top-level YAML array of steps.",
@@ -253,7 +292,7 @@ local function build_walkthrough_message(opts)
     "`line_start` and `line_end` must be 1-based line numbers that define the inclusive range to highlight for that step.",
     "Keep ranges focused on the most relevant block, and avoid ranges that span an entire file unless the file is truly tiny.",
     "If a step only needs one line, set `line_start` and `line_end` to the same value.",
-    "`description` must be concise natural narration that sounds good when spoken aloud.",
+    "`description` must be natural narration that sounds good when spoken aloud.",
     "Order the steps so they form a clear walkthrough that directly answers the query.",
     "Example:",
     "```yaml",
@@ -278,6 +317,48 @@ local function build_walkthrough_message(opts)
   return table.concat(lines, "\n")
 end
 
+local function build_enquiry_message(step, query)
+  local lines = {
+    "You are answering a user's follow-up question about a single step from an existing text editor walkthrough.",
+    "The user's name is Ollie",
+    "Reply with valid YAML only.",
+    "The response must include the exact identifier comment `# ai-walkthrough` immediately before the YAML array.",
+    "Return a top-level YAML array of additional steps.",
+    "Each step must include `path`, `line_start`, `line_end`, and `description`.",
+    "`path` must point to a real file and should usually be repo-relative.",
+    "`line_start` and `line_end` must be 1-based line numbers that define the inclusive range to highlight for that step.",
+    "Keep ranges focused on the most relevant block, and avoid ranges that span an entire file unless the file is truly tiny.",
+    "If a step only needs one line, set `line_start` and `line_end` to the same value.",
+    "`description` must be natural narration that sounds good when spoken aloud.",
+    "Answer the user's follow-up question in relation to the current walkthrough step.",
+    "Return only the new in-between steps that should be inserted immediately after the current step.",
+    "Stay tightly scoped to the same part of the codebase and preserve a clear walkthrough order.",
+    "Example:",
+    "```yaml",
+    "# ai-walkthrough",
+    "- path: after/plugin/code-companion.lua",
+    "  line_start: 548",
+    "  line_end: 554",
+    "  description: First focus on where the command collects the editor context before anything is sent to the chat.",
+    "- path: after/plugin/code-companion.lua",
+    "  line_start: 555",
+    "  line_end: 560",
+    "  description: Then look at the branch that appends that prepared context into the active chat input.",
+    "```",
+    "",
+    "Current step:",
+    string.format("path: %s", step.path),
+    string.format("line_start: %d", step.line_start),
+    string.format("line_end: %d", step.line_end),
+    string.format("description: %s", step.description),
+    "",
+    "User query:",
+    query,
+  }
+
+  return table.concat(lines, "\n")
+end
+
 local function send_walkthrough_request(opts, start_opts)
   local chat, err = get_target_chat()
   if not chat then
@@ -285,8 +366,50 @@ local function send_walkthrough_request(opts, start_opts)
     return
   end
 
-  pending_walkthrough_start_opts = vim.deepcopy(start_opts or {})
-  send_message_to_chat(chat, build_walkthrough_message(opts))
+  pending_walkthrough_request = {
+    mode = "start",
+    start_opts = vim.deepcopy(start_opts or {}),
+  }
+
+  if not send_message_to_chat(chat, build_walkthrough_message(opts)) then
+    pending_walkthrough_request = nil
+  end
+end
+
+local function request_walkthrough_enquiry(opts)
+  if not playback_state.active or not playback_state.steps then
+    vim.notify("No AI walkthrough is currently running", vim.log.levels.WARN)
+    return
+  end
+
+  pause_walkthrough()
+
+  local query = trim(opts.args or "")
+  if query == "" then
+    vim.notify("AIWalkthroughEnquire requires a question", vim.log.levels.WARN)
+    return
+  end
+
+  local current_step = playback_state.steps[playback_state.index]
+  if not current_step then
+    vim.notify("No current AI walkthrough step is available to enquire about", vim.log.levels.WARN)
+    return
+  end
+
+  local chat, err = get_target_chat()
+  if not chat then
+    vim.notify(err, vim.log.levels.WARN)
+    return
+  end
+
+  pending_walkthrough_request = {
+    mode = "enquire",
+    parent_step_id = current_step.id,
+  }
+
+  if not send_message_to_chat(chat, build_enquiry_message(current_step, query)) then
+    pending_walkthrough_request = nil
+  end
 end
 
 local function flatten_message_content(content)
@@ -638,6 +761,92 @@ local function get_table_value(step, keys)
   return nil
 end
 
+local function sanitize_walkthrough_description(value)
+  if type(value) ~= "string" then
+    return ""
+  end
+
+  local lines = vim.split(value:gsub("\r\n", "\n"), "\n", { plain = true, trimempty = false })
+  local cleaned = {}
+
+  for _, line in ipairs(lines) do
+    local trimmed = vim.trim(line)
+    local lower = trimmed:lower()
+
+    if trimmed ~= ""
+        and trimmed ~= "```"
+        and not lower:match("^```")
+        and not lower:match("^<commentary>")
+        and not lower:match("^</commentary>")
+        and not lower:match("^<tool")
+        and not lower:match("^</tool")
+        and not lower:match("^assistant%s+to=")
+        and not lower:match("^commentary%s+to=")
+        and not lower:match("^function[s]?%.[%w_]+")
+        and not lower:match("^recipient_name%s*:")
+        and not lower:match("^parameters%s*:")
+        and not lower:match("^tool_uses%s*:")
+        and not lower:match("^%*%*commentary%*%*") then
+      table.insert(cleaned, trimmed)
+    end
+  end
+
+  local text = trim(table.concat(cleaned, " "))
+  text = text:gsub("%s+", " ")
+  text = text:gsub("%s+([,.;:!?])", "%1")
+  text = trim(text)
+
+  return text
+end
+
+local function assign_step_identity(step, parent_id)
+  if type(step) ~= "table" then
+    return step
+  end
+
+  if step.id == nil then
+    step.id = next_walkthrough_step_id
+    next_walkthrough_step_id = next_walkthrough_step_id + 1
+  else
+    next_walkthrough_step_id = math.max(next_walkthrough_step_id, tonumber(step.id) or 0)
+    next_walkthrough_step_id = next_walkthrough_step_id + 1
+  end
+
+  if parent_id ~= nil then
+    step.parent_id = parent_id
+  elseif step.parent_id == nil then
+    step.parent_id = nil
+  end
+
+  return step
+end
+
+local function prepare_walkthrough_steps(steps, parent_id)
+  if type(steps) ~= "table" then
+    return steps
+  end
+
+  local prepared = {}
+
+  for _, step in ipairs(steps) do
+    if type(step) == "table" then
+      local copied = vim.deepcopy(step)
+      assign_step_identity(copied, parent_id)
+      table.insert(prepared, copied)
+    end
+  end
+
+  return prepared
+end
+
+local function yaml_quote(value)
+  value = tostring(value or "")
+  value = value:gsub("\\", "\\\\")
+  value = value:gsub('"', '\\"')
+  value = value:gsub("\n", "\\n")
+  return '"' .. value .. '"'
+end
+
 local function normalize_walkthrough_steps(decoded)
   if type(decoded) == "table" and not islist(decoded) then
     decoded = decoded.steps or decoded.walkthrough or decoded.items
@@ -670,7 +879,14 @@ local function normalize_walkthrough_steps(decoded)
         "line_number",
         "lineNumber",
       }))
-      local description = trim(get_table_value(step, { "description", "walkthrough_description", "walkthrough", "text" }))
+      local description = sanitize_walkthrough_description(get_table_value(step, {
+        "description",
+        "walkthrough_description",
+        "walkthrough",
+        "text",
+      }))
+      local step_id = tonumber(get_table_value(step, { "id", "step_id", "stepId" }))
+      local parent_id = tonumber(get_table_value(step, { "parent_id", "parentId", "parent_step_id", "parentStepId" }))
       local resolved_path = resolve_step_path(path)
 
       if path ~= "" and line_start and line_start >= 1 and line_end and line_end >= 1 and description ~= "" and resolved_path then
@@ -678,6 +894,8 @@ local function normalize_walkthrough_steps(decoded)
         local normalized_line_end = math.max(normalized_line_start, math.floor(math.max(line_start, line_end)))
 
         table.insert(steps, {
+          id = step_id and math.floor(step_id) or nil,
+          parent_id = parent_id and math.floor(parent_id) or nil,
           path = path,
           resolved_path = resolved_path,
           line_start = normalized_line_start,
@@ -983,7 +1201,39 @@ local function get_window_relative_line_row(winid, line)
   return math.max(0, line - (view.topline or 1))
 end
 
-local function show_walkthrough_description_box(winid, line_start, description)
+local function build_walkthrough_description_lines(step_index, description, width)
+  local total_steps = playback_state.steps and #playback_state.steps or 0
+  local steps = playback_state.steps or {}
+  local current_step = steps[step_index] or {}
+  local parent_index = current_step.parent_id and find_step_index_by_id(steps, current_step.parent_id) or nil
+  local lines = {}
+
+  if parent_index then
+    local child_index = 0
+    local child_total = 0
+
+    for _, step in ipairs(steps) do
+      if step.parent_id == current_step.parent_id then
+        child_total = child_total + 1
+        if step.id == current_step.id then
+          child_index = child_total
+        end
+      end
+    end
+
+    table.insert(lines, string.format("Parent: Step %d", parent_index))
+    table.insert(lines, string.format("Child Step %d/%d", child_index, child_total))
+  else
+    table.insert(lines, string.format("Step %d/%d", step_index, total_steps))
+  end
+
+  table.insert(lines, "")
+
+  vim.list_extend(lines, wrap_text(description, width))
+  return lines
+end
+
+local function show_walkthrough_description_box(winid, step_index, line_start, description)
   close_walkthrough_description_box()
 
   if not (winid and vim.api.nvim_win_is_valid(winid)) then
@@ -1002,7 +1252,7 @@ local function show_walkthrough_description_box(winid, line_start, description)
     return false
   end
 
-  local wrapped = wrap_text(description, inner_width)
+  local wrapped = build_walkthrough_description_lines(step_index, description, inner_width)
   local box_height = math.min(#wrapped, math.max(1, height - 2))
   local display_lines = vim.list_slice(wrapped, 1, box_height)
   local start_row = get_window_relative_line_row(winid, line_start) or 0
@@ -1114,6 +1364,7 @@ end
 local function reset_playback_state()
   clear_active_step_highlight()
   close_walkthrough_description_box()
+  unregister_walkthrough_keymaps()
   playback_state.active = false
   playback_state.steps = nil
   playback_state.index = 0
@@ -1121,6 +1372,7 @@ local function reset_playback_state()
   playback_state.voice_started = false
   playback_state.pause_after_step = false
   playback_state.paused_for_continue = false
+  playback_state.auto_pause_at_index = nil
   playback_state.focus_state = nil
   playback_state.display_state = nil
   playback_state.display_window = nil
@@ -1213,7 +1465,7 @@ local function show_walkthrough_step(step)
     local bufnr = vim.api.nvim_win_get_buf(winid)
     highlight_walkthrough_step(bufnr, step.line_start, step.line_end)
     focus_walkthrough_range(winid, step.line_start, step.line_end)
-    show_walkthrough_description_box(winid, step.line_start, step.description)
+    show_walkthrough_description_box(winid, playback_state.index, step.line_start, step.description)
   end)
 
   if not ok then
@@ -1250,6 +1502,8 @@ local function schedule_next_step(delay_ms, callback)
   end)
 end
 
+local should_pause_after_current_step
+
 local function run_walkthrough_step(index)
   if not playback_state.active or not playback_state.steps then
     return
@@ -1278,7 +1532,7 @@ local function run_walkthrough_step(index)
     playback_state.waiting_for_voice = false
     vim.notify("AI walkthrough could not start voice playback", vim.log.levels.WARN)
 
-    if playback_state.pause_after_step then
+    if should_pause_after_current_step() then
       playback_state.paused_for_continue = true
     else
       schedule_next_step(get_post_voice_delay_ms(), function()
@@ -1288,8 +1542,24 @@ local function run_walkthrough_step(index)
   end
 end
 
+should_pause_after_current_step = function()
+  if playback_state.pause_after_step then
+    return true
+  end
+
+  local target_index = tonumber(playback_state.auto_pause_at_index)
+  if target_index and playback_state.index >= target_index then
+    playback_state.auto_pause_at_index = nil
+    playback_state.pause_after_step = true
+    return true
+  end
+
+  return false
+end
+
 local function start_walkthrough(steps, opts)
   opts = opts or {}
+  steps = prepare_walkthrough_steps(steps)
 
   stop_walkthrough({
     stop_voice = true,
@@ -1305,6 +1575,7 @@ local function start_walkthrough(steps, opts)
   playback_state.index = 0
   playback_state.pause_after_step = opts.pause_after_step == true
   playback_state.paused_for_continue = false
+  playback_state.auto_pause_at_index = nil
   playback_state.focus_state = capture_window_state(vim.api.nvim_get_current_win())
 
   local first_step = playback_state.steps[1]
@@ -1319,19 +1590,26 @@ local function start_walkthrough(steps, opts)
   playback_state.display_window_created = created
   playback_state.display_state = created and nil or capture_window_state(display_window)
   last_walkthrough = vim.deepcopy(playback_state.steps)
+  register_walkthrough_keymaps()
 
   run_walkthrough_step(1)
   return true
 end
 
-local function continue_walkthrough()
+local function next_walkthrough_step()
   if not playback_state.active or not playback_state.steps then
     vim.notify("No AI walkthrough is currently running", vim.log.levels.WARN)
     return
   end
 
   if playback_state.waiting_for_voice then
-    vim.notify("AI walkthrough is still narrating the current step", vim.log.levels.WARN)
+    stop_timer()
+    playback_state.waiting_for_voice = false
+    playback_state.voice_started = false
+    playback_state.paused_for_continue = false
+    playback_state.auto_pause_at_index = nil
+    invoke_user_command("AIVoiceStop")
+    run_walkthrough_step(playback_state.index + 1)
     return
   end
 
@@ -1345,16 +1623,68 @@ local function continue_walkthrough()
     return
   end
 
+  playback_state.auto_pause_at_index = nil
   run_walkthrough_step(playback_state.index + 1)
 end
 
-local function pause_walkthrough()
+local function continue_walkthrough(step_number)
+  if not playback_state.active or not playback_state.steps then
+    vim.notify("No AI walkthrough is currently running", vim.log.levels.WARN)
+    return
+  end
+
+  local target_index = nil
+  if step_number ~= nil then
+    target_index = tonumber(step_number)
+    if not target_index then
+      vim.notify("AIWalkthroughContinue step must be a number", vim.log.levels.WARN)
+      return
+    end
+
+    target_index = math.floor(target_index)
+    if target_index < 1 then
+      vim.notify("AIWalkthroughContinue step must be at least 1", vim.log.levels.WARN)
+      return
+    end
+  end
+
+  if target_index and not playback_state.waiting_for_voice and playback_state.index >= target_index then
+    playback_state.pause_after_step = true
+    playback_state.paused_for_continue = true
+    playback_state.auto_pause_at_index = nil
+    vim.notify("AI walkthrough is already at or past that step", vim.log.levels.INFO)
+    return
+  end
+
+  local was_paused_for_continue = playback_state.paused_for_continue
+  playback_state.pause_after_step = false
+  playback_state.paused_for_continue = false
+  playback_state.auto_pause_at_index = target_index
+
+  if playback_state.waiting_for_voice then
+    return
+  end
+
+  if playback_state.timer then
+    return
+  end
+
+  if not was_paused_for_continue then
+    return
+  end
+
+  stop_timer()
+  run_walkthrough_step(playback_state.index + 1)
+end
+
+pause_walkthrough = function()
   if not playback_state.active or not playback_state.steps then
     vim.notify("No AI walkthrough is currently running", vim.log.levels.WARN)
     return
   end
 
   playback_state.pause_after_step = true
+  playback_state.auto_pause_at_index = nil
 
   if playback_state.waiting_for_voice then
     vim.notify("AI walkthrough will pause after the current step", vim.log.levels.INFO)
@@ -1364,6 +1694,20 @@ local function pause_walkthrough()
   stop_timer()
   playback_state.paused_for_continue = true
   vim.notify("AI walkthrough paused", vim.log.levels.INFO)
+end
+
+local function toggle_walkthrough_playback()
+  if not playback_state.active or not playback_state.steps then
+    vim.notify("No AI walkthrough is currently running", vim.log.levels.WARN)
+    return
+  end
+
+  if playback_state.pause_after_step and playback_state.paused_for_continue and not playback_state.waiting_for_voice then
+    continue_walkthrough()
+    return
+  end
+
+  pause_walkthrough()
 end
 
 local function replay_walkthrough_step(index)
@@ -1380,6 +1724,7 @@ local function replay_walkthrough_step(index)
 
   stop_timer()
   playback_state.paused_for_continue = false
+  playback_state.auto_pause_at_index = nil
   playback_state.waiting_for_voice = false
   playback_state.voice_started = false
   invoke_user_command("AIVoiceStop")
@@ -1401,6 +1746,144 @@ local function previous_walkthrough_step()
   replay_walkthrough_step(previous_index)
 end
 
+find_step_index_by_id = function(steps, step_id)
+  if type(steps) ~= "table" then
+    return nil
+  end
+
+  for index, step in ipairs(steps) do
+    if step.id == step_id then
+      return index
+    end
+  end
+
+  return nil
+end
+
+local function collect_descendant_step_ids(steps, ancestor_step_id)
+  local descendants = {}
+  local changed = true
+
+  descendants[ancestor_step_id] = false
+
+  while changed do
+    changed = false
+    for _, step in ipairs(steps) do
+      if step.id ~= ancestor_step_id and step.parent_id ~= nil and descendants[step.parent_id] ~= nil and descendants[step.id] == nil then
+        descendants[step.id] = true
+        changed = true
+      end
+    end
+  end
+
+  return descendants
+end
+
+local function remove_walkthrough_descendants(anchor_step_id)
+  local current_steps = playback_state.steps
+  if type(current_steps) ~= "table" or #current_steps == 0 then
+    return nil, 0
+  end
+
+  local anchor_index = find_step_index_by_id(current_steps, anchor_step_id)
+  if not anchor_index then
+    return nil, 0
+  end
+
+  local descendants = collect_descendant_step_ids(current_steps, anchor_step_id)
+  local removed_count = 0
+  local remaining = {}
+
+  for _, step in ipairs(current_steps) do
+    if descendants[step.id] == true then
+      removed_count = removed_count + 1
+    else
+      table.insert(remaining, vim.deepcopy(step))
+    end
+  end
+
+  playback_state.steps = remaining
+  last_walkthrough = vim.deepcopy(remaining)
+
+  local updated_anchor_index = find_step_index_by_id(remaining, anchor_step_id)
+  return updated_anchor_index, removed_count
+end
+
+local function remove_current_walkthrough_enquiry()
+  if not playback_state.active or not playback_state.steps then
+    vim.notify("No AI walkthrough is currently running", vim.log.levels.WARN)
+    return
+  end
+
+  local current_step = playback_state.steps[playback_state.index]
+  if not current_step then
+    vim.notify("No current AI walkthrough step is available", vim.log.levels.WARN)
+    return
+  end
+
+  local anchor_step_id = current_step.parent_id or current_step.id
+  local anchor_index, removed_count = remove_walkthrough_descendants(anchor_step_id)
+  if not anchor_index then
+    vim.notify("AI walkthrough could not remove the enquiry steps", vim.log.levels.WARN)
+    return
+  end
+
+  if removed_count == 0 then
+    vim.notify("No enquiry steps were attached to that walkthrough step", vim.log.levels.INFO)
+  else
+    vim.notify(string.format("Removed %d AI walkthrough enquiry step%s", removed_count, removed_count == 1 and "" or "s"), vim.log.levels.INFO)
+  end
+
+  replay_walkthrough_step(anchor_index)
+end
+
+local function insert_walkthrough_steps(parent_step_id, new_steps)
+  if type(new_steps) ~= "table" or #new_steps == 0 then
+    return false
+  end
+
+  local current_steps = playback_state.steps
+  if type(current_steps) ~= "table" or #current_steps == 0 then
+    return false
+  end
+
+  local parent_index = find_step_index_by_id(current_steps, parent_step_id)
+
+  if not parent_index then
+    return false
+  end
+
+  local descendants = collect_descendant_step_ids(current_steps, parent_step_id)
+
+  local prepared_steps = prepare_walkthrough_steps(new_steps, parent_step_id)
+  if #prepared_steps == 0 then
+    return false
+  end
+
+  local combined = {}
+  local inserted = false
+
+  for _, step in ipairs(current_steps) do
+    if step.id == parent_step_id then
+      table.insert(combined, vim.deepcopy(step))
+      for _, new_step in ipairs(prepared_steps) do
+        table.insert(combined, vim.deepcopy(new_step))
+      end
+      inserted = true
+    elseif descendants[step.id] == nil then
+      table.insert(combined, vim.deepcopy(step))
+    end
+  end
+
+  if not inserted then
+    return false
+  end
+
+  playback_state.steps = combined
+  last_walkthrough = vim.deepcopy(combined)
+  return #prepared_steps
+end
+
 local function handle_walkthrough_response(chat)
   local response = get_latest_assistant_raw_response(chat)
   if not response or not has_walkthrough_identifier(response) then
@@ -1409,19 +1892,110 @@ local function handle_walkthrough_response(chat)
 
   local steps, err = parse_walkthrough_response(response)
   if not steps then
-    pending_walkthrough_start_opts = nil
+    pending_walkthrough_request = nil
     vim.notify("AI walkthrough response detected, but it could not be parsed: " .. err, vim.log.levels.WARN)
     return true
   end
 
-  local start_opts = pending_walkthrough_start_opts or {}
-  pending_walkthrough_start_opts = nil
+  local request = pending_walkthrough_request or { mode = "start", start_opts = {} }
+  pending_walkthrough_request = nil
+
+  if request.mode == "enquire" then
+    local inserted_count = insert_walkthrough_steps(request.parent_step_id, steps)
+    if inserted_count then
+      local pause_at_index = playback_state.index + inserted_count
+      vim.notify(string.format("Inserted %d AI walkthrough answer step%s", inserted_count, inserted_count == 1 and "" or "s"), vim.log.levels.INFO)
+      continue_walkthrough(pause_at_index)
+    else
+      vim.notify("AI walkthrough answer response was parsed, but there was no active walkthrough step to update", vim.log.levels.WARN)
+    end
+
+    return true
+  end
+
+  local start_opts = request.start_opts or {}
 
   vim.defer_fn(function()
     start_walkthrough(steps, start_opts)
   end, 20)
 
   return true
+end
+
+local function reset_walkthrough()
+  if not playback_state.active or not playback_state.steps or #playback_state.steps == 0 then
+    vim.notify("No AI walkthrough is currently running", vim.log.levels.WARN)
+    return
+  end
+
+  start_walkthrough(playback_state.steps, {
+    pause_after_step = playback_state.pause_after_step,
+  })
+end
+
+local function export_walkthrough(file_arg)
+  local steps = playback_state.steps or last_walkthrough
+  if type(steps) ~= "table" or #steps == 0 then
+    vim.notify("No AI walkthrough is available to export", vim.log.levels.WARN)
+    return
+  end
+
+  local target = trim(file_arg or "")
+  if target == "" then
+    vim.notify("AIWalkthroughExport requires a file path", vim.log.levels.WARN)
+    return
+  end
+
+  local path = vim.fn.fnamemodify(vim.fn.expand(target), ":p")
+  local lines = { "# ai-walkthrough" }
+
+  for _, step in ipairs(steps) do
+    table.insert(lines, string.format("- id: %d", tonumber(step.id) or 0))
+    if step.parent_id ~= nil then
+      table.insert(lines, string.format("  parent_id: %d", tonumber(step.parent_id) or 0))
+    end
+    table.insert(lines, "  path: " .. yaml_quote(step.path))
+    table.insert(lines, string.format("  line_start: %d", step.line_start))
+    table.insert(lines, string.format("  line_end: %d", step.line_end))
+    table.insert(lines, "  description: " .. yaml_quote(step.description))
+  end
+
+  local ok, err = pcall(vim.fn.writefile, lines, path)
+  if not ok then
+    vim.notify("AI walkthrough export failed: " .. tostring(err), vim.log.levels.ERROR)
+    return
+  end
+
+  vim.notify("AI walkthrough exported to " .. path, vim.log.levels.INFO)
+end
+
+local function import_walkthrough(file_arg)
+  local target = trim(file_arg or "")
+  if target == "" then
+    vim.notify("AIWalkthroughImport requires a file path", vim.log.levels.WARN)
+    return
+  end
+
+  local path = vim.fn.fnamemodify(vim.fn.expand(target), ":p")
+  if vim.fn.filereadable(path) ~= 1 then
+    vim.notify("AI walkthrough import file not found: " .. path, vim.log.levels.WARN)
+    return
+  end
+
+  local ok, lines = pcall(vim.fn.readfile, path)
+  if not ok then
+    vim.notify("AI walkthrough import failed: " .. tostring(lines), vim.log.levels.ERROR)
+    return
+  end
+
+  local steps, err = parse_walkthrough_response(table.concat(lines, "\n"))
+  if not steps then
+    vim.notify("AI walkthrough import could not parse YAML: " .. tostring(err), vim.log.levels.WARN)
+    return
+  end
+
+  start_walkthrough(steps)
+  vim.notify("AI walkthrough imported from " .. path, vim.log.levels.INFO)
 end
 
 _G.ai_walkthrough_handle_codecompanion_response = handle_walkthrough_response
@@ -1483,10 +2057,28 @@ end, {
   desc = "Repeat the last AI walkthrough, pausing after each step",
 })
 
-create_or_replace_user_command("AIWalkthroughContinue", function()
-  continue_walkthrough()
+create_or_replace_user_command("AIWalkthroughNext", function()
+  next_walkthrough_step()
 end, {
-  desc = "Continue a paused AI walkthrough",
+  desc = "Advance a paused AI walkthrough by one step",
+})
+
+create_or_replace_user_command("AIWalkthroughContinue", function(opts)
+  local step_number = trim(opts.args or "")
+  if step_number == "" then
+    step_number = nil
+  end
+
+  continue_walkthrough(step_number)
+end, {
+  nargs = "?",
+  desc = "Resume automatic AI walkthrough playback, optionally pausing again at a step",
+})
+
+create_or_replace_user_command("AIWalkthroughToggle", function()
+  toggle_walkthrough_playback()
+end, {
+  desc = "Toggle AI walkthrough playback",
 })
 
 create_or_replace_user_command("AIWalkthroughPause", function()
@@ -1495,10 +2087,51 @@ end, {
   desc = "Pause the active AI walkthrough after the current step",
 })
 
+create_or_replace_user_command("AIWalkthroughPrev", function()
+  previous_walkthrough_step()
+end, {
+  desc = "Replay the previous AI walkthrough step",
+})
+
 create_or_replace_user_command("AIWalkthroughPrevious", function()
   previous_walkthrough_step()
 end, {
   desc = "Replay the previous AI walkthrough step",
+})
+
+create_or_replace_user_command("AIWalkthroughEnquire", function(opts)
+  request_walkthrough_enquiry(opts)
+end, {
+  nargs = "*",
+  desc = "Ask AI a follow-up question about the current walkthrough step",
+})
+
+create_or_replace_user_command("AIWalkthroughRemoveEnquiry", function()
+  remove_current_walkthrough_enquiry()
+end, {
+  desc = "Remove enquiry steps for the current walkthrough branch",
+})
+
+create_or_replace_user_command("AIWalkthroughRestart", function()
+  reset_walkthrough()
+end, {
+  desc = "Restart the active AI walkthrough from the first step",
+})
+
+create_or_replace_user_command("AIWalkthroughExport", function(opts)
+  export_walkthrough(opts.args)
+end, {
+  nargs = 1,
+  complete = "file",
+  desc = "Export the current AI walkthrough to a YAML file",
+})
+
+create_or_replace_user_command("AIWalkthroughImport", function(opts)
+  import_walkthrough(opts.args)
+end, {
+  nargs = 1,
+  complete = "file",
+  desc = "Import an AI walkthrough from a YAML file",
 })
 
 vim.api.nvim_create_autocmd("User", {
@@ -1525,7 +2158,7 @@ vim.api.nvim_create_autocmd("User", {
     playback_state.waiting_for_voice = false
     playback_state.voice_started = false
 
-    if playback_state.pause_after_step then
+    if should_pause_after_current_step() then
       playback_state.paused_for_continue = true
     else
       schedule_next_step(get_post_voice_delay_ms(), function()
