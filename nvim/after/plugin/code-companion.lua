@@ -457,6 +457,25 @@ local function send_to_codecompanion(opts)
   end
 end
 
+local function send_plain_message_to_codecompanion(opts)
+  local msg = vim.trim(opts.args or "")
+
+  if msg == "" then
+    vim.notify("AIMessage requires a message", vim.log.levels.ERROR)
+    return
+  end
+
+  local chat = get_target_ai_chat()
+
+  if not chat then
+    chat = open_default_ai_chat()
+  end
+
+  if chat then
+    send_message_to_chat(chat, msg)
+  end
+end
+
 local function list_opencode_sessions()
   local lines = vim.fn.systemlist("opencode session list")
   if vim.v.shell_error ~= 0 then
@@ -553,8 +572,15 @@ end, {
   desc = "Append file line or range to CodeCompanion input",
 })
 
+create_or_replace_user_command("AIMessage", function(opts)
+  send_plain_message_to_codecompanion(opts)
+end, {
+  nargs = "+",
+  desc = "Send a plain message to CodeCompanion",
+})
+
 create_or_replace_user_command("AICommit", function()
-  vim.cmd("AISend git commit staged")
+  vim.cmd("AIMessage git commit staged")
 end, {
   desc = "Send git commit staged prompt to CodeCompanion",
 })

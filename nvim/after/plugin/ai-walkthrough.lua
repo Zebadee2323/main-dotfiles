@@ -105,7 +105,7 @@ local function get_post_voice_delay_ms()
     return math.max(0, math.floor(delay_seconds * 1000))
   end
 
-  return 1500
+  return 500
 end
 
 local function get_voice_disabled_extra_delay_ms()
