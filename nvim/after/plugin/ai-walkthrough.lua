@@ -53,6 +53,18 @@ local collect_descendant_step_ids
 local pause_walkthrough
 local render_walkthrough_browser_window
 
+function _G.ai_walkthrough_foldtext()
+  local labels = vim.b.ai_walkthrough_fold_labels
+  if type(labels) == "table" then
+    local label = labels[vim.v.foldstart]
+    if type(label) == "string" and label ~= "" then
+      return label
+    end
+  end
+
+  return vim.fn.getline(vim.v.foldstart)
+end
+
 local function create_or_replace_user_command(name, fn, opts)
   pcall(vim.api.nvim_del_user_command, name)
   vim.api.nvim_create_user_command(name, fn, opts)
@@ -272,7 +284,9 @@ local function get_target_chat()
   return nil, "No active CodeCompanion chat found"
 end
 
-local function send_message_to_chat(chat, msg)
+local function send_message_to_chat(chat, msg, fold_opts)
+  fold_opts = fold_opts or {}
+
   if chat.current_request then
     vim.notify("CodeCompanion chat is busy", vim.log.levels.WARN)
     return false
@@ -286,6 +300,8 @@ local function send_message_to_chat(chat, msg)
 
   local message_lines = vim.split(msg, "\n", { plain = true, trimempty = false })
   local was_locked = not vim.bo[chat.bufnr].modifiable
+  local fold_start_line
+  local fold_end_line
 
   if was_locked and chat.ui and chat.ui.unlock_buf then
     chat.ui:unlock_buf()
@@ -296,8 +312,12 @@ local function send_message_to_chat(chat, msg)
 
   local ok, err = pcall(function()
     if last_line == "" then
+      fold_start_line = line_count
+      fold_end_line = line_count + #message_lines - 1
       vim.api.nvim_buf_set_lines(chat.bufnr, line_count - 1, line_count, false, message_lines)
     else
+      fold_start_line = line_count + 2
+      fold_end_line = line_count + #message_lines + 1
       vim.api.nvim_buf_set_lines(chat.bufnr, line_count, line_count, false, vim.list_extend({ "" }, message_lines))
     end
   end)
@@ -309,6 +329,28 @@ local function send_message_to_chat(chat, msg)
   if not ok then
     vim.notify("AI walkthrough could not write to the chat buffer: " .. tostring(err), vim.log.levels.WARN)
     return false
+  end
+
+  if fold_start_line and fold_end_line then
+    local exclude_trailing_lines = math.max(0, tonumber(fold_opts.exclude_trailing_lines) or 0)
+    fold_end_line = math.max(fold_start_line, fold_end_line - exclude_trailing_lines)
+  end
+
+  local fold_labels = vim.b[chat.bufnr].ai_walkthrough_fold_labels
+  if type(fold_labels) ~= "table" then
+    fold_labels = {}
+  end
+
+  fold_labels[fold_start_line] = "User prompt for walkthrough:"
+  vim.b[chat.bufnr].ai_walkthrough_fold_labels = fold_labels
+
+  if chat.ui and chat.ui.winnr and vim.api.nvim_win_is_valid(chat.ui.winnr) and fold_start_line and fold_end_line then
+    pcall(vim.api.nvim_win_call, chat.ui.winnr, function()
+      vim.opt_local.foldmethod = "manual"
+      vim.opt_local.foldtext = "v:lua.ai_walkthrough_foldtext()"
+      vim.cmd(string.format("%d,%dfold", fold_start_line, fold_end_line))
+      vim.cmd(string.format("%dfoldclose", fold_start_line))
+    end)
   end
 
   if chat.ui:is_visible() then
@@ -429,7 +471,9 @@ local function send_walkthrough_request(opts, start_opts)
     start_opts = vim.deepcopy(start_opts or {}),
   }
 
-  if not send_message_to_chat(chat, build_walkthrough_message(opts)) then
+  if not send_message_to_chat(chat, build_walkthrough_message(opts), {
+    exclude_trailing_lines = trim(opts.args or "") ~= "" and 1 or 0,
+  }) then
     pending_walkthrough_request = nil
   end
 end
@@ -461,7 +505,9 @@ local function request_walkthrough_enquiry(opts)
     parent_step_id = current_step.id,
   }
 
-  if not send_message_to_chat(chat, build_enquiry_message(current_step, query)) then
+  if not send_message_to_chat(chat, build_enquiry_message(current_step, query), {
+    exclude_trailing_lines = query ~= "" and 1 or 0,
+  }) then
     pending_walkthrough_request = nil
   end
 end
