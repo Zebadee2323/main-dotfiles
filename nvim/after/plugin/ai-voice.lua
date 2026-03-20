@@ -45,7 +45,6 @@ local robot_voice_filter = table.concat({
 local current_tts_job = nil
 local current_effect_job = nil
 local current_play_job = nil
-local current_wav_path = nil
 local last_spoken_message = nil
 local current_response_summary_chat = nil
 local current_response_summary_chat_key = nil
@@ -139,10 +138,6 @@ local function set_voice_playback_active(active, data)
   fire_user_event(active and "AIVoicePlaybackStarted" or "AIVoicePlaybackStopped", data)
 end
 
-local function cleanup_current_wav()
-  current_wav_path = nil
-end
-
 local function ensure_ai_voice_audio_dir()
   vim.fn.mkdir(ai_voice_audio_dir, "p")
 end
@@ -171,7 +166,6 @@ local function stop_audio_jobs()
   end
   current_play_job = nil
   set_voice_playback_active(false, { request_id = speech_request_id })
-  cleanup_current_wav()
 end
 
 local function cancel_hidden_chat(chat)
@@ -373,7 +367,6 @@ local function start_audio_playback(wav_path, request_id)
 
       if speech_request_id == request_id then
         current_play_job = nil
-        cleanup_current_wav()
         maybe_start_queued_speech()
       end
     end,
@@ -386,7 +379,6 @@ local function start_audio_playback(wav_path, request_id)
   end
 
   current_play_job = play_job
-  current_wav_path = wav_path
   set_voice_playback_active(true, {
     request_id = request_id,
     wav_path = wav_path,
