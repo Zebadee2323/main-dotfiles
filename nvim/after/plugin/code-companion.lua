@@ -66,8 +66,9 @@ local function get_git_root(path)
   return root
 end
 
-local function get_repo_relative_path()
-  local bufname = vim.api.nvim_buf_get_name(0)
+local function get_repo_relative_path(bufnr)
+  local target_buf = bufnr or 0
+  local bufname = vim.api.nvim_buf_get_name(target_buf)
   if bufname == "" then
     return "[No Name]"
   end
@@ -395,8 +396,9 @@ local function set_current_ai_chat_model(opts)
 end
 
 local function build_ai_send_message(opts)
+  opts = opts or {}
   local prefix = vim.trim(opts.args or "")
-  local path = get_repo_relative_path()
+  local path = get_repo_relative_path(opts.bufnr)
   local body
 
   if opts.range and opts.line1 and opts.line2 and opts.line2 >= opts.line1 then
@@ -406,7 +408,7 @@ local function build_ai_send_message(opts)
       body = string.format("@%s %d-%d", path, opts.line1, opts.line2)
     end
   else
-    local line = vim.api.nvim_win_get_cursor(0)[1]
+    local line = opts.current_line or vim.api.nvim_win_get_cursor(0)[1]
     body = string.format("@%s %d", path, line)
   end
 
@@ -570,6 +572,20 @@ end, {
   nargs = "*",
   range = true,
   desc = "Append file line or range to CodeCompanion input",
+})
+
+create_or_replace_user_command("AIWalkSend", function(opts)
+  local send_opts = vim.tbl_extend("force", opts or {}, {
+    bufnr = vim.api.nvim_get_current_buf(),
+    current_line = vim.api.nvim_win_get_cursor(0)[1],
+  })
+
+  vim.cmd("AIWalk")
+  send_to_codecompanion(send_opts)
+end, {
+  nargs = "*",
+  range = true,
+  desc = "Start AI walkthrough and append file line or range to CodeCompanion input",
 })
 
 create_or_replace_user_command("AIMessage", function(opts)

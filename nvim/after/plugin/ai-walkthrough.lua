@@ -2140,7 +2140,7 @@ local function build_walkthrough_browser_lines()
   local steps = playback_state.steps or {}
   local lines = {
     "AI Walkthrough",
-    "<Enter>: jump  d/x: delete step tree  D: delete siblings  Q: end walkthrough  q: close",
+    "<Enter>: jump  d/x: delete step tree  D: delete sibling group  Q: end walkthrough  q: close",
     "",
   }
   local line_to_step_index = {}
