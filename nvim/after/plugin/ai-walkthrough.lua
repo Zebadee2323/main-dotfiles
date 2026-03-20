@@ -17,8 +17,8 @@ local walkthrough_description_highlight_group = "AIWalkthroughDescription"
 local walkthrough_description_border_group = "AIWalkthroughDescriptionBorder"
 local walkthrough_temp_keymaps = {
   { lhs = "<C-Space>", rhs = "<Cmd>AIWalkToggle<CR>", desc = "Toggle AI walkthrough playback" },
-  { lhs = "<C-h>", rhs = "<Cmd>AIWalkPrev<CR>", desc = "Replay previous AI walkthrough step" },
-  { lhs = "<C-l>", rhs = "<Cmd>AIWalkNext<CR>", desc = "Advance AI walkthrough by one step" },
+  { lhs = "[w", rhs = "<Cmd>AIWalkPrev<CR>", desc = "Replay previous AI walkthrough step" },
+  { lhs = "]w", rhs = "<Cmd>AIWalkNext<CR>", desc = "Advance AI walkthrough by one step" },
   { lhs = "<C-j>", rhs = "<Cmd>AIWalkWindow<CR>", desc = "Open AI walkthrough browser" },
   { lhs = "<C-k>", rhs = "<Cmd>AIWalkParent<CR>", desc = "Jump to parent AI walkthrough step" },
 }
