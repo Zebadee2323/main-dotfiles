@@ -553,6 +553,12 @@ end, {
   desc = "Append file line or range to CodeCompanion input",
 })
 
+create_or_replace_user_command("AICommit", function()
+  vim.cmd("AISend git commit staged")
+end, {
+  desc = "Send git commit staged prompt to CodeCompanion",
+})
+
 create_or_replace_user_command("AIRestore", function()
   restore_opencode_session()
 end, {

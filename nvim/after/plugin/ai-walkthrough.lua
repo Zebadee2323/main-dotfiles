@@ -322,7 +322,6 @@ local function build_walkthrough_message(opts)
   local query = trim(opts.args or "")
   local lines = {
     "You are creating a text editor walkthrough for the user's query.",
-    "The user's name is Ollie",
     "Reply with valid YAML only.",
     "The response must include the exact identifier comment `# ai-walkthrough` immediately before the YAML array.",
     "Return a top-level YAML array of steps.",
@@ -333,6 +332,7 @@ local function build_walkthrough_message(opts)
     "If a step only needs one line, set `line_start` and `line_end` to the same value.",
     "`description` must be natural narration that sounds good when spoken aloud.",
     "Order the steps so they form a clear walkthrough that directly answers the query.",
+    "If the user has asked for you to make file changes, then you can do that before building the yaml response.",
     "Example:",
     "```yaml",
     "# ai-walkthrough",
@@ -349,7 +349,7 @@ local function build_walkthrough_message(opts)
 
   vim.list_extend(lines, {
     "",
-    "User query:",
+    "User prompt:",
     query,
   })
 
@@ -358,8 +358,7 @@ end
 
 local function build_enquiry_message(step, query)
   local lines = {
-    "You are answering a user's follow-up question about a single step from an existing text editor walkthrough.",
-    "The user's name is Ollie",
+    "You are executing a user's follow-up prompt in relation to a single step from an existing text editor walkthrough.",
     "Reply with valid YAML only.",
     "The response must include the exact identifier comment `# ai-walkthrough` immediately before the YAML array.",
     "Return a top-level YAML array of additional steps.",
@@ -369,9 +368,8 @@ local function build_enquiry_message(step, query)
     "Keep ranges focused on the most relevant block, and avoid ranges that span an entire file unless the file is truly tiny.",
     "If a step only needs one line, set `line_start` and `line_end` to the same value.",
     "`description` must be natural narration that sounds good when spoken aloud.",
-    "Answer the user's follow-up question in relation to the current walkthrough step.",
+    "If the user has asked for you to make file changes, then you can do that before building the yaml response.",
     "Return only the new in-between steps that should be inserted immediately after the current step.",
-    "Stay tightly scoped to the same part of the codebase and preserve a clear walkthrough order.",
     "Example:",
     "```yaml",
     "# ai-walkthrough",
@@ -391,7 +389,7 @@ local function build_enquiry_message(step, query)
     string.format("line_end: %d", step.line_end),
     string.format("description: %s", step.description),
     "",
-    "User query:",
+    "User prompt:",
     query,
   }
 
