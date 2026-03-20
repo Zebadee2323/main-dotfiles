@@ -8,6 +8,7 @@ local piper_length_scale = 1.0
 local piper_noise_scale = 0.2
 local piper_noise_w = 0.2
 local piper_sentence_silence = 0.5
+local ai_voice_volume = tonumber(vim.g.ai_voice_volume) or 1.0
 local ai_voice_robot_mode = true
 local robot_voice_filter = table.concat({
   -- split into 4 parallel signals: dry, body, ai, extra_chorus
@@ -366,7 +367,7 @@ local function toggle_ai_voice_robot_mode()
 end
 
 local function start_audio_playback(wav_path, request_id)
-  local play_job = vim.fn.jobstart({ "afplay", wav_path }, {
+  local play_job = vim.fn.jobstart({ "afplay", "-v", tostring(ai_voice_volume), wav_path }, {
     on_exit = function()
       set_voice_playback_active(false, { request_id = request_id })
 
@@ -1118,6 +1119,18 @@ local function set_ai_voice_enabled(enabled)
   vim.notify("AI voice is now " .. (ai_voice_enabled and "enabled" or "disabled"), vim.log.levels.INFO)
 end
 
+local function set_ai_voice_volume(volume)
+  if type(volume) ~= "number" or volume ~= volume or volume < 0 then
+    vim.notify("AI voice volume must be a non-negative number", vim.log.levels.ERROR)
+    return false
+  end
+
+  ai_voice_volume = volume
+  vim.g.ai_voice_volume = volume
+  vim.notify("AI voice volume is now set to " .. string.format("%.2f", volume), vim.log.levels.INFO)
+  return true
+end
+
 local function set_ai_voice_codecompanion_enabled(enabled, opts)
   opts = opts or {}
   ai_voice_codecompanion_enabled = enabled
@@ -1284,6 +1297,20 @@ create_or_replace_user_command("AIVoiceTest", function()
   ai_voice_speak(ai_voice_test_paragraph)
 end, {
   desc = "Speak the built-in AI voice test paragraph",
+})
+
+create_or_replace_user_command("AIVoiceVolume", function(opts)
+  local volume = tonumber(opts.args)
+
+  if not volume then
+    vim.notify("AIVoiceVolume requires a numeric volume", vim.log.levels.ERROR)
+    return
+  end
+
+  set_ai_voice_volume(volume)
+end, {
+  nargs = 1,
+  desc = "Set AI voice playback volume",
 })
 
 create_or_replace_user_command("AIVoiceStop", function()
