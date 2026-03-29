@@ -165,7 +165,7 @@ end, {
 vim.api.nvim_create_user_command("AICommit", function()
   vim.api.nvim_cmd({
     cmd = "AIMessage",
-    args = { "git commit staged, you decide the message." },
+    args = { "exec `git commit -m`, you decide the message." },
   }, {})
 end, {
   desc = "Send git commit staged prompt to Sidekick",
