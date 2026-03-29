@@ -1,5 +1,5 @@
 local voice_name = "cori-high"
-local voices_dir = vim.fn.expand("~/.config/dotfiles/nvim/after/ai_voices")
+local voices_dir = vim.fs.joinpath(vim.fn.stdpath("config"), "after", "ai_voices")
 local ai_voice_audio_dir = vim.fn.stdpath("cache") .. "/ai-voice"
 local raw_wav_path = ai_voice_audio_dir .. "/latest.wav"
 local processed_wav_path = ai_voice_audio_dir .. "/latest-robot.wav"
