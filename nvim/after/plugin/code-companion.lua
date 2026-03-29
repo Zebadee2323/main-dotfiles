@@ -602,12 +602,11 @@ create_or_replace_user_command("AIWalkSend", function(opts)
     current_line = vim.api.nvim_win_get_cursor(0)[1],
   })
 
-  vim.cmd("AIWalk")
   send_to_codecompanion(send_opts)
 end, {
   nargs = "*",
   range = true,
-  desc = "Start AI walkthrough and append file line or range to CodeCompanion input",
+  desc = "Append file line or range so you can ask for a walkthrough naturally",
 })
 
 create_or_replace_user_command("AIMessage", function(opts)

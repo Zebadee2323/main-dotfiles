@@ -1,3 +1,5 @@
 /plugin/*
 /after/ai_voices/
 **/__pycache__/**
+
+.nvimlog

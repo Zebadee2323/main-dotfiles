@@ -46,8 +46,12 @@ local playback_state = {
 }
 
 local last_walkthrough = nil
-local pending_walkthrough_request = nil
 local next_walkthrough_step_id = 1
+local naia_walkthrough_tool_names = {
+  context = "ai_walkthrough_current_context",
+  start = "ai_walkthrough_start",
+  insert = "ai_walkthrough_insert_steps",
+}
 local find_step_index_by_id
 local collect_descendant_step_ids
 local pause_walkthrough
@@ -360,72 +364,18 @@ local function send_message_to_chat(chat, msg, fold_opts)
   return true
 end
 
-local function build_walkthrough_message(opts)
-  local query = trim(opts.args or "")
-  local lines = {
-    "You are creating a text editor walkthrough for the user's query.",
-    "Reply with valid YAML only.",
-    "The response must include the exact identifier comment `# ai-walkthrough` immediately before the YAML array.",
-    "Return a top-level YAML array of steps.",
-    "Each step must include `path`, `line_start`, `line_end`, and `description`.",
-    "`path` must point to a real file and should usually be repo-relative.",
-    "`line_start` and `line_end` must be 1-based line numbers that define the inclusive range to highlight for that step.",
-    "Keep ranges focused on the most relevant block, and avoid ranges that span an entire file unless the file is truly tiny.",
-    "If a step only needs one line, set `line_start` and `line_end` to the same value.",
-    "`description` must be natural narration that sounds good when spoken aloud.",
-    "Order the steps so they form a clear walkthrough that directly answers the query.",
-    "If the user has asked for you to make file changes, then you can do that before building the yaml response.",
-    "Example:",
-    "```yaml",
-    "# ai-walkthrough",
-    "- path: after/plugin/code-companion.lua",
-    "  line_start: 548",
-    "  line_end: 560",
-    "  description: Start at the AISend command, because this is where editor context gets appended into the active chat input.",
-    "- path: after/plugin/code-companion.lua",
-    "  line_start: 447",
-    "  line_end: 470",
-    "  description: Then look at send_to_codecompanion, which picks the target chat and adds the prepared message to the chat buffer.",
-    "```",
-  }
-
-  vim.list_extend(lines, {
-    "",
-    "User prompt:",
-    query,
-  })
-
-  return table.concat(lines, "\n")
-end
-
 local function build_enquiry_message(step, query)
   local lines = {
     "You are executing a user's follow-up prompt in relation to a single step from an existing text editor walkthrough.",
-    "Reply with valid YAML only.",
-    "The response must include the exact identifier comment `# ai-walkthrough` immediately before the YAML array.",
-    "Return a top-level YAML array of additional steps.",
-    "Each step must include `path`, `line_start`, `line_end`, and `description`.",
-    "`path` must point to a real file and should usually be repo-relative.",
-    "`line_start` and `line_end` must be 1-based line numbers that define the inclusive range to highlight for that step.",
-    "Keep ranges focused on the most relevant block, and avoid ranges that span an entire file unless the file is truly tiny.",
-    "If a step only needs one line, set `line_start` and `line_end` to the same value.",
-    "`description` must be natural narration that sounds good when spoken aloud.",
-    "If the user has asked for you to make file changes, then you can do that before building the yaml response.",
+    "Use the `" .. naia_walkthrough_tool_names.insert .. "` MCP tool to insert the new steps.",
+    "Do not reply with YAML or markdown code fences for the walkthrough.",
     "Return only the new in-between steps that should be inserted immediately after the current step.",
-    "Example:",
-    "```yaml",
-    "# ai-walkthrough",
-    "- path: after/plugin/code-companion.lua",
-    "  line_start: 548",
-    "  line_end: 554",
-    "  description: First focus on where the command collects the editor context before anything is sent to the chat.",
-    "- path: after/plugin/code-companion.lua",
-    "  line_start: 555",
-    "  line_end: 560",
-    "  description: Then look at the branch that appends that prepared context into the active chat input.",
-    "```",
+    "Each inserted step must include `path`, `line_start`, `line_end`, and `description`.",
+    "Use repo-relative paths when possible, and keep descriptions natural for spoken narration.",
+    "If the user has asked for you to make file changes, then you can do that before calling the tool.",
     "",
     "Current step:",
+    string.format("id: %d", step.id),
     string.format("path: %s", step.path),
     string.format("line_start: %d", step.line_start),
     string.format("line_end: %d", step.line_end),
@@ -443,10 +393,12 @@ local function build_instruction_message(step, instruction)
     "You are helping with a user's instruction about a single step from an existing text editor walkthrough.",
     "The user's name is Ollie",
     "Do not reply with YAML unless the user explicitly asks for it.",
+    "If the best response is to extend the walkthrough itself, use the `" .. naia_walkthrough_tool_names.insert .. "` MCP tool.",
     "Use the current walkthrough step as the main context for your response.",
     "Stay tightly scoped to the same part of the codebase unless the instruction clearly requires adjacent context.",
     "",
     "Current step:",
+    string.format("id: %d", step.id),
     string.format("path: %s", step.path),
     string.format("line_start: %d", step.line_start),
     string.format("line_end: %d", step.line_end),
@@ -457,25 +409,6 @@ local function build_instruction_message(step, instruction)
   }
 
   return table.concat(lines, "\n")
-end
-
-local function send_walkthrough_request(opts, start_opts)
-  local chat, err = get_target_chat()
-  if not chat then
-    vim.notify(err, vim.log.levels.WARN)
-    return
-  end
-
-  pending_walkthrough_request = {
-    mode = "start",
-    start_opts = vim.deepcopy(start_opts or {}),
-  }
-
-  if not send_message_to_chat(chat, build_walkthrough_message(opts), {
-    exclude_trailing_lines = trim(opts.args or "") ~= "" and 1 or 0,
-  }) then
-    pending_walkthrough_request = nil
-  end
 end
 
 local function request_walkthrough_enquiry(opts)
@@ -500,16 +433,9 @@ local function request_walkthrough_enquiry(opts)
     return
   end
 
-  pending_walkthrough_request = {
-    mode = "enquire",
-    parent_step_id = current_step.id,
-  }
-
-  if not send_message_to_chat(chat, build_enquiry_message(current_step, query), {
+  send_message_to_chat(chat, build_enquiry_message(current_step, query), {
     exclude_trailing_lines = query ~= "" and 1 or 0,
-  }) then
-    pending_walkthrough_request = nil
-  end
+  })
 end
 
 local function request_walkthrough_instruction(opts)
@@ -535,106 +461,6 @@ local function request_walkthrough_instruction(opts)
   end
 
   send_message_to_chat(chat, build_instruction_message(current_step, instruction))
-end
-
-local function flatten_message_content(content)
-  if type(content) == "table" then
-    content = table.concat(vim.tbl_map(function(part)
-      if type(part) == "string" then
-        return part
-      end
-
-      if type(part) == "table" and type(part.text) == "string" then
-        return part.text
-      end
-
-      return ""
-    end, content), "\n")
-  end
-
-  if type(content) ~= "string" then
-    return nil
-  end
-
-  content = content:gsub("\r\n", "\n")
-  if trim(content) == "" then
-    return nil
-  end
-
-  return content
-end
-
-local function get_latest_assistant_raw_response(chat)
-  local ok, codecompanion_config = pcall(require, "codecompanion.config")
-  if not ok then
-    return nil
-  end
-
-  local llm_role = codecompanion_config.constants.LLM_ROLE
-
-  for i = #chat.messages, 1, -1 do
-    local message = chat.messages[i]
-
-    if message.role == llm_role and not (message.tools and message.tools.calls) then
-      local content = flatten_message_content(message.content)
-      if content then
-        return content
-      end
-    end
-  end
-
-  return nil
-end
-
-local function find_walkthrough_identifier_start(text)
-  if type(text) ~= "string" then
-    return nil
-  end
-
-  local lower = text:lower()
-  return lower:find("# ai-walkthrough", 1, true) or lower:find("#ai-walkthrough", 1, true)
-end
-
-local function has_walkthrough_identifier(text)
-  return find_walkthrough_identifier_start(text) ~= nil
-end
-
-local function collect_yaml_candidates(text)
-  local candidates = {}
-  local seen = {}
-
-  local function add(candidate)
-    if type(candidate) ~= "string" then
-      return
-    end
-
-    candidate = vim.trim(candidate:gsub("\r\n", "\n"))
-    if candidate == "" or seen[candidate] then
-      return
-    end
-
-    seen[candidate] = true
-    table.insert(candidates, candidate)
-  end
-
-  for index, fenced in ipairs(vim.split(text, "```", { plain = true })) do
-    if index % 2 == 0 then
-      local lines = vim.split(fenced, "\n", { plain = true, trimempty = false })
-      if #lines > 1 then
-        table.remove(lines, 1)
-      end
-      add(table.concat(lines, "\n"))
-    end
-  end
-
-  local identifier_start = find_walkthrough_identifier_start(text)
-  if identifier_start then
-    add(text:sub(identifier_start))
-  end
-
-  add(text)
-
-  return candidates
 end
 
 local function strip_identifier_comment(text)
@@ -1041,33 +867,31 @@ end
 local function parse_walkthrough_response(text)
   local ok, yaml = pcall(require, "codecompanion.utils.yaml")
 
-  for _, candidate in ipairs(collect_yaml_candidates(text)) do
-    local sanitized_candidate = sanitize_yaml_candidate(candidate)
+  local candidate = sanitize_yaml_candidate(text)
 
-    if ok then
-      local decode_ok, decoded = pcall(yaml.decode, sanitized_candidate)
-      if decode_ok then
-        local steps = normalize_walkthrough_steps(decoded)
-        if steps then
-          return steps
-        end
-      end
-    end
-
-    do
-      local json_decoded = parse_json_walkthrough(candidate)
-      local steps = normalize_walkthrough_steps(json_decoded)
+  if ok then
+    local decode_ok, decoded = pcall(yaml.decode, candidate)
+    if decode_ok then
+      local steps = normalize_walkthrough_steps(decoded)
       if steps then
         return steps
       end
     end
+  end
 
-    do
-      local manual_decoded = parse_manual_walkthrough_yaml(candidate)
-      local steps = normalize_walkthrough_steps(manual_decoded)
-      if steps then
-        return steps
-      end
+  do
+    local json_decoded = parse_json_walkthrough(candidate)
+    local steps = normalize_walkthrough_steps(json_decoded)
+    if steps then
+      return steps
+    end
+  end
+
+  do
+    local manual_decoded = parse_manual_walkthrough_yaml(candidate)
+    local steps = normalize_walkthrough_steps(manual_decoded)
+    if steps then
+      return steps
     end
   end
 
@@ -1699,7 +1523,7 @@ local function run_walkthrough_step(index)
   playback_state.waiting_for_voice = true
   playback_state.voice_started = false
 
-  if not invoke_user_command("AIVoice", { step.description }) then
+  if not invoke_user_command("AIVoiceInterrupt", { step.description }) then
     playback_state.waiting_for_voice = false
     vim.notify("AI walkthrough could not start voice playback", vim.log.levels.WARN)
 
@@ -2481,42 +2305,31 @@ local function insert_walkthrough_steps(parent_step_id, new_steps)
   return #prepared_steps
 end
 
-local function handle_walkthrough_response(chat)
-  local response = get_latest_assistant_raw_response(chat)
-  if not response or not has_walkthrough_identifier(response) then
-    return false
+local function build_walkthrough_context_payload()
+  if not playback_state.active or not playback_state.steps or #playback_state.steps == 0 then
+    return nil, "No AI walkthrough is currently running"
   end
 
-  local steps, err = parse_walkthrough_response(response)
-  if not steps then
-    pending_walkthrough_request = nil
-    vim.notify("AI walkthrough response detected, but it could not be parsed: " .. err, vim.log.levels.WARN)
-    return true
+  local current_index = math.max(1, math.min(playback_state.index or 1, #playback_state.steps))
+  local current_step = playback_state.steps[current_index]
+  if not current_step then
+    return nil, "No current AI walkthrough step is available"
   end
 
-  local request = pending_walkthrough_request or { mode = "start", start_opts = {} }
-  pending_walkthrough_request = nil
-
-  if request.mode == "enquire" then
-    local inserted_count = insert_walkthrough_steps(request.parent_step_id, steps)
-    if inserted_count then
-      local pause_at_index = playback_state.index + inserted_count
-      vim.notify(string.format("Inserted %d AI walkthrough answer step%s", inserted_count, inserted_count == 1 and "" or "s"), vim.log.levels.INFO)
-      continue_walkthrough(pause_at_index)
-    else
-      vim.notify("AI walkthrough answer response was parsed, but there was no active walkthrough step to update", vim.log.levels.WARN)
-    end
-
-    return true
-  end
-
-  local start_opts = request.start_opts or {}
-
-  vim.defer_fn(function()
-    start_walkthrough(steps, start_opts)
-  end, 20)
-
-  return true
+  return {
+    current_index = current_index,
+    total_steps = #playback_state.steps,
+    recommended_parent_step_id = current_step.id,
+    current_step = {
+      index = current_index,
+      id = current_step.id,
+      parent_id = current_step.parent_id,
+      path = current_step.path,
+      line_start = current_step.line_start,
+      line_end = current_step.line_end,
+      description = current_step.description,
+    },
+  }
 end
 
 local function reset_walkthrough()
@@ -2595,28 +2408,176 @@ local function import_walkthrough(file_arg)
   vim.notify("AI walkthrough imported from " .. path, vim.log.levels.INFO)
 end
 
-_G.ai_walkthrough_handle_codecompanion_response = handle_walkthrough_response
+_G.ai_walkthrough_handle_codecompanion_response = nil
 _G.ai_walkthrough_stop_current = stop_walkthrough
 
-set_walkthrough_highlight()
+local function register_naia_walkthrough_tools()
+  local ok, naia = pcall(require, "naia")
+  if not ok then
+    return
+  end
 
-create_or_replace_user_command("AIWalk", function(opts)
-  send_walkthrough_request(opts)
-end, {
-  nargs = "*",
-  range = true,
-  desc = "Append an AI walkthrough prompt to the active CodeCompanion chat",
-})
+  for _, tool_name in pairs(naia_walkthrough_tool_names) do
+    pcall(naia.deregister_tool, tool_name)
+  end
 
-create_or_replace_user_command("AIWalkSlow", function(opts)
-  send_walkthrough_request(opts, {
-    pause_after_step = true,
+  local step_schema = {
+    type = "object",
+    properties = {
+      path = {
+        type = "string",
+        description = "Repo-relative or absolute file path for the step.",
+      },
+      line_start = {
+        type = "integer",
+        description = "1-based start line for the highlighted range.",
+      },
+      line_end = {
+        type = "integer",
+        description = "1-based end line for the highlighted range.",
+      },
+      description = {
+        type = "string",
+        description = "Spoken narration for this walkthrough step.",
+      },
+    },
+    required = { "path", "line_start", "line_end", "description" },
+    additionalProperties = false,
+  }
+
+  local start_registered, start_err = naia.register_tool(naia_walkthrough_tool_names.start, {
+    title = "Start AI Walkthrough",
+    description = "Use this when the user asks for a code walkthrough, guided tour, or step-by-step explanation of how some code works. Build an ordered list of focused code locations and start playback in Neovim instead of replying with the walkthrough as plain chat text.",
+    input_schema = {
+      type = "object",
+      properties = {
+        steps = {
+          type = "array",
+          description = "Ordered walkthrough steps to play. Each step should point at a real file and a tight line range that meaningfully advances the explanation.",
+          items = step_schema,
+          minItems = 1,
+        },
+        pause_after_step = {
+          type = "boolean",
+          description = "Set to true when the user explicitly wants a slower walkthrough or a pause after every step.",
+        },
+      },
+      required = { "steps" },
+      additionalProperties = false,
+    },
+    callback = function(args)
+      local steps = normalize_walkthrough_steps({ steps = args and args.steps or nil })
+      if not steps then
+        error("ai_walkthrough_start requires at least one valid walkthrough step")
+      end
+
+      local ok_start, started = pcall(start_walkthrough, steps, {
+        pause_after_step = args and args.pause_after_step == true,
+      })
+
+      if not ok_start then
+        error(started)
+      end
+
+      if not started then
+        error("ai_walkthrough_start could not start the walkthrough")
+      end
+
+      return string.format("Started AI walkthrough with %d step%s", #steps, #steps == 1 and "" or "s")
+    end,
   })
-end, {
-  nargs = "*",
-  range = true,
-  desc = "Append an AI walkthrough prompt and start playback in slow mode",
-})
+
+  if not start_registered then
+    vim.schedule(function()
+      vim.notify("Failed to register Naia `" .. naia_walkthrough_tool_names.start .. "` tool: " .. tostring(start_err), vim.log.levels.WARN)
+    end)
+  end
+
+  local context_registered, context_err = naia.register_tool(naia_walkthrough_tool_names.context, {
+    title = "Get AI Walkthrough Context",
+    description = "Use this before inserting extra walkthrough steps when you need to know the current walkthrough step and its id. This returns only the active step context so you can choose the right parent step for `ai_walkthrough_insert_steps`.",
+    input_schema = {
+      type = "object",
+      properties = vim.empty_dict(),
+      additionalProperties = false,
+    },
+    callback = function()
+      local payload, err = build_walkthrough_context_payload()
+      if not payload then
+        error(err)
+      end
+
+      return vim.json.encode(payload)
+    end,
+  })
+
+  if not context_registered then
+    vim.schedule(function()
+      vim.notify("Failed to register Naia `" .. naia_walkthrough_tool_names.context .. "` tool: " .. tostring(context_err), vim.log.levels.WARN)
+    end)
+  end
+
+  local insert_registered, insert_err = naia.register_tool(naia_walkthrough_tool_names.insert, {
+    title = "Insert AI Walkthrough Steps",
+    description = "Use this when the user asks a follow-up question about the current walkthrough and you need to zoom in with extra intermediate steps. If you do not already know the correct parent step id, call `ai_walkthrough_current_context` first. Insert the new steps under an existing step instead of restating the whole walkthrough in chat.",
+    input_schema = {
+      type = "object",
+      properties = {
+        parent_step_id = {
+          type = "integer",
+          description = "Existing walkthrough step id to insert the new child branch under. Omit this to use the current walkthrough step.",
+        },
+        steps = {
+          type = "array",
+          description = "Ordered walkthrough steps to insert immediately after the parent step. Use these to add detail, not to recreate the entire original walkthrough.",
+          items = step_schema,
+          minItems = 1,
+        },
+      },
+      required = { "steps" },
+      additionalProperties = false,
+    },
+    callback = function(args)
+      if not playback_state.active or not playback_state.steps then
+        error("No AI walkthrough is currently running")
+      end
+
+      local current_step = playback_state.steps[playback_state.index]
+      local parent_step_id = tonumber(args and args.parent_step_id) or (current_step and current_step.id)
+      if not parent_step_id then
+        error("ai_walkthrough_insert_steps could not determine a parent step")
+      end
+
+      local steps = normalize_walkthrough_steps({ steps = args and args.steps or nil })
+      if not steps then
+        error("ai_walkthrough_insert_steps requires at least one valid walkthrough step")
+      end
+
+      local inserted_count = insert_walkthrough_steps(parent_step_id, steps)
+      if not inserted_count then
+        error("ai_walkthrough_insert_steps could not update the active walkthrough")
+      end
+
+      local parent_index = find_step_index_by_id(playback_state.steps, parent_step_id)
+      if parent_index and playback_state.index == parent_index then
+        continue_walkthrough(parent_index + inserted_count)
+      elseif playback_state.browser_window and vim.api.nvim_win_is_valid(playback_state.browser_window) then
+        render_walkthrough_browser_window()
+      end
+
+      return string.format("Inserted %d AI walkthrough step%s", inserted_count, inserted_count == 1 and "" or "s")
+    end,
+  })
+
+  if not insert_registered then
+    vim.schedule(function()
+      vim.notify("Failed to register Naia `" .. naia_walkthrough_tool_names.insert .. "` tool: " .. tostring(insert_err), vim.log.levels.WARN)
+    end)
+  end
+end
+
+set_walkthrough_highlight()
+register_naia_walkthrough_tools()
 
 create_or_replace_user_command("AIWalkStop", function()
   stop_walkthrough({
@@ -2706,7 +2667,7 @@ create_or_replace_user_command("AIWalkThread", function(opts)
   request_walkthrough_enquiry(opts)
 end, {
   nargs = "*",
-  desc = "Create an AI follow-up thread from the current walkthrough step",
+  desc = "Ask the active AI chat to extend the current walkthrough step via Naia tools",
 })
 
 create_or_replace_user_command("AIWalkInstruct", function(opts)

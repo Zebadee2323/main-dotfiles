@@ -3,7 +3,6 @@ local voices_dir = vim.fn.expand("~/.config/dotfiles/nvim/after/ai_voices")
 local ai_voice_audio_dir = vim.fn.stdpath("cache") .. "/ai-voice"
 local raw_wav_path = ai_voice_audio_dir .. "/latest.wav"
 local processed_wav_path = ai_voice_audio_dir .. "/latest-robot.wav"
-local response_summary_model_name = "openai/gpt-5.4/low"
 local piper_length_scale = 1.0
 local piper_noise_scale = 0.2
 local piper_noise_w = 0.2
@@ -46,58 +45,19 @@ local current_tts_job = nil
 local current_effect_job = nil
 local current_play_job = nil
 local last_spoken_message = nil
-local current_response_summary_chat = nil
-local current_response_summary_chat_key = nil
-local current_acknowledgement_chat = nil
-local current_acknowledgement_chat_key = nil
 local speech_request_id = 0
 local speech_queue = {}
 local voice_playback_active = false
-local pending_acknowledgement_request_id = nil
-local pending_response_summary_request_id = nil
-local pending_response_summary_messages = {}
 local ai_voice_enabled = vim.g.ai_voice_enabled ~= false
-local ai_voice_codecompanion_enabled = true
 local ai_voice_speak
 local queue_ai_voice_speak
-local get_latest_assistant_response
-local cleanup_hidden_chat_session
-local ai_voice_hook_generation = (vim.g.ai_voice_hook_generation or 0) + 1
-local cc_group = vim.api.nvim_create_augroup("CodeCompanionHooks", { clear = true })
 vim.g.ai_voice_enabled = ai_voice_enabled
-vim.g.ai_voice_hook_generation = ai_voice_hook_generation
 
 local function is_ai_voice_enabled()
   return ai_voice_enabled
 end
 
 _G.ai_voice_is_enabled = is_ai_voice_enabled
-local response_summary_prompt = table.concat({
-  "Task: rewrite the assistant response as short spoken audio for Text-to-speech.",
-  "Rules:",
-  "- Write as the assistant, in first person when natural.",
-  "- Keep only the key outcome, decision, or next step.",
-  "- Maximum 3 short sentences.",
-  "- Use plain spoken English. Don't recide long code, commands, and file paths.",
-  "- Sometimes address the user as Ollie.",
-  "- Sometimes use lighthearted language if it fits the context, but don't force it.",
-  "- Output only the final spoken text.",
-  "Assistant response:",
-}, " ")
-local acknowledgement_prompt = table.concat({
-  "Task: write a short spoken acknowledgement for Text-to-speech.",
-  "Rules:",
-  "- Read the latest user request and extract the users intent.",
-  "- If a previous assistant response is provided, use it only as supporting context.",
-  --"- Sound casual and clear.",
-  "- Maximum 1 sentence.",
-  "- Do not ask follow-up questions or answer their request; just give a specific, confident acknowledgement that you will act on the request.",
-  "- Avoid reading out long file paths or code.",
-  "- Sometimes address the user as Ollie.",
-  "- Sometimes use lighthearted language if it fits the context, but don't force it.",
-  "- Output only the final spoken text.",
-  "Conversation context:",
-}, " ")
 local ai_voice_test_paragraph = (function()
   local text = [[
 Good evening, sir. All workshop systems are stable, your calendar has been reduced to the essentials, and the suit diagnostics are comfortably within tolerance.
@@ -143,7 +103,9 @@ local function ensure_ai_voice_audio_dir()
 end
 
 local function clear_speech_queue()
+  local cleared = #speech_queue
   speech_queue = {}
+  return cleared
 end
 
 local function has_active_audio_jobs()
@@ -168,164 +130,13 @@ local function stop_audio_jobs()
   set_voice_playback_active(false, { request_id = speech_request_id })
 end
 
-local function cancel_hidden_chat(chat)
-  if chat then
-    pcall(function()
-      if chat.current_request then
-        chat:stop()
-      end
-      cleanup_hidden_chat_session(chat)
-      chat:close()
-    end)
-  end
-end
-
-local function stop_hidden_chat(chat)
-  if chat then
-    pcall(function()
-      if chat.current_request then
-        chat:stop()
-      end
-    end)
-  end
-end
-
-local function reset_hidden_chat(chat)
-  if not chat then
-    return
-  end
-
-  chat.messages = {}
-  chat.header_line = 1
-  chat._ai_voice_request_id = nil
-  chat._ai_voice_request_text = nil
-  chat._ai_voice_source_text = nil
-
-  if vim.api.nvim_buf_is_valid(chat.bufnr) then
-    pcall(vim.api.nvim_buf_set_lines, chat.bufnr, 0, -1, false, {})
-  end
-end
-
-cleanup_hidden_chat_session = function(chat)
-  if not (chat and chat.adapter and chat.adapter.type == "acp") then
-    return
-  end
-
-  local session_id = chat.acp_session_id
-
-  if chat.acp_connection then
-    session_id = chat.acp_connection.session_id or session_id
-    pcall(chat.acp_connection.disconnect, chat.acp_connection)
-    chat.acp_connection = nil
-  end
-
-  chat.acp_session_id = nil
-
-  if chat.adapter.name == "opencode" and session_id and vim.fn.executable("opencode") == 1 then
-    vim.fn.jobstart({ "opencode", "session", "delete", session_id })
-  end
-end
-
-local function close_acknowledgement_chat()
-  if current_acknowledgement_chat then
-    local acknowledgement_chat = current_acknowledgement_chat
-    current_acknowledgement_chat = nil
-    current_acknowledgement_chat_key = nil
-
-    cancel_hidden_chat(acknowledgement_chat)
-  end
-end
-
-local function close_response_summary_chat()
-  if current_response_summary_chat then
-    local response_summary_chat = current_response_summary_chat
-    current_response_summary_chat = nil
-    current_response_summary_chat_key = nil
-
-    cancel_hidden_chat(response_summary_chat)
-  end
-end
-
-local function finalize_acknowledgement_chat(ack_chat)
-  if ack_chat._ai_voice_reusable then
-    reset_hidden_chat(ack_chat)
-  elseif current_acknowledgement_chat == ack_chat then
-    close_acknowledgement_chat()
-  else
-    cancel_hidden_chat(ack_chat)
-  end
-end
-
-local function finalize_response_summary_chat(response_summary_chat)
-  if response_summary_chat._ai_voice_reusable then
-    reset_hidden_chat(response_summary_chat)
-  elseif current_response_summary_chat == response_summary_chat then
-    close_response_summary_chat()
-  else
-    cancel_hidden_chat(response_summary_chat)
-  end
-end
-
-local function acknowledgement_chat_key(params, model_name)
-  params = params or {}
-
-  return table.concat({
-    params.adapter or "",
-    params.model or "",
-    params.command or "",
-    model_name or "",
-  }, "\0")
-end
-
-local function cancel_response_summary_chat()
-  if current_response_summary_chat then
-    stop_hidden_chat(current_response_summary_chat)
-    cleanup_hidden_chat_session(current_response_summary_chat)
-    reset_hidden_chat(current_response_summary_chat)
-  end
-end
-
-local function cancel_acknowledgement_chat()
-  if current_acknowledgement_chat then
-    stop_hidden_chat(current_acknowledgement_chat)
-    cleanup_hidden_chat_session(current_acknowledgement_chat)
-    reset_hidden_chat(current_acknowledgement_chat)
-  end
-end
-
-local function close_chat(chat)
-  if not chat then
-    return
-  end
-
-  pcall(function()
-    chat:close()
-  end)
-end
-
-local function hidden_chat_supports_reuse(params)
-  return not (params and params.adapter == "opencode")
-end
-
 local function prepare_speech_request(opts)
   opts = opts or {}
   speech_request_id = speech_request_id + 1
 
-  if opts.cancel_acknowledgement then
-    cancel_acknowledgement_chat()
-  end
-
-  if opts.cancel_summary then
-    cancel_response_summary_chat()
-  end
-
   if opts.clear_queue then
     clear_speech_queue()
   end
-
-  pending_acknowledgement_request_id = nil
-  pending_response_summary_request_id = nil
-  pending_response_summary_messages = {}
 
   stop_audio_jobs()
 
@@ -347,8 +158,31 @@ local function maybe_start_queued_speech()
   }))
 end
 
-local function ai_voice_stop()
-  prepare_speech_request({ cancel_acknowledgement = true, cancel_summary = true, clear_queue = true })
+local function ai_voice_stop(opts)
+  opts = opts or {}
+
+  local cleared = clear_speech_queue()
+  local had_active_audio = has_active_audio_jobs()
+
+  prepare_speech_request()
+
+  if opts.silent then
+    return
+  end
+
+  local message
+  if had_active_audio then
+    message = "Stopped AI voice playback"
+  else
+    message = "AI voice playback already stopped"
+  end
+
+  if cleared > 0 then
+    local queued_label = cleared == 1 and "queued message" or "queued messages"
+    message = message .. " and cleared " .. cleared .. " " .. queued_label
+  end
+
+  vim.notify(message, vim.log.levels.INFO)
 end
 
 local function set_ai_voice_robot_mode(enabled)
@@ -460,10 +294,7 @@ ai_voice_speak = function(message, opts)
   end
 
   if not request_id then
-    request_id = prepare_speech_request({
-      cancel_summary = not (opts and opts.keep_summary),
-      cancel_acknowledgement = not (opts and opts.keep_summary),
-    })
+    request_id = prepare_speech_request()
   end
 
   ensure_ai_voice_audio_dir()
@@ -544,558 +375,6 @@ queue_ai_voice_speak = function(message, opts)
   }))
 end
 
-local function strip_markdown(text)
-  local cleaned = text
-
-  cleaned = cleaned:gsub("\r\n", "\n")
-  cleaned = cleaned:gsub("```+[%w_-]*\n", "")
-  cleaned = cleaned:gsub("```+", "")
-  cleaned = cleaned:gsub("`([^`]+)`", "%1")
-  cleaned = cleaned:gsub("!%[([^%]]*)%]%([^%)]+%)", "%1")
-  cleaned = cleaned:gsub("%[([^%]]+)%]%([^%)]+%)", "%1")
-
-  local lines = vim.split(cleaned, "\n", { plain = true })
-
-  for i, line in ipairs(lines) do
-    line = line:gsub("^%s*>%s?", "")
-    line = line:gsub("^%s*#+%s*", "")
-    line = line:gsub("^%s*[-*+]%s+", "")
-    line = line:gsub("^%s*%d+[.)]%s+", "")
-    line = line:gsub("%*%*([^*]+)%*%*", "%1")
-    line = line:gsub("__([^_]+)__", "%1")
-    line = line:gsub("%*([^*]+)%*", "%1")
-    line = line:gsub("_([^_]+)_", "%1")
-    line = line:gsub("~~([^~]+)~~", "%1")
-    lines[i] = vim.trim(line)
-  end
-
-  cleaned = table.concat(lines, "\n")
-  cleaned = cleaned:gsub("\n%s*\n%s*\n+", "\n\n")
-
-  return vim.trim(cleaned)
-end
-
-local function normalize_message_text(content)
-  if type(content) == "table" then
-    content = table.concat(vim.tbl_map(function(part)
-      if type(part) == "string" then
-        return part
-      end
-
-      if type(part) == "table" and type(part.text) == "string" then
-        return part.text
-      end
-
-      return ""
-    end, content), "\n")
-  end
-
-  if type(content) ~= "string" then
-    return nil
-  end
-
-  content = vim.trim(content)
-  if content == "" then
-    return nil
-  end
-
-  local cleaned = strip_markdown(content)
-  if cleaned == "" then
-    return nil
-  end
-
-  return cleaned
-end
-
-get_latest_assistant_response = function(chat)
-  local codecompanion_config = require("codecompanion.config")
-  local llm_role = codecompanion_config.constants.LLM_ROLE
-
-  for i = #chat.messages, 1, -1 do
-    local message = chat.messages[i]
-
-    if message.role == llm_role then
-      if not (message.tools and message.tools.calls) then
-        local cleaned = normalize_message_text(message.content)
-        if cleaned then
-          return cleaned
-        end
-      end
-    end
-  end
-end
-
-local function get_latest_user_request(chat)
-  local codecompanion_config = require("codecompanion.config")
-  local user_role = codecompanion_config.constants.USER_ROLE
-
-  for i = #chat.messages, 1, -1 do
-    local message = chat.messages[i]
-
-    if message.role == user_role then
-      local content = message.content
-
-      if type(content) == "table" then
-        content = table.concat(vim.tbl_map(function(part)
-          if type(part) == "string" then
-            return part
-          end
-
-          if type(part) == "table" and type(part.text) == "string" then
-            return part.text
-          end
-
-          return ""
-        end, content), "\n")
-      end
-
-      if type(content) == "string" then
-        content = vim.trim(content)
-
-        if content ~= "" then
-          local cleaned = strip_markdown(content)
-
-          if cleaned ~= "" then
-            return cleaned
-          end
-        end
-      end
-    end
-  end
-end
-
-local function build_acknowledgement_input(request, previous_response)
-  local parts = {}
-
-  if previous_response and previous_response ~= "" then
-    table.insert(parts, "Previous assistant response:\n" .. previous_response)
-  end
-
-  table.insert(parts, "Latest user request:\n" .. request)
-
-  return acknowledgement_prompt .. "\n\n" .. table.concat(parts, "\n\n")
-end
-
-local function flush_pending_response_summaries(request_id)
-  if pending_response_summary_request_id == request_id and #pending_response_summary_messages > 0 then
-    local queued_response_summaries = vim.deepcopy(pending_response_summary_messages)
-    pending_response_summary_request_id = nil
-    pending_response_summary_messages = {}
-
-    vim.schedule(function()
-      for _, queued_response_summary in ipairs(queued_response_summaries) do
-        queue_ai_voice_speak(queued_response_summary, { keep_summary = true, request_id = request_id })
-      end
-    end)
-  end
-end
-
-local function create_acknowledgement_chat(response_summary_params, response_summary_model_name)
-  local codecompanion = require("codecompanion")
-  local chat_helpers = require("codecompanion.interactions.chat.helpers")
-
-  return codecompanion.chat({
-    auto_submit = false,
-    hidden = true,
-    mcp_servers = "none",
-    tools = "none",
-    params = response_summary_params,
-    messages = {},
-    callbacks = {
-      on_created = function(ack_chat)
-        if ack_chat.adapter.type == "acp" then
-          if response_summary_model_name then
-            ack_chat.adapter.defaults = ack_chat.adapter.defaults or {}
-            ack_chat.adapter.defaults.model = response_summary_model_name
-          end
-
-          chat_helpers.create_acp_connection(ack_chat)
-
-          if response_summary_model_name and ack_chat.acp_connection then
-            ack_chat:change_model({ model = response_summary_model_name })
-          end
-        end
-      end,
-      on_completed = function(ack_chat)
-        local request_id = ack_chat._ai_voice_request_id
-
-        if speech_request_id ~= request_id then
-          finalize_acknowledgement_chat(ack_chat)
-          return
-        end
-
-        local summary = get_latest_assistant_response(ack_chat)
-        local acknowledgement = summary and summary ~= "" and summary or ack_chat._ai_voice_request_text
-
-        pending_acknowledgement_request_id = nil
-
-        vim.schedule(function()
-          queue_ai_voice_speak(acknowledgement, { keep_summary = true, request_id = request_id })
-
-          flush_pending_response_summaries(request_id)
-        end)
-
-        finalize_acknowledgement_chat(ack_chat)
-      end,
-      on_cancelled = function(ack_chat)
-        local request_id = ack_chat._ai_voice_request_id
-
-        if pending_acknowledgement_request_id == request_id then
-          pending_acknowledgement_request_id = nil
-        end
-
-        flush_pending_response_summaries(request_id)
-
-        finalize_acknowledgement_chat(ack_chat)
-      end,
-    },
-  })
-end
-
-local function get_or_create_acknowledgement_chat(chat, response_summary_params, response_summary_model_name)
-  local can_reuse = hidden_chat_supports_reuse(response_summary_params)
-
-  if not can_reuse then
-    close_acknowledgement_chat()
-    local acknowledgement_chat = create_acknowledgement_chat(response_summary_params, response_summary_model_name)
-    if acknowledgement_chat then
-      acknowledgement_chat._ai_voice_reusable = false
-      current_acknowledgement_chat = acknowledgement_chat
-      current_acknowledgement_chat_key = nil
-    end
-    return acknowledgement_chat
-  end
-
-  local key = acknowledgement_chat_key(response_summary_params, response_summary_model_name)
-
-  if current_acknowledgement_chat then
-    local invalid = not vim.api.nvim_buf_is_valid(current_acknowledgement_chat.bufnr)
-    if invalid or current_acknowledgement_chat_key ~= key then
-      close_acknowledgement_chat()
-    end
-  end
-
-  if current_acknowledgement_chat then
-    return current_acknowledgement_chat
-  end
-
-  local acknowledgement_chat = create_acknowledgement_chat(response_summary_params, response_summary_model_name)
-  if not acknowledgement_chat then
-    return nil
-  end
-
-  current_acknowledgement_chat = acknowledgement_chat
-  current_acknowledgement_chat_key = key
-  acknowledgement_chat._ai_voice_reusable = true
-
-  return acknowledgement_chat
-end
-
-local function create_response_summary_chat(response_summary_params, response_summary_model_name)
-  local codecompanion = require("codecompanion")
-  local chat_helpers = require("codecompanion.interactions.chat.helpers")
-
-  return codecompanion.chat({
-    auto_submit = false,
-    hidden = true,
-    mcp_servers = "none",
-    tools = "none",
-    params = response_summary_params,
-    messages = {},
-    callbacks = {
-      on_created = function(response_summary_chat)
-        if response_summary_chat.adapter.type == "acp" then
-          if response_summary_model_name then
-            response_summary_chat.adapter.defaults = response_summary_chat.adapter.defaults or {}
-            response_summary_chat.adapter.defaults.model = response_summary_model_name
-          end
-
-          chat_helpers.create_acp_connection(response_summary_chat)
-
-          if response_summary_model_name and response_summary_chat.acp_connection then
-            response_summary_chat:change_model({ model = response_summary_model_name })
-          end
-        end
-      end,
-      on_completed = function(response_summary_chat)
-        local request_id = response_summary_chat._ai_voice_request_id
-        local source_response = response_summary_chat._ai_voice_source_text
-
-        if speech_request_id ~= request_id then
-          finalize_response_summary_chat(response_summary_chat)
-          return
-        end
-
-        local summarized_response = get_latest_assistant_response(response_summary_chat)
-        local spoken_response_summary = summarized_response and summarized_response ~= "" and summarized_response or source_response
-
-        if pending_acknowledgement_request_id == request_id then
-          pending_response_summary_request_id = request_id
-          table.insert(pending_response_summary_messages, spoken_response_summary)
-        else
-          vim.schedule(function()
-            queue_ai_voice_speak(spoken_response_summary, { keep_summary = true, request_id = request_id })
-          end)
-        end
-
-        finalize_response_summary_chat(response_summary_chat)
-      end,
-      on_cancelled = function(response_summary_chat)
-        finalize_response_summary_chat(response_summary_chat)
-      end,
-    },
-  })
-end
-
-local function get_or_create_response_summary_chat(response_summary_params, response_summary_model_name)
-  local can_reuse = hidden_chat_supports_reuse(response_summary_params)
-
-  if not can_reuse then
-    close_response_summary_chat()
-    local response_summary_chat = create_response_summary_chat(response_summary_params, response_summary_model_name)
-    if response_summary_chat then
-      response_summary_chat._ai_voice_reusable = false
-      current_response_summary_chat = response_summary_chat
-      current_response_summary_chat_key = nil
-    end
-    return response_summary_chat
-  end
-
-  local key = acknowledgement_chat_key(response_summary_params, response_summary_model_name)
-
-  if current_response_summary_chat then
-    local invalid = not vim.api.nvim_buf_is_valid(current_response_summary_chat.bufnr)
-    if invalid or current_response_summary_chat_key ~= key then
-      close_response_summary_chat()
-    end
-  end
-
-  if current_response_summary_chat then
-    return current_response_summary_chat
-  end
-
-  local response_summary_chat = create_response_summary_chat(response_summary_params, response_summary_model_name)
-  if not response_summary_chat then
-    return nil
-  end
-
-  current_response_summary_chat = response_summary_chat
-  current_response_summary_chat_key = key
-  response_summary_chat._ai_voice_reusable = true
-
-  return response_summary_chat
-end
-
-local function get_target_chat()
-  local ok, codecompanion = pcall(require, "codecompanion")
-
-  if not ok then
-    return nil, "CodeCompanion is not available"
-  end
-
-  local current_ok, current_chat = pcall(codecompanion.buf_get_chat, 0)
-
-  if current_ok and current_chat then
-    return current_chat
-  end
-
-  local last_chat = codecompanion.last_chat()
-
-  if last_chat then
-    return last_chat
-  end
-
-  return nil, "No CodeCompanion chat found"
-end
-
-local function get_chat_model(chat)
-  if not (chat and chat.adapter) then
-    return nil
-  end
-
-  if chat.adapter.type == "acp" and chat.acp_connection then
-    local models = chat.acp_connection:get_models()
-
-    if models and models.currentModelId then
-      return models.currentModelId
-    end
-  end
-
-  if chat.adapter.schema and chat.adapter.schema.model then
-    return chat.adapter.schema.model.default
-  end
-
-  if chat.adapter.defaults then
-    return chat.adapter.defaults.model
-  end
-end
-
-local function get_chat_command(chat)
-  if not (chat and chat.adapter and chat.adapter.type == "acp" and chat.adapter.commands) then
-    return nil
-  end
-
-  local selected = chat.adapter.commands.selected
-
-  if not selected then
-    return nil
-  end
-
-  for name, command in pairs(chat.adapter.commands) do
-    if name ~= "selected" and command == selected then
-      return name
-    end
-  end
-
-  return "default"
-end
-
-local function get_response_summary_model_name()
-  if vim.g.ai_voice_response_summary_model_name ~= nil then
-    return vim.g.ai_voice_response_summary_model_name
-  end
-
-  if vim.g.ai_voice_summary_model ~= nil then
-    return vim.g.ai_voice_summary_model
-  end
-
-  return response_summary_model_name
-end
-
-local function build_response_summary_chat_params(chat)
-  local config_ok, codecompanion_config = pcall(require, "codecompanion.config")
-
-  if config_ok then
-    local summary_adapter_name = vim.g.ai_voice_summary_adapter_name or "opencode"
-    local acp_adapter = codecompanion_config.adapters.acp and codecompanion_config.adapters.acp[summary_adapter_name]
-    local http_adapter = codecompanion_config.adapters.http and codecompanion_config.adapters.http[summary_adapter_name]
-    local has_summary_adapter = acp_adapter or http_adapter
-    local is_acp_adapter = acp_adapter ~= nil
-
-    if has_summary_adapter then
-      local params = {
-        adapter = summary_adapter_name,
-      }
-
-      if not is_acp_adapter then
-        params.model = get_response_summary_model_name() or get_chat_model(chat)
-      end
-
-      if vim.g.ai_voice_summary_command_name then
-        params.command = vim.g.ai_voice_summary_command_name
-      end
-
-      return params
-    end
-  end
-
-  if not (chat and chat.adapter and chat.adapter.name) then
-    return nil
-  end
-
-  local params = {
-    adapter = chat.adapter.name,
-  }
-
-  local model_name = get_chat_model(chat)
-  if model_name and chat.adapter.type ~= "acp" then
-    params.model = model_name
-  end
-
-  local command_name = get_chat_command(chat)
-  if command_name then
-    params.command = command_name
-  end
-
-  return params
-end
-
-local function speak_response_summary(chat, response, request_id)
-  local response_summary_params = build_response_summary_chat_params(chat)
-  local response_summary_model_name = get_response_summary_model_name() or get_chat_model(chat)
-  local response_summary_chat = get_or_create_response_summary_chat(response_summary_params, response_summary_model_name)
-
-  if not response_summary_chat then
-    vim.notify("AI voice summary failed: could not create summary chat", vim.log.levels.ERROR)
-    return
-  end
-
-  reset_hidden_chat(response_summary_chat)
-
-  response_summary_chat._ai_voice_request_id = request_id
-  response_summary_chat._ai_voice_source_text = response
-  response_summary_chat.messages = {
-    {
-      role = "user",
-      content = response_summary_prompt .. "\n\n" .. response,
-    },
-  }
-
-  response_summary_chat.ui:render(response_summary_chat.buffer_context, response_summary_chat.messages, {
-    stop_context_insertion = true,
-  })
-  response_summary_chat:submit()
-end
-
-local function acknowledge_and_speak_request(chat, request, request_id)
-  local response_summary_params = build_response_summary_chat_params(chat)
-  local response_summary_model_name = get_response_summary_model_name() or get_chat_model(chat)
-  local previous_response = get_latest_assistant_response(chat)
-  local acknowledgement_input = build_acknowledgement_input(request, previous_response)
-  local acknowledgement_chat = get_or_create_acknowledgement_chat(chat, response_summary_params, response_summary_model_name)
-
-  if not acknowledgement_chat then
-    if pending_acknowledgement_request_id == request_id then
-      pending_acknowledgement_request_id = nil
-    end
-
-    flush_pending_response_summaries(request_id)
-
-    vim.notify("AI voice acknowledgement failed: could not create hidden chat", vim.log.levels.ERROR)
-    return
-  end
-
-  reset_hidden_chat(acknowledgement_chat)
-
-  acknowledgement_chat._ai_voice_request_id = request_id
-  acknowledgement_chat._ai_voice_request_text = request
-  acknowledgement_chat.messages = {
-    {
-      role = "user",
-      content = acknowledgement_input,
-    },
-  }
-
-  acknowledgement_chat.ui:render(acknowledgement_chat.buffer_context, acknowledgement_chat.messages, {
-    stop_context_insertion = true,
-  })
-  acknowledgement_chat:submit()
-end
-
-local function speak_last_codecompanion_response_summary()
-  local chat, err = get_target_chat()
-
-  if not chat then
-    vim.notify(err, vim.log.levels.WARN)
-    return
-  end
-
-  local response = get_latest_assistant_response(chat)
-
-  if not response then
-    vim.notify("No assistant response available to summarize", vim.log.levels.WARN)
-    return
-  end
-
-  local request_id = prepare_speech_request({
-    cancel_acknowledgement = true,
-    cancel_summary = true,
-    clear_queue = true,
-  })
-
-  speak_response_summary(chat, response, request_id)
-end
-
 local function replay_last_audio_message()
   if not last_spoken_message then
     vim.notify("No previous AI voice message available to replay", vim.log.levels.WARN)
@@ -1123,120 +402,14 @@ local function set_ai_voice_volume(volume)
   return true
 end
 
-local function set_ai_voice_codecompanion_enabled(enabled, opts)
-  opts = opts or {}
-  ai_voice_codecompanion_enabled = enabled
-  if opts.notify ~= false then
-    vim.notify(
-      "AI voice CodeCompanion responses are now " .. (enabled and "enabled" or "disabled"),
-      vim.log.levels.INFO
-    )
-  end
-end
-
-local function toggle_ai_voice_codecompanion(opts)
-  set_ai_voice_codecompanion_enabled(not ai_voice_codecompanion_enabled, opts)
-end
-
 local function create_or_replace_user_command(name, fn, opts)
   pcall(vim.api.nvim_del_user_command, name)
   vim.api.nvim_create_user_command(name, fn, opts)
 end
 
-local function attach_ai_voice_to_chat(bufnr, chat)
-  if not chat or chat.hidden then
-    return
-  end
-
-  local ok, attached_generation = pcall(vim.api.nvim_buf_get_var, bufnr, "ai_voice_hook_generation")
-  if ok and attached_generation == ai_voice_hook_generation then
-    return
-  end
-
-  pcall(vim.api.nvim_buf_set_var, bufnr, "ai_voice_hook_generation", ai_voice_hook_generation)
-
-  chat._ai_voice_hook_generation = ai_voice_hook_generation
-  local callback_generation = ai_voice_hook_generation
-
-  chat:add_callback("on_completed", function(current_chat)
-    if current_chat._ai_voice_hook_generation ~= callback_generation then
-      return
-    end
-
-    if _G.ai_walkthrough_handle_codecompanion_response
-      and _G.ai_walkthrough_handle_codecompanion_response(current_chat) then
-      return
-    end
-
-    if not ai_voice_codecompanion_enabled then
-      return
-    end
-
-    local response = get_latest_assistant_response(current_chat)
-    local request_id = speech_request_id
-
-    if response then
-      speak_response_summary(current_chat, response, request_id)
-    end
-  end)
-
-  chat:add_callback("on_submitted", function(current_chat)
-    if current_chat._ai_voice_hook_generation ~= callback_generation then
-      return
-    end
-
-    if not ai_voice_codecompanion_enabled then
-      return
-    end
-
-    local request = get_latest_user_request(current_chat)
-
-    if request then
-      local request_id = prepare_speech_request({
-        cancel_acknowledgement = true,
-        cancel_summary = true,
-        clear_queue = true,
-      })
-
-      pending_acknowledgement_request_id = request_id
-      acknowledge_and_speak_request(current_chat, request, request_id)
-    end
-  end)
-end
-
-local function attach_ai_voice_to_existing_chats(codecompanion)
-  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_loaded(bufnr) then
-      local ok, chat = pcall(codecompanion.buf_get_chat, bufnr)
-
-      if ok and chat then
-        attach_ai_voice_to_chat(bufnr, chat)
-      end
-    end
-  end
-end
-
-local function attach_codecompanion_voice_hook()
-  local ok, codecompanion = pcall(require, "codecompanion")
-
-  if not ok then
-    return
-  end
-
-  vim.api.nvim_create_autocmd({ "User" }, {
-    pattern = "CodeCompanionChatCreated",
-    group = cc_group,
-    callback = function(args)
-      local chat = codecompanion.buf_get_chat(args.data.bufnr)
-
-      attach_ai_voice_to_chat(args.data.bufnr, chat)
-    end,
-  })
-
-  attach_ai_voice_to_existing_chats(codecompanion)
-end
-
-attach_codecompanion_voice_hook()
+vim.keymap.set("n", "[v", "<Cmd>AIVoiceStop<CR>", {
+  desc = "Stop AI voice playback",
+})
 
 create_or_replace_user_command("AIVoiceInstall", function()
   vim.fn.mkdir(voices_dir, "p")
@@ -1279,10 +452,18 @@ end, {
 })
 
 create_or_replace_user_command("AIVoice", function(opts)
-  ai_voice_speak(opts.args)
+  queue_ai_voice_speak(opts.args)
 end, {
   nargs = "+",
-  desc = "Speak a message with piper",
+  desc = "Queue a message for AI voice playback",
+})
+
+create_or_replace_user_command("AIVoiceInterrupt", function(opts)
+  ai_voice_stop({ silent = true })
+  queue_ai_voice_speak(opts.args)
+end, {
+  nargs = "+",
+  desc = "Interrupt playback, clear queued speech, and speak a new message",
 })
 
 create_or_replace_user_command("AIVoiceTest", function()
@@ -1308,7 +489,7 @@ end, {
 create_or_replace_user_command("AIVoiceStop", function()
   ai_voice_stop()
 end, {
-  desc = "Stop current piper audio playback",
+  desc = "Stop current playback and clear queued speech",
 })
 
 create_or_replace_user_command("AIVoiceRange", function(opts)
@@ -1320,16 +501,10 @@ create_or_replace_user_command("AIVoiceRange", function(opts)
     return
   end
 
-  ai_voice_speak(message)
+  queue_ai_voice_speak(message)
 end, {
   range = true,
-  desc = "Speak the selected line range with piper",
-})
-
-create_or_replace_user_command("AIVoiceSummary", function()
-  speak_last_codecompanion_response_summary()
-end, {
-  desc = "Summarize the latest CodeCompanion reply and speak it",
+  desc = "Queue the selected line range for playback",
 })
 
 create_or_replace_user_command("AIVoiceReplay", function()
@@ -1340,7 +515,6 @@ end, {
 
 create_or_replace_user_command("AIToggleVoice", function()
   set_ai_voice_enabled(not ai_voice_enabled)
-  toggle_ai_voice_codecompanion({ notify = false })
 
   if not ai_voice_enabled then
     ai_voice_stop()
@@ -1351,14 +525,12 @@ end, {
 
 create_or_replace_user_command("AIEnableVoice", function()
   set_ai_voice_enabled(true)
-  set_ai_voice_codecompanion_enabled(true, { notify = false })
 end, {
   desc = "Enable AI voice playback",
 })
 
 create_or_replace_user_command("AIDisableVoice", function()
   set_ai_voice_enabled(false)
-  set_ai_voice_codecompanion_enabled(false, { notify = false })
   ai_voice_stop()
 end, {
   desc = "Disable AI voice playback",
