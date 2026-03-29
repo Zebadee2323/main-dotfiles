@@ -26,6 +26,12 @@ require("sidekick").setup({
 
 vim.keymap.set('n', '<c-p><c-g>', ':Sidekick cli toggle<CR>')
 
+vim.api.nvim_create_user_command("AI", function()
+  require("sidekick.cli").toggle("codex_naia")
+end, {
+  desc = "Open Sidekick with the codex_naia tool",
+})
+
 -- Get git root if available
 local function get_git_root(path)
   local dir = path and vim.fn.fnamemodify(path, ":p:h") or nil
@@ -85,55 +91,91 @@ local function maybe_restore_visual(opts)
   end
 end
 
--- Send metadata: file + line or line range (line info after a space)
-vim.api.nvim_create_user_command("AISendLegacy", function(opts)
-  local prefix = vim.trim(opts.args or "")
+local function build_ai_location_reference(opts)
+  opts = opts or {}
+
+  local separator = opts.separator or ":"
   local path = get_repo_relative_path()
 
-  local body
   if opts.range and opts.line1 and opts.line2 and opts.line2 >= opts.line1 then
     if opts.line1 == opts.line2 then
-      body = string.format("@%s %d", path, opts.line1)
-    else
-      body = string.format("@%s %d-%d", path, opts.line1, opts.line2)
+      return string.format("@%s%s%d", path, separator, opts.line1)
     end
-  else
-    local line = vim.api.nvim_win_get_cursor(0)[1]
-    body = string.format("@%s %d", path, line)
+
+    return string.format("@%s%s%d-%d", path, separator, opts.line1, opts.line2)
   end
 
-  local msg = prefix ~= "" and (prefix .. "\n\n" .. body) or body
+  local line = opts.current_line or vim.api.nvim_win_get_cursor(0)[1]
+  return string.format("@%s%s%d", path, separator, line)
+end
+
+local function build_ai_message(opts)
+  opts = opts or {}
+
+  local prefix = vim.trim(opts.args or "")
+  local body = build_ai_location_reference(opts)
+
+  if prefix ~= "" then
+    return prefix .. "\n\n" .. body, body
+  end
+
+  return body, body
+end
+
+local function send_raw_message_to_sidekick(msg)
+  local trimmed = vim.trim(msg or "")
+  if trimmed == "" then
+    vim.notify("AIMessage requires a message", vim.log.levels.ERROR)
+    return false
+  end
 
   pcall(require("sidekick.cli").send, {
     msg = msg,
     submit = true,
   })
 
+  return true
+end
+
+vim.api.nvim_create_user_command("AIMessage", function(opts)
+  send_raw_message_to_sidekick(opts.args or "")
+end, {
+  nargs = "+",
+  desc = "Send a raw message to Sidekick",
+})
+
+-- Send metadata: file + line or line range (line info after a space)
+vim.api.nvim_create_user_command("AISend", function(opts)
+  local msg = build_ai_message(vim.tbl_extend("force", opts, {
+    separator = ":",
+  }))
+
+  vim.api.nvim_cmd({
+    cmd = "AIMessage",
+    args = { msg },
+  }, {})
+
   maybe_restore_visual(opts)
 end, {
   nargs = "*",
   range = true,
-  desc = "Send file line or file start-end to Sidekick (legacy)",
+  desc = "Send file line or file start-end to Sidekick",
+})
+
+vim.api.nvim_create_user_command("AICommit", function()
+  vim.api.nvim_cmd({
+    cmd = "AIMessage",
+    args = { "git commit staged, you decide the message." },
+  }, {})
+end, {
+  desc = "Send git commit staged prompt to Sidekick",
 })
 
 -- Copy metadata: file + line or line range to clipboard (line info after a space)
 vim.api.nvim_create_user_command("AICopy", function(opts)
-  local prefix = vim.trim(opts.args or "")
-  local path = get_repo_relative_path()
-
-  local body
-  if opts.range and opts.line1 and opts.line2 and opts.line2 >= opts.line1 then
-    if opts.line1 == opts.line2 then
-      body = string.format("@%s %d", path, opts.line1)
-    else
-      body = string.format("@%s %d-%d", path, opts.line1, opts.line2)
-    end
-  else
-    local line = vim.api.nvim_win_get_cursor(0)[1]
-    body = string.format("@%s %d", path, line)
-  end
-
-  local msg = prefix ~= "" and (prefix .. "\n\n" .. body) or body
+  local msg, body = build_ai_message(vim.tbl_extend("force", opts, {
+    separator = ":",
+  }))
 
   -- copy to OS clipboard
   vim.fn.setreg("+", msg)

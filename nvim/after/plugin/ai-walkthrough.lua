@@ -2664,10 +2664,21 @@ end, {
 })
 
 create_or_replace_user_command("AIWalkThread", function(opts)
-  request_walkthrough_enquiry(opts)
+  local prefix = "For the current walkthrough step:\n"
+  local suffix = trim(opts.args or "")
+  local msg = prefix
+
+  if suffix ~= "" then
+    msg = msg .. suffix
+  end
+
+  vim.api.nvim_cmd({
+    cmd = "AIMessage",
+    args = { msg },
+  }, {})
 end, {
   nargs = "*",
-  desc = "Ask the active AI chat to extend the current walkthrough step via Naia tools",
+  desc = "Send a walkthrough-step prompt via AIMessage",
 })
 
 create_or_replace_user_command("AIWalkInstruct", function(opts)

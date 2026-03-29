@@ -582,76 +582,76 @@ codecompanion.setup({
   },
 })
 
-create_or_replace_user_command("AI", function()
-  toggle_default_ai_chat()
-end, {
-  desc = "Toggle CodeCompanion chat with OpenCode gpt-5.4 medium",
-})
+-- create_or_replace_user_command("AI", function()
+--   toggle_default_ai_chat()
+-- end, {
+--   desc = "Toggle CodeCompanion chat with OpenCode gpt-5.4 medium",
+-- })
 
-create_or_replace_user_command("AISend", function(opts)
-  send_to_codecompanion(opts)
-end, {
-  nargs = "*",
-  range = true,
-  desc = "Append file line or range to CodeCompanion input",
-})
+-- create_or_replace_user_command("AISend", function(opts)
+--   send_to_codecompanion(opts)
+-- end, {
+--   nargs = "*",
+--   range = true,
+--   desc = "Append file line or range to CodeCompanion input",
+-- })
 
-create_or_replace_user_command("AIWalkSend", function(opts)
-  local send_opts = vim.tbl_extend("force", opts or {}, {
-    bufnr = vim.api.nvim_get_current_buf(),
-    current_line = vim.api.nvim_win_get_cursor(0)[1],
-  })
+-- create_or_replace_user_command("AIWalkSend", function(opts)
+--   local send_opts = vim.tbl_extend("force", opts or {}, {
+--     bufnr = vim.api.nvim_get_current_buf(),
+--     current_line = vim.api.nvim_win_get_cursor(0)[1],
+--   })
 
-  send_to_codecompanion(send_opts)
-end, {
-  nargs = "*",
-  range = true,
-  desc = "Append file line or range so you can ask for a walkthrough naturally",
-})
+--   send_to_codecompanion(send_opts)
+-- end, {
+--   nargs = "*",
+--   range = true,
+--   desc = "Append file line or range so you can ask for a walkthrough naturally",
+-- })
 
-create_or_replace_user_command("AIMessage", function(opts)
-  send_plain_message_to_codecompanion(opts)
-end, {
-  nargs = "+",
-  desc = "Send a plain message to CodeCompanion",
-})
+-- create_or_replace_user_command("AIMessage", function(opts)
+--   send_plain_message_to_codecompanion(opts)
+-- end, {
+--   nargs = "+",
+--   desc = "Send a plain message to CodeCompanion",
+-- })
 
-create_or_replace_user_command("AICommit", function()
-  vim.cmd("AIMessage git commit staged")
-end, {
-  desc = "Send git commit staged prompt to CodeCompanion",
-})
+-- create_or_replace_user_command("AICommit", function()
+--   vim.cmd("AIMessage git commit staged")
+-- end, {
+--   desc = "Send git commit staged prompt to CodeCompanion",
+-- })
 
-create_or_replace_user_command("AIRestore", function()
-  restore_opencode_session()
-end, {
-  desc = "List and restore an OpenCode session in CodeCompanion",
-})
+-- create_or_replace_user_command("AIRestore", function()
+--   restore_opencode_session()
+-- end, {
+--   desc = "List and restore an OpenCode session in CodeCompanion",
+-- })
 
-create_or_replace_user_command("AIModel", function(opts)
-  set_current_ai_chat_model(opts)
-end, {
-  nargs = "?",
-  complete = function()
-    local chat = get_target_ai_chat()
-    if not chat or chat.adapter.type ~= "acp" then
-      return {}
-    end
+-- create_or_replace_user_command("AIModel", function(opts)
+--   set_current_ai_chat_model(opts)
+-- end, {
+--   nargs = "?",
+--   complete = function()
+--     local chat = get_target_ai_chat()
+--     if not chat or chat.adapter.type ~= "acp" then
+--       return {}
+--     end
 
-    local chat_helpers = require("codecompanion.interactions.chat.helpers")
-    if not chat.acp_connection then
-      chat_helpers.create_acp_connection(chat)
-    end
+--     local chat_helpers = require("codecompanion.interactions.chat.helpers")
+--     if not chat.acp_connection then
+--       chat_helpers.create_acp_connection(chat)
+--     end
 
-    local connection = chat.acp_connection
-    local models = connection and connection.get_models and connection:get_models() or nil
-    local items = {}
+--     local connection = chat.acp_connection
+--     local models = connection and connection.get_models and connection:get_models() or nil
+--     local items = {}
 
-    for _, model in ipairs(models and models.availableModels or {}) do
-      table.insert(items, model.modelId)
-    end
+--     for _, model in ipairs(models and models.availableModels or {}) do
+--       table.insert(items, model.modelId)
+--     end
 
-    return items
-  end,
-  desc = "Change the active CodeCompanion chat model",
-})
+--     return items
+--   end,
+--   desc = "Change the active CodeCompanion chat model",
+-- })
