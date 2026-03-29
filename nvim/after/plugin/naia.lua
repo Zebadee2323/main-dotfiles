@@ -29,7 +29,7 @@ local function naia_inform_user(args)
     end
   end)
 
-  return "User informed: " .. message
+  return ""
 end
 
 local function register_naia_inform_user_tool()
