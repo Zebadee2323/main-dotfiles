@@ -33,6 +33,13 @@ return require('packer').startup(function(use)
     use 'github/copilot.vim'
     use 'folke/sidekick.nvim'
     use 'olimorris/codecompanion.nvim'
+    use({
+        "/Users/onelson/Development/nvim-naia/",
+        config = function()
+            require("naia").setup()
+        end,
+    })
+
 
     -- Color Themes
     use 'morhetz/gruvbox'

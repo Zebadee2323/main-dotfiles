@@ -1,6 +1,26 @@
+local sidekick_naia_wrapper = require("naia").wrapper_path()
+
 require("sidekick").setup({
   nes = {
     enabled = false,
+  },
+  cli = {
+    tools = {
+      opencode_naia = {
+        cmd = { sidekick_naia_wrapper, "opencode" },
+        is_proc = "\\<opencode\\>",
+        continue = { "--continue" },
+        native_scroll = true,
+        url = "https://github.com/sst/opencode",
+      },
+      codex_naia = {
+        cmd = { sidekick_naia_wrapper, "codex" },
+        is_proc = "\\<codex\\>",
+        resume = { "resume" },
+        continue = { "resume", "--last" },
+        url = "https://github.com/openai/codex",
+      },
+    },
   },
 })
 

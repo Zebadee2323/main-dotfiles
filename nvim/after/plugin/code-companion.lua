@@ -1,7 +1,24 @@
 local codecompanion = require("codecompanion")
 
-local ai_chat_adapter = "opencode"
+local sidekick_naia_wrapper = require("naia").wrapper_path()
+local ai_chat_adapter = "opencode_naia"
 local ai_chat_model = "openai/gpt-5.4/medium"
+
+local function build_opencode_naia_adapter()
+  local adapter = vim.deepcopy(require("codecompanion.adapters.acp.opencode"))
+
+  adapter.name = "opencode_naia"
+  adapter.formatted_name = "OpenCode Naia"
+  adapter.commands = {
+    default = {
+      sidekick_naia_wrapper,
+      "opencode",
+      "acp",
+    },
+  }
+
+  return adapter
+end
 
 do
   local ACPHandler = require("codecompanion.interactions.chat.acp.handler")
@@ -529,18 +546,23 @@ local function restore_opencode_session()
 end
 
 codecompanion.setup({
+  adapters = {
+    acp = {
+      opencode_naia = build_opencode_naia_adapter,
+    },
+  },
   interactions = {
     background = {
-      adapter = "opencode",
+      adapter = ai_chat_adapter,
     },
     chat = {
-      adapter = "opencode",
+      adapter = ai_chat_adapter,
     },
     inline = {
-      adapter = "opencode",
+      adapter = ai_chat_adapter,
     },
     cmd = {
-      adapter = "opencode",
+      adapter = ai_chat_adapter,
     },
   },
   display = {
