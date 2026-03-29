@@ -19,8 +19,6 @@ local function naia_inform_user(args)
   end
 
   vim.schedule(function()
-    vim.notify(message, vim.log.levels.INFO, { title = "Naia" })
-
     local ok, err = pcall(vim.api.nvim_cmd, {
       cmd = "AIVoice",
       args = { message },
