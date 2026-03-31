@@ -1,18 +1,24 @@
 local add_namespace = vim.api.nvim_create_namespace("fancy_reopen_diff_add")
 local delete_namespace = vim.api.nvim_create_namespace("fancy_reopen_diff_delete")
+local existing_runtime = rawget(vim, "_fancy_reopen_diff_runtime")
 local state = {}
 local uv = vim.uv or vim.loop
 local play_animation
+local glitch_char
 local max_animated_file_lines = 5000
 local max_animated_file_bytes = 512 * 1024
 local max_animated_changed_lines = 200
-local animation_start_delay_ms = 300
-local animation_step_ms = 70
+local animation_start_delay_ms = 120
+local animation_step_ms = 16
+local git_hunks_frame_count = 10
+local digital_wipe_reveal_frames = 20
+local digital_wipe_fade_frames = 20
 local reload_settle_delay_ms = 30
 local reload_retry_count = 6
 local watcher_checktime_debounce_ms = 120
 
 vim.o.autoread = true
+math.randomseed(tonumber(tostring(uv.hrtime()):sub(-9)))
 
 local function set_highlights()
   vim.api.nvim_set_hl(0, "FancyReopenDiffAddCore", { bg = "#2f8f63", bold = true })
@@ -24,9 +30,21 @@ local function set_highlights()
   vim.api.nvim_set_hl(0, "FancyReopenDiffDeletePrefix", { fg = "#ff6b7d", bold = true })
   vim.api.nvim_set_hl(0, "FancyReopenDiffAddSign", { fg = "#63d297" })
   vim.api.nvim_set_hl(0, "FancyReopenDiffChangeSign", { fg = "#ffd75f" })
+  vim.api.nvim_set_hl(0, "FancyReopenDiffWipeDense", { fg = "#8cf2ff", bg = "#0b1f2a", bold = true })
+  vim.api.nvim_set_hl(0, "FancyReopenDiffWipeMid", { fg = "#5dd9f5", bg = "#08161f" })
+  vim.api.nvim_set_hl(0, "FancyReopenDiffWipeLight", { fg = "#3bb6d6", bg = "#050d12" })
+  vim.api.nvim_set_hl(0, "FancyReopenDiffWipeGhost", { fg = "#1d5363", bg = "#03070a" })
+  vim.api.nvim_set_hl(0, "FancyReopenDiffWipeHot", { fg = "#b7ff7a", bg = "#10210c", bold = true })
+  vim.api.nvim_set_hl(0, "FancyReopenDiffWipeTrace", { fg = "#6dffb3", bg = "#08140f" })
+  vim.api.nvim_set_hl(0, "FancyReopenDiffMorphDeleteHot", { fg = "#ff8ba0", bold = true })
+  vim.api.nvim_set_hl(0, "FancyReopenDiffMorphDeleteMid", { fg = "#ff6b7d" })
+  vim.api.nvim_set_hl(0, "FancyReopenDiffMorphDeleteGhost", { fg = "#7a3743", italic = true })
 end
 
 set_highlights()
+
+local visual_modes = {}
+local default_visual_mode = "digital_wipe"
 
 local function joined(lines)
   return table.concat(lines, "\n")
@@ -106,6 +124,18 @@ local function stop_file_watcher(bufnr)
 
   pcall(watcher.stop, watcher)
   pcall(watcher.close, watcher)
+end
+
+local function restore_buffer_modifiable(bufnr)
+  local buffer_state = state[bufnr]
+  if buffer_state and buffer_state.restore_modifiable ~= nil and vim.api.nvim_buf_is_valid(bufnr) then
+    vim.bo[bufnr].modifiable = buffer_state.restore_modifiable
+    buffer_state.restore_modifiable = nil
+  end
+end
+
+if existing_runtime and type(existing_runtime.cleanup_all) == "function" then
+  existing_runtime.cleanup_all()
 end
 
 local function schedule_checktime(bufnr, delay_ms)
@@ -207,6 +237,18 @@ local function current_generation(bufnr)
   return vim.b[bufnr].fancy_reopen_generation or 0
 end
 
+local function register_visual_mode(name, mode)
+  visual_modes[name] = vim.tbl_extend("force", mode or {}, { name = name })
+end
+
+local function resolve_visual_mode(bufnr)
+  local configured_name = vim.b[bufnr].fancy_reopen_diff_mode
+    or vim.g.fancy_reopen_diff_mode
+    or default_visual_mode
+
+  return visual_modes[configured_name] or visual_modes[default_visual_mode]
+end
+
 local function normalize_hunks(before_lines, after_lines, hunks)
   local normalized = {}
 
@@ -269,6 +311,27 @@ local function largest_hunk_target(hunks)
   return best_line
 end
 
+local function analyze_diff(before_lines, after_lines)
+  local raw_hunks = vim.diff(joined(before_lines), joined(after_lines), {
+    result_type = "indices",
+    algorithm = "histogram",
+    linematch = 160,
+    ctxlen = 0,
+    interhunkctxlen = 0,
+  })
+
+  if not raw_hunks or vim.tbl_isempty(raw_hunks) then
+    return nil
+  end
+
+  local hunks = normalize_hunks(before_lines, after_lines, raw_hunks)
+  if vim.tbl_isempty(hunks) then
+    return nil
+  end
+
+  return hunks
+end
+
 local function center_windows_on_line(bufnr, line)
   local wins = vim.fn.win_findbuf(bufnr)
   local line_count = vim.api.nvim_buf_line_count(bufnr)
@@ -289,6 +352,42 @@ local function center_windows_on_line(bufnr, line)
       end)
     end
   end
+end
+
+local function visible_windows_for_buffer(bufnr)
+  local wins = vim.fn.win_findbuf(bufnr)
+  local line_count = vim.api.nvim_buf_line_count(bufnr)
+  local windows = {}
+
+  for _, winid in ipairs(wins) do
+    if vim.api.nvim_win_is_valid(winid) then
+      local info = vim.fn.getwininfo(winid)[1]
+      if info then
+        local top = math.max(info.topline or 1, 1)
+        local bottom = math.min(info.botline or top, line_count)
+        windows[#windows + 1] = {
+          winid = winid,
+          top = top,
+          bottom = bottom,
+          width = math.max(vim.api.nvim_win_get_width(winid), 1),
+          height = math.max(bottom - top + 1, 1),
+        }
+      end
+    end
+  end
+
+  if vim.tbl_isempty(windows) then
+    local cursor = math.max(vim.api.nvim_win_get_cursor(0)[1], 1)
+    windows[1] = {
+      winid = vim.api.nvim_get_current_win(),
+      top = cursor,
+      bottom = math.min(cursor + math.max(vim.api.nvim_win_get_height(0) - 1, 0), line_count),
+      width = math.max(vim.api.nvim_win_get_width(0), 1),
+    }
+    windows[1].height = math.max(windows[1].bottom - windows[1].top + 1, 1)
+  end
+
+  return windows
 end
 
 local function render_deleted_hunks(bufnr, before_lines, hunks)
@@ -319,6 +418,48 @@ local function render_deleted_hunks(bufnr, before_lines, hunks)
       if old_count > capped then
         virt_lines[#virt_lines + 1] = {
           { string.format("  - ... %d more line(s)", old_count - capped), "FancyReopenDiffDeletePrefix" },
+        }
+      end
+
+      vim.api.nvim_buf_set_extmark(bufnr, delete_namespace, row, 0, {
+        virt_lines = virt_lines,
+        virt_lines_above = true,
+        priority = 260,
+      })
+    end
+  end
+end
+
+local function render_deleted_morph_hunks(bufnr, before_lines, hunks)
+  local line_count = vim.api.nvim_buf_line_count(bufnr)
+  local last_row = math.max(line_count - 1, 0)
+
+  vim.api.nvim_buf_clear_namespace(bufnr, delete_namespace, 0, -1)
+
+  for _, hunk in ipairs(hunks) do
+    local old_start = hunk[1]
+    local old_count = hunk[2]
+    local new_start = hunk[3]
+    local new_count = hunk[4]
+    local row = math.min(math.max(new_start - 1, 0), last_row)
+
+    if old_count > 0 and new_count == 0 then
+      local virt_lines = {}
+      local capped = math.min(old_count, 6)
+
+      for offset = 0, capped - 1 do
+        local old_line = before_lines[old_start + offset] or ""
+        local noise = glitch_char((old_start + offset) * 17, offset + 1)
+        virt_lines[#virt_lines + 1] = {
+          { "  ⨯ ", "FancyReopenDiffMorphDeleteMid" },
+          { noise .. " ", "FancyReopenDiffMorphDeleteHot" },
+          { old_line, "FancyReopenDiffMorphDeleteGhost" },
+        }
+      end
+
+      if old_count > capped then
+        virt_lines[#virt_lines + 1] = {
+          { string.format("  ⨯ ... %d more line(s)", old_count - capped), "FancyReopenDiffMorphDeleteMid" },
         }
       end
 
@@ -438,6 +579,302 @@ local function render_change_frame(bufnr, segments, cleared_distance)
   end
 end
 
+local function random_corner()
+  local corners = {
+    { row = 0, col = 0 },
+    { row = 0, col = 1 },
+    { row = 1, col = 0 },
+    { row = 1, col = 1 },
+  }
+
+  return corners[math.random(#corners)]
+end
+
+local function ease_out_cubic(t)
+  return 1 - ((1 - t) ^ 3)
+end
+
+local matrix_glyphs = { "0", "1", "#", "@", "%", "&", "$", "=", "+", "*", "/", "\\", "|", "~", "^" }
+
+local function line_char_at(line, col)
+  if not line or line == "" then
+    return " "
+  end
+
+  local char = vim.fn.strcharpart(line, col, 1)
+  return char ~= "" and char or " "
+end
+
+glitch_char = function(seed, frame)
+  return matrix_glyphs[((seed + (frame * 7)) % #matrix_glyphs) + 1]
+end
+
+local function row_change_kinds(hunks)
+  local kinds = {}
+
+  for _, hunk in ipairs(hunks) do
+    local old_count = hunk[2]
+    local new_start = hunk[3]
+    local new_count = hunk[4]
+    local kind = old_count == 0 and "add" or "change"
+
+    for offset = 0, math.max(new_count - 1, 0) do
+      kinds[new_start + offset - 1] = kind
+    end
+  end
+
+  return kinds
+end
+
+local function render_overlay_rows(bufnr, rows, priority)
+  vim.api.nvim_buf_clear_namespace(bufnr, add_namespace, 0, -1)
+
+  for row, overlay in pairs(rows) do
+    local has_chunks = overlay.chunks and #overlay.chunks > 0
+    local has_text = overlay.text and overlay.text:find("%S")
+
+    if has_chunks or has_text then
+      vim.api.nvim_buf_set_extmark(bufnr, add_namespace, row, 0, {
+        priority = priority or 250,
+        virt_text = overlay.chunks or { { overlay.text, overlay.hl_group } },
+        virt_text_pos = "overlay",
+        hl_mode = "replace",
+      })
+    end
+  end
+end
+
+local function render_overlay_fragments(bufnr, rows, priority)
+  vim.api.nvim_buf_clear_namespace(bufnr, add_namespace, 0, -1)
+
+  for row, fragments in pairs(rows) do
+    for _, fragment in ipairs(fragments) do
+      if fragment.text and fragment.text:find("%S") then
+        vim.api.nvim_buf_set_extmark(bufnr, add_namespace, row, 0, {
+          priority = priority or 250,
+          virt_text = { { fragment.text, fragment.hl_group } },
+          virt_text_pos = "overlay",
+          virt_text_win_col = fragment.col,
+          hl_mode = "combine",
+        })
+      end
+    end
+  end
+end
+
+register_visual_mode("git_hunks", {
+  prepare = function(bufnr, context)
+    context.change_segments = build_change_segments(bufnr, context.hunks)
+    context.max_distance = 0
+    context.total_frames = git_hunks_frame_count
+
+    for _, segment in ipairs(context.change_segments) do
+      context.max_distance = math.max(context.max_distance, segment.max_distance)
+    end
+  end,
+  start = function(bufnr, context)
+    render_deleted_hunks(bufnr, context.before_lines, context.hunks)
+  end,
+  frame = function(bufnr, context)
+    if vim.tbl_isempty(context.change_segments) then
+      return true
+    end
+
+    local frame_index = context.distance + 1
+    local progress = math.min(frame_index / context.total_frames, 1)
+    local cleared_distance = math.floor(progress * (context.max_distance + 2)) - 1
+
+    render_change_frame(bufnr, context.change_segments, cleared_distance)
+    context.distance = frame_index
+    return frame_index >= context.total_frames
+  end,
+  finish_delay = function(_, context)
+    if vim.tbl_isempty(context.change_segments) then
+      return animation_start_delay_ms + 420
+    end
+
+    return animation_start_delay_ms
+  end,
+})
+
+register_visual_mode("digital_wipe", {
+  prepare = function(bufnr, context)
+    context.windows = visible_windows_for_buffer(bufnr)
+    context.reveal_frames = digital_wipe_reveal_frames
+    context.fade_frames = digital_wipe_fade_frames
+    context.total_frames = context.reveal_frames + context.fade_frames
+    context.cells = {}
+    context.row_kinds = row_change_kinds(context.hunks)
+
+    for _, win in ipairs(context.windows) do
+      local corner = random_corner()
+      local max_row_distance = math.max(win.height - 1, 0)
+      local max_col_distance = math.max(win.width - 1, 0)
+      local row_origin = corner.row == 0 and 0 or max_row_distance
+      local col_origin = corner.col == 0 and 0 or max_col_distance
+      local max_distance = math.max(max_row_distance + max_col_distance, 1)
+      local row_freq = 1.4 + ((win.winid % 5) * 0.21)
+      local col_freq = 1.2 + ((win.winid % 7) * 0.17)
+      local swirl = 0.07 + ((win.winid % 4) * 0.018)
+      local band_shift = ((win.winid % 13) / 13)
+
+      for line = win.top, win.bottom do
+        local relative_row = line - win.top
+        local before_line = context.before_lines[line] or ""
+        local after_line = context.after_lines[line] or ""
+
+        for col = 0, win.width - 1 do
+          local row_ratio = win.height > 1 and (relative_row / (win.height - 1)) or 0
+          local col_ratio = win.width > 1 and (col / (win.width - 1)) or 0
+          local normalized_distance = (math.abs(relative_row - row_origin) + math.abs(col - col_origin)) / max_distance
+          local seed = ((win.winid * 29) + (line * 37) + (col * 17)) % 997
+          local jitter = (((seed % 31) / 31) - 0.5) * 0.22
+          local wave = math.sin((row_ratio * math.pi * row_freq) + (col_ratio * math.pi * 0.9) + band_shift)
+          local cross_wave = math.cos((col_ratio * math.pi * col_freq) - (row_ratio * math.pi * 1.3) + band_shift)
+          local swirl_offset = (row_ratio - col_ratio) * swirl
+          local flow = (wave * 0.11) + (cross_wave * 0.08) + swirl_offset
+          local band = (math.sin((row_ratio * 19) + (col_ratio * 11) + band_shift) + 1) * 0.5
+          local before_char = line_char_at(before_line, col)
+          local after_char = line_char_at(after_line, col)
+
+          context.cells[#context.cells + 1] = {
+            row = line - 1,
+            col = col,
+            row_ratio = row_ratio,
+            col_ratio = col_ratio,
+            distance = math.max(0, math.min(normalized_distance + jitter + flow, 1)),
+            seed = seed,
+            band = band,
+            before_char = before_char,
+            after_char = after_char,
+            changed = before_char ~= after_char,
+            row_kind = context.row_kinds[line - 1],
+          }
+        end
+      end
+    end
+  end,
+  start = function(bufnr, context)
+    center_windows_on_line(bufnr, context.target_line)
+    render_deleted_morph_hunks(bufnr, context.before_lines, context.hunks)
+  end,
+  frame = function(bufnr, context)
+    local rows = {}
+    local frame = context.distance + 1
+    local reveal_progress = ease_out_cubic(math.min(frame / context.reveal_frames, 1))
+    local fade_progress = context.fade_frames > 0
+        and math.min(math.max(frame - context.reveal_frames, 0) / context.fade_frames, 1)
+      or 1
+    local frame_phase = frame / context.total_frames
+
+    for _, cell in ipairs(context.cells) do
+      local frame_wave = (math.sin((cell.row_ratio * 13) + (cell.col_ratio * 17) + (frame_phase * math.pi * 6)) + 1) * 0.5
+      local threshold = reveal_progress + ((frame_wave - 0.5) * 0.14)
+      local edge_delta = threshold - cell.distance
+      local morph_progress = math.max(0, math.min((edge_delta + 0.18) / 0.36, 1))
+      local settled_progress = math.max(0, math.min((morph_progress - 0.55) / 0.45, 1))
+      local noise = ((cell.seed + frame * 11) % 100) / 100
+      local scan = (math.sin((cell.row_ratio * 26) - (frame_phase * math.pi * 8)) + 1) * 0.5
+      local glitch = ((cell.seed + frame * 23) % 157) / 157
+      local char
+      local hl_group
+
+      if morph_progress <= 0 and not (cell.changed and glitch > 0.985 and reveal_progress > cell.distance - 0.08) then
+        goto continue
+      end
+
+      if cell.changed then
+        local is_deleteish = cell.before_char ~= " " and cell.after_char == " "
+        local dense_hl = is_deleteish and "FancyReopenDiffMorphDeleteHot" or "FancyReopenDiffWipeDense"
+        local mid_hl = is_deleteish and "FancyReopenDiffMorphDeleteMid" or "FancyReopenDiffWipeMid"
+        local trace_hl = is_deleteish and "FancyReopenDiffMorphDeleteMid" or "FancyReopenDiffWipeTrace"
+        local ghost_hl = is_deleteish and "FancyReopenDiffMorphDeleteGhost" or "FancyReopenDiffWipeGhost"
+        local hot_hl = is_deleteish and "FancyReopenDiffMorphDeleteHot" or "FancyReopenDiffWipeHot"
+
+        if morph_progress < 0.24 then
+          char = cell.before_char ~= " " and cell.before_char or glitch_char(cell.seed, frame)
+          hl_group = scan > 0.58 and trace_hl or ghost_hl
+        elseif morph_progress < 0.58 then
+          char = glitch > 0.52 and glitch_char(cell.seed, frame)
+            or (noise > 0.38 and cell.before_char or cell.after_char)
+          hl_group = glitch > 0.93 and hot_hl
+            or (noise > 0.42 and mid_hl or trace_hl)
+        elseif morph_progress < 0.86 then
+          char = glitch > 0.38 and glitch_char(cell.seed, frame)
+            or (noise > 0.18 and cell.after_char or cell.before_char)
+          hl_group = glitch > 0.92 and hot_hl
+            or (scan > 0.72 and trace_hl or dense_hl)
+        elseif settled_progress < fade_progress then
+          char = glitch > 0.84 and glitch_char(cell.seed, frame) or cell.after_char
+          hl_group = glitch > 0.93 and hot_hl
+            or (cell.band > 0.55 and dense_hl or mid_hl)
+        elseif glitch > 0.93 then
+          char = glitch_char(cell.seed, frame)
+          hl_group = trace_hl
+        end
+      else
+        if cell.after_char ~= " " and morph_progress < 0.14 and glitch > 0.94 then
+          char = glitch_char(cell.seed, frame)
+          hl_group = "FancyReopenDiffWipeGhost"
+        elseif cell.after_char ~= " " and morph_progress >= 0.16 and morph_progress < 0.32 and scan > 0.93 and glitch > 0.82 then
+          char = glitch_char(cell.seed, frame)
+          hl_group = "FancyReopenDiffWipeTrace"
+        elseif cell.after_char ~= " " and morph_progress >= 0.32 and glitch > 0.985 and fade_progress < 0.55 then
+          char = "·"
+          hl_group = "FancyReopenDiffWipeGhost"
+        end
+
+        if not char then
+          goto continue
+        end
+      end
+
+      if char and char ~= " " then
+        rows[cell.row] = rows[cell.row] or {}
+        rows[cell.row][#rows[cell.row] + 1] = {
+          col = cell.col,
+          text = char,
+          hl_group = hl_group,
+        }
+      end
+
+      ::continue::
+    end
+
+    local rendered_rows = {}
+    for row, fragments in pairs(rows) do
+      table.sort(fragments, function(a, b)
+        return a.col < b.col
+      end)
+
+      local merged = {}
+      local current = nil
+
+      for _, fragment in ipairs(fragments) do
+        if current and current.hl_group == fragment.hl_group and current.col + #current.text == fragment.col then
+          current.text = current.text .. fragment.text
+        else
+          current = {
+            col = fragment.col,
+            text = fragment.text,
+            hl_group = fragment.hl_group,
+          }
+          merged[#merged + 1] = current
+        end
+      end
+
+      rendered_rows[row] = merged
+    end
+
+    render_overlay_fragments(bufnr, rendered_rows, 255)
+    context.distance = frame
+    return frame >= context.total_frames
+  end,
+  finish_delay = function()
+    return math.max(math.floor(animation_start_delay_ms * 0.4), 80)
+  end,
+})
+
 local function finish_animation(bufnr, generation, restore_modifiable)
   if current_generation(bufnr) ~= generation then
     return
@@ -458,15 +895,20 @@ local function cancel_animation(bufnr)
   next_generation(bufnr)
   stop_animation_timer(bufnr)
   clear_animation(bufnr)
+  restore_buffer_modifiable(bufnr)
+end
 
-  local buffer_state = state[bufnr]
-  if buffer_state and buffer_state.restore_modifiable ~= nil and vim.api.nvim_buf_is_valid(bufnr) then
-    vim.bo[bufnr].modifiable = buffer_state.restore_modifiable
-    buffer_state.restore_modifiable = nil
+local function cleanup_all_runtime_state()
+  for bufnr, _ in pairs(state) do
+    stop_animation_timer(bufnr)
+    stop_file_watcher(bufnr)
+    clear_animation(bufnr)
+    restore_buffer_modifiable(bufnr)
   end
 end
 
 play_animation = function(bufnr, before_lines, after_lines)
+  restore_buffer_modifiable(bufnr)
   local generation = next_generation(bufnr)
   stop_animation_timer(bufnr)
   clear_animation(bufnr)
@@ -479,21 +921,8 @@ play_animation = function(bufnr, before_lines, after_lines)
     return
   end
 
-  local raw_hunks = vim.diff(joined(before_lines), joined(after_lines), {
-    result_type = "indices",
-    algorithm = "histogram",
-    linematch = 160,
-    ctxlen = 0,
-    interhunkctxlen = 0,
-  })
-
-  if not raw_hunks or vim.tbl_isempty(raw_hunks) then
-    return
-  end
-
-  local hunks = normalize_hunks(before_lines, after_lines, raw_hunks)
-
-  if vim.tbl_isempty(hunks) then
+  local hunks = analyze_diff(before_lines, after_lines)
+  if not hunks then
     return
   end
 
@@ -501,24 +930,29 @@ play_animation = function(bufnr, before_lines, after_lines)
     return
   end
 
-  local change_segments = build_change_segments(bufnr, hunks)
+  local mode = resolve_visual_mode(bufnr)
   local target_line = largest_hunk_target(hunks)
   local restore_modifiable = vim.bo[bufnr].modifiable
-  local max_distance = 0
-  local distance = -1
+  local context = {
+    bufnr = bufnr,
+    before_lines = before_lines,
+    after_lines = after_lines,
+    hunks = hunks,
+    target_line = target_line,
+    distance = -1,
+  }
 
   state[bufnr] = state[bufnr] or {}
   state[bufnr].restore_modifiable = restore_modifiable
-
-  for _, segment in ipairs(change_segments) do
-    max_distance = math.max(max_distance, segment.max_distance)
-  end
+  state[bufnr].active_mode = mode.name
 
   vim.bo[bufnr].modifiable = false
-  center_windows_on_line(bufnr, target_line)
-  render_deleted_hunks(bufnr, before_lines, hunks)
+  mode.prepare(bufnr, context)
+  mode.start(bufnr, context)
 
-  if vim.tbl_isempty(change_segments) then
+  local finish_delay = mode.finish_delay and mode.finish_delay(bufnr, context) or animation_start_delay_ms
+
+  if mode.is_static or (context.change_segments and vim.tbl_isempty(context.change_segments)) then
     local timer = uv.new_timer()
     if not timer then
       finish_animation(bufnr, generation, restore_modifiable)
@@ -526,7 +960,7 @@ play_animation = function(bufnr, before_lines, after_lines)
     end
 
     state[bufnr].timer = timer
-    timer:start(animation_start_delay_ms + 420, 0, vim.schedule_wrap(function()
+    timer:start(finish_delay, 0, vim.schedule_wrap(function()
       finish_animation(bufnr, generation, restore_modifiable)
     end))
     return
@@ -545,10 +979,7 @@ play_animation = function(bufnr, before_lines, after_lines)
       return
     end
 
-    render_change_frame(bufnr, change_segments, distance)
-    distance = distance + 1
-
-    if distance > max_distance + 1 then
+    if mode.frame(bufnr, context) then
       finish_animation(bufnr, generation, restore_modifiable)
       return
     end
@@ -643,7 +1074,17 @@ local function test_reopen_animation(opts)
   local before_lines = vim.deepcopy(after_lines)
   local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
   local has_range = opts.range and opts.line1 and opts.line2 and opts.line2 >= opts.line1
-  local mode = vim.trim(opts.args or "")
+  local input = vim.split(vim.trim(opts.args or ""), "%s+", { trimempty = true })
+  local mode = ""
+  local visual_mode = nil
+
+  for _, token in ipairs(input) do
+    if visual_modes[token] then
+      visual_mode = token
+    elseif mode == "" then
+      mode = token
+    end
+  end
 
   if mode == "" then
     mode = has_range and "change" or "add"
@@ -685,7 +1126,14 @@ local function test_reopen_animation(opts)
     table.remove(before_lines, math.min(cursor_line, #before_lines))
   end
 
+  local previous_visual_mode = vim.b[bufnr].fancy_reopen_diff_mode
+  if visual_mode then
+    vim.b[bufnr].fancy_reopen_diff_mode = visual_mode
+  end
+
   play_animation(bufnr, before_lines, after_lines)
+
+  vim.b[bufnr].fancy_reopen_diff_mode = previous_visual_mode
 end
 
 vim.api.nvim_create_autocmd("BufReadPost", {
@@ -768,10 +1216,15 @@ vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
   end,
 })
 
+pcall(vim.api.nvim_del_user_command, "FancyReopenDiffTest")
 vim.api.nvim_create_user_command("FancyReopenDiffTest", function(opts)
   test_reopen_animation(opts)
 end, {
   nargs = "?",
   range = true,
-  desc = "Preview the fancy reopen diff animation in the current buffer (add or change)",
+  desc = "Preview the fancy reopen diff animation in the current buffer (add/change and optional visual mode)",
 })
+
+vim._fancy_reopen_diff_runtime = {
+  cleanup_all = cleanup_all_runtime_state,
+}
