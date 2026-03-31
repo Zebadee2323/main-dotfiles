@@ -13,6 +13,7 @@ local animation_step_ms = 16
 local git_hunks_frame_count = 10
 local digital_wipe_reveal_frames = 20
 local digital_wipe_fade_frames = 20
+local digital_wipe_view_margin_lines = 100
 local reload_settle_delay_ms = 30
 local reload_retry_count = 6
 local watcher_checktime_debounce_ms = 120
@@ -390,6 +391,39 @@ local function visible_windows_for_buffer(bufnr)
   return windows
 end
 
+local function clamp_windows_to_line_band(windows, center_line, margin, line_count)
+  local clamped = {}
+  local min_line = math.max((center_line or 1) - (margin or 0), 1)
+  local max_line = math.min((center_line or 1) + (margin or 0), line_count)
+
+  for _, win in ipairs(windows) do
+    local top = math.max(win.top, min_line)
+    local bottom = math.min(win.bottom, max_line)
+
+    if top <= bottom then
+      clamped[#clamped + 1] = {
+        winid = win.winid,
+        top = top,
+        bottom = bottom,
+        width = win.width,
+        height = math.max(bottom - top + 1, 1),
+      }
+    end
+  end
+
+  if vim.tbl_isempty(clamped) then
+    clamped[1] = {
+      winid = vim.api.nvim_get_current_win(),
+      top = min_line,
+      bottom = max_line,
+      width = math.max(vim.api.nvim_win_get_width(0), 1),
+      height = math.max(max_line - min_line + 1, 1),
+    }
+  end
+
+  return clamped
+end
+
 local function render_deleted_hunks(bufnr, before_lines, hunks)
   local line_count = vim.api.nvim_buf_line_count(bufnr)
   local last_row = math.max(line_count - 1, 0)
@@ -649,7 +683,7 @@ local function render_overlay_fragments(bufnr, rows, priority)
 
   for row, fragments in pairs(rows) do
     for _, fragment in ipairs(fragments) do
-      if fragment.text and fragment.text:find("%S") then
+      if fragment.text and fragment.text ~= "" then
         vim.api.nvim_buf_set_extmark(bufnr, add_namespace, row, 0, {
           priority = priority or 250,
           virt_text = { { fragment.text, fragment.hl_group } },
@@ -699,7 +733,13 @@ register_visual_mode("git_hunks", {
 
 register_visual_mode("digital_wipe", {
   prepare = function(bufnr, context)
-    context.windows = visible_windows_for_buffer(bufnr)
+    local line_count = vim.api.nvim_buf_line_count(bufnr)
+    context.windows = clamp_windows_to_line_band(
+      visible_windows_for_buffer(bufnr),
+      context.target_line,
+      digital_wipe_view_margin_lines,
+      line_count
+    )
     context.reveal_frames = digital_wipe_reveal_frames
     context.fade_frames = digital_wipe_fade_frames
     context.total_frames = context.reveal_frames + context.fade_frames
@@ -771,55 +811,96 @@ register_visual_mode("digital_wipe", {
       local frame_wave = (math.sin((cell.row_ratio * 13) + (cell.col_ratio * 17) + (frame_phase * math.pi * 6)) + 1) * 0.5
       local threshold = reveal_progress + ((frame_wave - 0.5) * 0.14)
       local edge_delta = threshold - cell.distance
-      local morph_progress = math.max(0, math.min((edge_delta + 0.18) / 0.36, 1))
+      local morph_progress = math.max(0, math.min((edge_delta + 0.22) / 0.44, 1))
       local settled_progress = math.max(0, math.min((morph_progress - 0.55) / 0.45, 1))
       local noise = ((cell.seed + frame * 11) % 100) / 100
       local scan = (math.sin((cell.row_ratio * 26) - (frame_phase * math.pi * 8)) + 1) * 0.5
       local glitch = ((cell.seed + frame * 23) % 157) / 157
       local char
       local hl_group
+      local before_is_space = cell.before_char == " "
+      local after_is_space = cell.after_char == " "
+      local on_diff_row = cell.row_kind ~= nil
 
-      if morph_progress <= 0 and not (cell.changed and glitch > 0.985 and reveal_progress > cell.distance - 0.08) then
+      if morph_progress <= 0 and not (cell.changed and on_diff_row) then
         goto continue
       end
 
-      if cell.changed then
-        local is_deleteish = cell.before_char ~= " " and cell.after_char == " "
+      if cell.changed and on_diff_row then
+        local is_deleteish = not before_is_space and after_is_space
         local dense_hl = is_deleteish and "FancyReopenDiffMorphDeleteHot" or "FancyReopenDiffWipeDense"
         local mid_hl = is_deleteish and "FancyReopenDiffMorphDeleteMid" or "FancyReopenDiffWipeMid"
         local trace_hl = is_deleteish and "FancyReopenDiffMorphDeleteMid" or "FancyReopenDiffWipeTrace"
         local ghost_hl = is_deleteish and "FancyReopenDiffMorphDeleteGhost" or "FancyReopenDiffWipeGhost"
         local hot_hl = is_deleteish and "FancyReopenDiffMorphDeleteHot" or "FancyReopenDiffWipeHot"
 
-        if morph_progress < 0.24 then
-          char = cell.before_char ~= " " and cell.before_char or glitch_char(cell.seed, frame)
-          hl_group = scan > 0.58 and trace_hl or ghost_hl
-        elseif morph_progress < 0.58 then
-          char = glitch > 0.52 and glitch_char(cell.seed, frame)
-            or (noise > 0.38 and cell.before_char or cell.after_char)
-          hl_group = glitch > 0.93 and hot_hl
-            or (noise > 0.42 and mid_hl or trace_hl)
-        elseif morph_progress < 0.86 then
-          char = glitch > 0.38 and glitch_char(cell.seed, frame)
-            or (noise > 0.18 and cell.after_char or cell.before_char)
-          hl_group = glitch > 0.92 and hot_hl
-            or (scan > 0.72 and trace_hl or dense_hl)
+        if morph_progress < 0.18 then
+          if before_is_space then
+            char = glitch > 0.78 and glitch_char(cell.seed, frame) or " "
+          else
+            char = cell.before_char
+          end
+          hl_group = scan > 0.62 and trace_hl or ghost_hl
+        elseif morph_progress < 0.44 then
+          if is_deleteish then
+            char = glitch > 0.38 and glitch_char(cell.seed, frame)
+              or (noise > 0.35 and cell.before_char or " ")
+          elseif is_addish then
+            char = glitch > 0.42 and glitch_char(cell.seed, frame)
+              or (noise > 0.68 and cell.after_char or " ")
+          else
+            char = glitch > 0.48 and glitch_char(cell.seed, frame)
+              or (noise > 0.45 and cell.before_char or cell.after_char)
+          end
+          hl_group = glitch > 0.9 and hot_hl
+            or (scan > 0.56 and trace_hl or mid_hl)
+        elseif morph_progress < 0.76 then
+          if is_deleteish then
+            char = glitch > 0.34 and glitch_char(cell.seed, frame)
+              or (noise > 0.55 and " " or cell.before_char)
+          elseif is_addish then
+            char = glitch > 0.34 and glitch_char(cell.seed, frame)
+              or (noise > 0.2 and cell.after_char or " ")
+          else
+            char = glitch > 0.32 and glitch_char(cell.seed, frame)
+              or (noise > 0.22 and cell.after_char or cell.before_char)
+          end
+          hl_group = glitch > 0.88 and hot_hl
+            or (scan > 0.68 and trace_hl or dense_hl)
+        elseif morph_progress < 0.94 then
+          if is_deleteish then
+            char = glitch > 0.66 and glitch_char(cell.seed, frame) or " "
+          else
+            char = glitch > 0.74 and glitch_char(cell.seed, frame) or cell.after_char
+          end
+          hl_group = glitch > 0.9 and hot_hl
+            or (cell.band > 0.52 and dense_hl or mid_hl)
         elseif settled_progress < fade_progress then
-          char = glitch > 0.84 and glitch_char(cell.seed, frame) or cell.after_char
-          hl_group = glitch > 0.93 and hot_hl
-            or (cell.band > 0.55 and dense_hl or mid_hl)
+          if is_deleteish then
+            char = glitch > 0.88 and glitch_char(cell.seed, frame) or nil
+          else
+            char = glitch > 0.9 and glitch_char(cell.seed, frame) or cell.after_char
+          end
+          hl_group = glitch > 0.94 and hot_hl or mid_hl
         elseif glitch > 0.93 then
           char = glitch_char(cell.seed, frame)
           hl_group = trace_hl
         end
       else
-        if cell.after_char ~= " " and morph_progress < 0.14 and glitch > 0.94 then
+        if not on_diff_row then
+          if not after_is_space and morph_progress < 0.08 and glitch > 0.992 then
+            char = "·"
+            hl_group = "FancyReopenDiffWipeGhost"
+          else
+            goto continue
+          end
+        elseif not after_is_space and morph_progress < 0.08 and glitch > 0.985 then
           char = glitch_char(cell.seed, frame)
           hl_group = "FancyReopenDiffWipeGhost"
-        elseif cell.after_char ~= " " and morph_progress >= 0.16 and morph_progress < 0.32 and scan > 0.93 and glitch > 0.82 then
+        elseif not after_is_space and morph_progress >= 0.1 and morph_progress < 0.2 and scan > 0.985 and glitch > 0.93 then
           char = glitch_char(cell.seed, frame)
           hl_group = "FancyReopenDiffWipeTrace"
-        elseif cell.after_char ~= " " and morph_progress >= 0.32 and glitch > 0.985 and fade_progress < 0.55 then
+        elseif not after_is_space and morph_progress >= 0.22 and glitch > 0.995 and fade_progress < 0.3 then
           char = "·"
           hl_group = "FancyReopenDiffWipeGhost"
         end
