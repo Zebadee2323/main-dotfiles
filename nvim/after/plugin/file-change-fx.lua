@@ -1,10 +1,12 @@
 local config = vim.tbl_deep_extend("force", {
   start_delay_ms = 350,
   radius = 100,
-  frames = 16,
+  frames = 20,
   frame_delay_ms = 33,
   watch_debounce_ms = 80,
   charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{};:,.<>/?\\|",
+  sound_enabled = true,
+  sound_volume = 1.0,
 }, vim.g.file_change_fx or {})
 
 _G.__file_change_fx_state = _G.__file_change_fx_state or {}
@@ -25,6 +27,15 @@ local recent_manual_writes = {}
 local guarded_pre_reload = {}
 local intentional_reload = {}
 local restore_autoread
+local fx_audio_dir = vim.fn.stdpath("cache") .. "/file-change-fx"
+local change_fx_sound_path = vim.fs.joinpath(vim.fn.stdpath("config"), "after", "plugin", "change-fx.mp3")
+local current_sound_render_job = nil
+local current_sound_play_job = nil
+local current_sound_request_id = 0
+local has_warned_missing_ffmpeg = false
+local has_warned_missing_afplay = false
+local has_warned_missing_source_sound = false
+local cached_source_duration_s = nil
 
 if persisted.watchers then
   for _, state in pairs(persisted.watchers) do
@@ -101,6 +112,216 @@ local function split_chars(text)
   end
 
   return vim.fn.split(text, [[\zs]])
+end
+
+local function collect_lines(target, data)
+  if not data then
+    return
+  end
+
+  for _, line in ipairs(data) do
+    if line ~= "" then
+      target[#target + 1] = line
+    end
+  end
+end
+
+local function ensure_fx_audio_dir()
+  vim.fn.mkdir(fx_audio_dir, "p")
+end
+
+local function is_sound_enabled()
+  return is_fx_enabled() and config.sound_enabled ~= false
+end
+
+local function stop_sound_jobs()
+  if current_sound_render_job and vim.fn.jobwait({ current_sound_render_job }, 0)[1] == -1 then
+    vim.fn.jobstop(current_sound_render_job)
+  end
+  current_sound_render_job = nil
+
+  if current_sound_play_job and vim.fn.jobwait({ current_sound_play_job }, 0)[1] == -1 then
+    vim.fn.jobstop(current_sound_play_job)
+  end
+  current_sound_play_job = nil
+end
+
+local function stop_sound_playback()
+  if current_sound_play_job and vim.fn.jobwait({ current_sound_play_job }, 0)[1] == -1 then
+    vim.fn.jobstop(current_sound_play_job)
+  end
+  current_sound_play_job = nil
+end
+
+local function start_sound_playback(wav_path, request_id)
+  local play_job = vim.fn.jobstart({ "afplay", "-v", tostring(config.sound_volume), wav_path }, {
+    on_exit = function()
+      if current_sound_request_id == request_id then
+        current_sound_play_job = nil
+      end
+    end,
+  })
+
+  if play_job <= 0 then
+    if not has_warned_missing_afplay then
+      has_warned_missing_afplay = true
+      vim.schedule(function()
+        vim.notify("file-change-fx could not start afplay for glitch audio", vim.log.levels.WARN)
+      end)
+    end
+    return
+  end
+
+  current_sound_play_job = play_job
+end
+
+local function change_fx_preview_path(request_id)
+  return vim.fs.joinpath(fx_audio_dir, string.format("change-fx-preview-%d.wav", request_id))
+end
+
+local function source_sound_duration_s()
+  if cached_source_duration_s then
+    return cached_source_duration_s
+  end
+
+  if vim.fn.executable("ffprobe") ~= 1 or vim.fn.filereadable(change_fx_sound_path) ~= 1 then
+    return nil
+  end
+
+  local output = vim.fn.systemlist({
+    "ffprobe",
+    "-v",
+    "error",
+    "-show_entries",
+    "format=duration",
+    "-of",
+    "default=noprint_wrappers=1:nokey=1",
+    change_fx_sound_path,
+  })
+
+  if vim.v.shell_error ~= 0 or not output or not output[1] then
+    return nil
+  end
+
+  local duration_s = tonumber(output[1])
+  if not duration_s or duration_s <= 0 then
+    return nil
+  end
+
+  cached_source_duration_s = duration_s
+  return duration_s
+end
+
+local function random_start_offset_s(duration_s, request_id)
+  local source_duration_s_value = source_sound_duration_s()
+  if not source_duration_s_value then
+    return 0
+  end
+
+  local usable_duration_s = math.min(duration_s, source_duration_s_value)
+  local max_start_s = math.max(source_duration_s_value - usable_duration_s, 0)
+  if max_start_s <= 0 then
+    return 0
+  end
+
+  local seed = tonumber(tostring(uv.hrtime()):sub(-9)) or request_id or 1
+  return (seed % 1000000) / 1000000 * max_start_s
+end
+
+local function play_glitch_sound(duration_ms)
+  if not is_sound_enabled() then
+    return
+  end
+
+  if vim.fn.executable("ffmpeg") ~= 1 then
+    if not has_warned_missing_ffmpeg then
+      has_warned_missing_ffmpeg = true
+      vim.schedule(function()
+        vim.notify("file-change-fx sound requires ffmpeg", vim.log.levels.WARN)
+      end)
+    end
+    return
+  end
+
+  if vim.fn.executable("afplay") ~= 1 then
+    if not has_warned_missing_afplay then
+      has_warned_missing_afplay = true
+      vim.schedule(function()
+        vim.notify("file-change-fx sound requires afplay", vim.log.levels.WARN)
+      end)
+    end
+    return
+  end
+
+  if vim.fn.filereadable(change_fx_sound_path) ~= 1 then
+    if not has_warned_missing_source_sound then
+      has_warned_missing_source_sound = true
+      vim.schedule(function()
+        vim.notify("file-change-fx could not find change-fx.mp3", vim.log.levels.WARN)
+      end)
+    end
+    return
+  end
+
+  duration_ms = math.max(math.floor(duration_ms or 0), 1)
+  local duration_s = duration_ms / 1000
+  current_sound_request_id = current_sound_request_id + 1
+  local request_id = current_sound_request_id
+  local wav_path = change_fx_preview_path(request_id)
+  local start_offset_s = random_start_offset_s(duration_s, request_id)
+
+  stop_sound_playback()
+  ensure_fx_audio_dir()
+
+  local stderr = {}
+  local render_job = vim.fn.jobstart({
+    "ffmpeg",
+    "-y",
+    "-ss",
+    string.format("%.3f", start_offset_s),
+    "-t",
+    string.format("%.3f", duration_s),
+    "-i",
+    change_fx_sound_path,
+    "-vn",
+    "-acodec",
+    "pcm_s16le",
+    wav_path,
+  }, {
+    stderr_buffered = true,
+    on_stderr = function(_, data)
+      collect_lines(stderr, data)
+    end,
+    on_exit = function(_, code)
+      vim.schedule(function()
+        if current_sound_request_id ~= request_id then
+          return
+        end
+
+        current_sound_render_job = nil
+
+        if code ~= 0 then
+          vim.notify(
+            "file-change-fx glitch audio generation failed: "
+              .. (#stderr > 0 and table.concat(stderr, "\n") or ("ffmpeg exited with code " .. code)),
+            vim.log.levels.WARN
+          )
+          return
+        end
+
+        start_sound_playback(wav_path, request_id)
+      end)
+    end,
+  })
+
+  if render_job <= 0 then
+    vim.schedule(function()
+      vim.notify("file-change-fx could not start ffmpeg for glitch audio", vim.log.levels.WARN)
+    end)
+    return
+  end
+
+  current_sound_render_job = render_job
 end
 
 local function large_placeholder_method()
@@ -485,6 +706,8 @@ local function disable_all_effects()
     clear_effect(bufnr)
   end
 
+  stop_sound_playback()
+
   for bufnr in pairs(guarded_pre_reload) do
     restore_autoread(bufnr)
   end
@@ -702,6 +925,7 @@ local function start_effect(bufnr, old_lines, opts)
       return
     end
 
+    play_glitch_sound(effect.frames * effect.frame_delay_ms)
     render_frame(bufnr, effect, 1)
   end, math.max(opts.start_delay_ms ~= nil and opts.start_delay_ms or config.start_delay_ms, 0))
 end
@@ -804,6 +1028,7 @@ local function start_pre_delete_effect(bufnr, old_lines, new_lines, path, hunks,
       return
     end
 
+    play_glitch_sound(effect.frames * effect.frame_delay_ms)
     render_frame(bufnr, effect, 1)
   end, math.max(config.start_delay_ms, 0))
 
@@ -1154,5 +1379,19 @@ vim.api.nvim_create_user_command("FileChangeFxWatchInfo", function()
 
   vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO, { title = "FileChangeFxWatchInfo" })
 end, {})
+
+vim.api.nvim_create_user_command("FileChangeFxTestSound", function(opts)
+  local seconds = tonumber(opts.args)
+  if not seconds or seconds <= 0 then
+    vim.notify("FileChangeFxTestSound requires a positive duration in seconds", vim.log.levels.ERROR)
+    return
+  end
+
+  local duration_ms = math.max(math.floor(seconds * 1000), 1)
+  play_glitch_sound(duration_ms)
+end, {
+  nargs = 1,
+  desc = "Play the file-change-fx glitch sound for the given duration in seconds",
+})
 
 vim.schedule(refresh_watchers)

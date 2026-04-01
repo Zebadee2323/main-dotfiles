@@ -4,7 +4,8 @@ local naia_tool_names = {
 }
 
 _G.__naia_command_permissions = _G.__naia_command_permissions or {
-  allowed_patterns = {},
+  allowed_commands = {},
+  allowed_details = {},
 }
 
 local function notify_naia_tool_error(err)
@@ -52,15 +53,26 @@ end
 
 local function command_permission_store()
   _G.__naia_command_permissions = _G.__naia_command_permissions or {
-    allowed_patterns = {},
+    allowed_commands = {},
+    allowed_details = {},
   }
 
-  _G.__naia_command_permissions.allowed_patterns = _G.__naia_command_permissions.allowed_patterns or {}
-  return _G.__naia_command_permissions.allowed_patterns
+  _G.__naia_command_permissions.allowed_commands = _G.__naia_command_permissions.allowed_commands or {}
+  _G.__naia_command_permissions.allowed_details = _G.__naia_command_permissions.allowed_details or {}
+
+  return _G.__naia_command_permissions
 end
 
-local function derive_lua_command_permission_key(command_line)
-  local lua_body = command_line:match("^lua%s+(.+)$")
+local function extract_command_name(command_line)
+  local name = command_line:match("^(%S+)")
+  if not name then
+    return nil
+  end
+
+  return name:lower()
+end
+
+local function derive_lua_detail_key(lua_body)
   if not lua_body then
     return nil
   end
@@ -93,17 +105,51 @@ local function derive_lua_command_permission_key(command_line)
   return "lua:exact:" .. lua_body
 end
 
-local function describe_command_permission_key(permission_key)
+local function derive_command_detail_key(command_line)
+  local command_name = extract_command_name(command_line)
+  if not command_name then
+    return nil
+  end
+
+  if command_name == "lua" then
+    return derive_lua_detail_key(command_line:match("^lua%s+(.+)$"))
+  end
+
+  if command_name == "luafile" then
+    local path = vim.trim(command_line:match("^luafile%s+(.+)$") or "")
+    if path == "" then
+      return "luafile:exact"
+    end
+
+    return "luafile:" .. vim.fs.normalize(path)
+  end
+
+  if command_name == "source" then
+    local path = vim.trim(command_line:match("^source%s+(.+)$") or "")
+    if path == "" then
+      return "source:exact"
+    end
+
+    return "source:" .. vim.fs.normalize(path)
+  end
+
+  return nil
+end
+
+local function describe_permission_key(permission_key)
   if not permission_key then
     return nil
   end
 
   return permission_key
+    :gsub("^cmd:", "Command: :")
     :gsub("^lua:assign:", "Lua assignment: ")
     :gsub("^lua:local_assign:", "Local Lua assignment: ")
     :gsub("^lua:call:", "Lua call: ")
     :gsub("^lua:return:", "Lua return: ")
     :gsub("^lua:exact:", "Exact Lua command: ")
+    :gsub("^luafile:", "Lua file: ")
+    :gsub("^source:", "Source file: ")
 end
 
 local function naia_execute_user_command(args)
@@ -120,19 +166,30 @@ local function naia_execute_user_command(args)
 
   command_line = normalize_command_line(command_line)
 
-  local permission_key = derive_lua_command_permission_key(command_line)
-  local allowed_patterns = command_permission_store()
-  local already_allowed = permission_key and allowed_patterns[permission_key] == true
+  local permissions = command_permission_store()
+  local command_name = extract_command_name(command_line)
+  local command_key = command_name and ("cmd:" .. command_name) or nil
+  local detail_key = derive_command_detail_key(command_line)
+  local command_allowed = command_key and permissions.allowed_commands[command_key] == true
+  local detail_allowed = detail_key and permissions.allowed_details[detail_key] == true
 
-  if not already_allowed then
+  if not command_allowed and not detail_allowed then
     local prompt = "Allow Naia to run this command?\n\n:" .. command_line
-    if permission_key then
-      prompt = prompt .. "\n\nAlways-allow group:\n" .. describe_command_permission_key(permission_key)
+    if command_key then
+      prompt = prompt .. "\n\nCommand group:\n" .. describe_permission_key(command_key)
+    end
+    if detail_key then
+      prompt = prompt .. "\n\nDetailed group:\n" .. describe_permission_key(detail_key)
+    end
+
+    local buttons = "&Yes\n&No\nAlways &Command"
+    if detail_key then
+      buttons = buttons .. "\nAlways &Detail"
     end
 
     local choice = vim.fn.confirm(
       prompt,
-      permission_key and "&Yes\n&No\n&Always" or "&Yes\n&No",
+      buttons,
       2
     )
 
@@ -140,8 +197,12 @@ local function naia_execute_user_command(args)
       return string.format("User rejected executing the command: :%s", command_line)
     end
 
-    if permission_key and choice == 3 then
-      allowed_patterns[permission_key] = true
+    if choice == 3 and command_key then
+      permissions.allowed_commands[command_key] = true
+    end
+
+    if detail_key and choice == 4 then
+      permissions.allowed_details[detail_key] = true
     end
   end
 
