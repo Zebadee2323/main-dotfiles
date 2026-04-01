@@ -1,8 +1,8 @@
 local config = vim.tbl_deep_extend("force", {
   start_delay_ms = 350,
   radius = 100,
-  frames = 60,
-  frame_delay_ms = 16,
+  frames = 16,
+  frame_delay_ms = 33,
   watch_debounce_ms = 80,
   charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{};:,.<>/?\\|",
 }, vim.g.file_change_fx or {})
@@ -20,6 +20,8 @@ local active_effects = {}
 local watchers = {}
 local pending_reload = {}
 local pending_post_effect_opts = {}
+local pending_save_snapshots = {}
+local recent_manual_writes = {}
 local guarded_pre_reload = {}
 local intentional_reload = {}
 local restore_autoread
@@ -60,8 +62,8 @@ local function set_transparent_fx_highlights()
   make_hl("FileChangeFxAdd", { fg = "#66ff99", bold = true })
   make_hl("FileChangeFxAddNoise", { fg = "#2ee66b", bold = true, nocombine = true })
 
-  make_hl("FileChangeFxMod", { fg = "#66b3ff", bold = true })
-  make_hl("FileChangeFxModNoise", { fg = "#2f7fff", bold = true, nocombine = true })
+  make_hl("FileChangeFxMod", { fg = "#8fcbff", bold = true })
+  make_hl("FileChangeFxModNoise", { fg = "#66b3ff", bold = true, nocombine = true })
 
   make_hl("FileChangeFxDel", { fg = "#ff6b6b", bold = true })
   make_hl("FileChangeFxDelNoise", { fg = "#ff3b3b", bold = true, nocombine = true })
@@ -99,6 +101,24 @@ local function split_chars(text)
   end
 
   return vim.fn.split(text, [[\zs]])
+end
+
+local function large_placeholder_method()
+  local payload = {
+    enabled = true,
+    description = "Temporary helper for validating file-change-fx behavior.",
+    tags = {
+      "manual-save",
+      "external-change",
+    },
+  }
+
+  local summary = string.format("%s:%s", payload.variant, payload.description)
+  local suffix = payload.enabled and ":ready" or ":idle"
+  local message = summary .. suffix
+  local attempts = payload.retries + #payload.tags
+
+  return message, attempts, payload
 end
 
 local function current_tab_visible_file_bufs()
@@ -169,6 +189,27 @@ local function center_on_line(bufnr, line)
   end)
 end
 
+local function get_visible_line_range(bufnr)
+  local win = get_target_win(bufnr)
+  if not (win and vim.api.nvim_win_is_valid(win)) then
+    return nil
+  end
+
+  local info = vim.fn.getwininfo(win)[1]
+  if not info then
+    return nil
+  end
+
+  local start_line = math.max(info.topline or 1, 1)
+  local end_line = math.max(info.botline or start_line, start_line)
+  local line_count = math.max(vim.api.nvim_buf_line_count(bufnr), 1)
+
+  return {
+    start_line = start_line,
+    end_line = math.min(end_line, line_count),
+  }
+end
+
 local function choose_hunk_center(hunks)
   local best_hunk
   local best_score = -1
@@ -221,8 +262,15 @@ end
 
 local function build_window_state(old_lines, new_lines, hunks, center_line, opts)
   opts = opts or {}
-  local start_line = math.max(1, center_line - config.radius)
-  local end_line = math.min(#new_lines, center_line + config.radius)
+  local start_line
+  local end_line
+  if opts.start_line and opts.end_line then
+    start_line = math.max(1, opts.start_line)
+    end_line = math.min(#new_lines, math.max(opts.end_line, start_line))
+  else
+    start_line = math.max(1, center_line - config.radius)
+    end_line = math.min(#new_lines, center_line + config.radius)
+  end
   local changed_new = {}
   local old_by_new = {}
   local kind_by_new = {}
@@ -427,6 +475,31 @@ restore_autoread = function(bufnr)
   end
 end
 
+local function reload_buffer_preserving_view(bufnr)
+  local win = get_target_win(bufnr)
+  if not (win and vim.api.nvim_win_is_valid(win)) then
+    return false
+  end
+
+  local view = vim.api.nvim_win_call(win, function()
+    return vim.fn.winsaveview()
+  end)
+
+  local reloaded = pcall(vim.api.nvim_win_call, win, function()
+    vim.cmd("silent! edit!")
+  end)
+
+  if not reloaded then
+    return false
+  end
+
+  pcall(vim.api.nvim_win_call, win, function()
+    vim.fn.winrestview(view)
+  end)
+
+  return true
+end
+
 local function should_show_fx_overlay(progress, frame, lnum)
   if progress >= 0.82 then
     return true
@@ -508,9 +581,14 @@ local function render_frame(bufnr, effect, frame)
 
   if frame >= effect.frames then
     local on_complete = effect.on_complete
-    clear_effect(bufnr)
     if type(on_complete) == "function" then
       on_complete()
+      local current = active_effects[bufnr]
+      if current and current.id == effect.id then
+        clear_effect(bufnr)
+      end
+    else
+      clear_effect(bufnr)
     end
     return
   end
@@ -553,14 +631,19 @@ local function start_effect(bufnr, old_lines, opts)
   end
 
   local center_line = choose_hunk_center(hunks)
+  local visible_range = opts.visible_only and get_visible_line_range(bufnr) or nil
   local effect = build_window_state(old_lines, new_lines, hunks, center_line, {
     include_delete_states = opts.include_delete_states,
+    start_line = visible_range and visible_range.start_line or nil,
+    end_line = visible_range and visible_range.end_line or nil,
   })
   if not next(effect.line_states) then
     return
   end
 
-  center_on_line(bufnr, center_line)
+  if opts.center ~= false then
+    center_on_line(bufnr, center_line)
+  end
 
   local previous_effect = active_effects[bufnr]
   if previous_effect then
@@ -634,22 +717,9 @@ local function start_pre_delete_effect(bufnr, old_lines, new_lines, path, hunks)
       return
     end
 
-    local win = get_target_win(bufnr)
-    local view = nil
-    if win and vim.api.nvim_win_is_valid(win) then
-      view = vim.api.nvim_win_call(win, function()
-        return vim.fn.winsaveview()
-      end)
-    end
-
     restore_autoread(bufnr)
 
-    local reloaded = false
-    if win and vim.api.nvim_win_is_valid(win) then
-      reloaded = pcall(vim.api.nvim_win_call, win, function()
-        vim.cmd("silent! edit!")
-      end)
-    end
+    local reloaded = reload_buffer_preserving_view(bufnr)
 
     if not reloaded then
       snapshots[bufnr] = old_lines
@@ -660,12 +730,6 @@ local function start_pre_delete_effect(bufnr, old_lines, new_lines, path, hunks)
       intentional_reload[bufnr] = true
       vim.cmd(string.format("silent! checktime %d", bufnr))
       return
-    end
-
-    if view and win and vim.api.nvim_win_is_valid(win) then
-      pcall(vim.api.nvim_win_call, win, function()
-        vim.fn.winrestview(view)
-      end)
     end
 
     vim.schedule(function()
@@ -705,6 +769,22 @@ local function queue_reload(bufnr, path)
   if not is_current_generation() or pending_reload[path] then
     return
   end
+
+  local suppress_until = recent_manual_writes[path]
+  if suppress_until and suppress_until > uv.now() then
+    pending_reload[path] = true
+    local delay_ms = math.max(suppress_until - uv.now(), 1)
+    vim.defer_fn(function()
+      if pending_reload[path] ~= true then
+        return
+      end
+
+      pending_reload[path] = nil
+      queue_reload(bufnr, path)
+    end, delay_ms)
+    return
+  end
+  recent_manual_writes[path] = nil
 
   pending_reload[path] = true
 
@@ -752,12 +832,28 @@ local function queue_reload(bufnr, path)
     end
 
     if not start_pre_delete_effect(bufnr, old_lines, disk_lines, path, hunks) then
-      snapshots[bufnr] = old_lines
-      pending_post_effect_opts[bufnr] = {
-        start_delay_ms = 0,
-        include_delete_states = false,
-      }
-      vim.cmd(string.format("silent! checktime %d", bufnr))
+      if reload_buffer_preserving_view(bufnr) then
+        vim.schedule(function()
+          if not is_current_generation()
+            or not vim.api.nvim_buf_is_valid(bufnr)
+            or not is_buf_visible_in_current_tab(bufnr)
+          then
+            return
+          end
+
+          start_effect(bufnr, old_lines, {
+            start_delay_ms = 0,
+            include_delete_states = false,
+          })
+        end)
+      else
+        snapshots[bufnr] = old_lines
+        pending_post_effect_opts[bufnr] = {
+          start_delay_ms = 0,
+          include_delete_states = false,
+        }
+        vim.cmd(string.format("silent! checktime %d", bufnr))
+      end
     end
   end, math.max(config.watch_debounce_ms, 1))
 end
@@ -897,10 +993,65 @@ vim.api.nvim_create_autocmd("BufDelete", {
   callback = function(args)
     snapshots[args.buf] = nil
     pending_post_effect_opts[args.buf] = nil
+    pending_save_snapshots[args.buf] = nil
     intentional_reload[args.buf] = nil
     restore_autoread(args.buf)
     active_effects[args.buf] = nil
     vim.schedule(refresh_watchers)
+  end,
+})
+
+vim.api.nvim_create_autocmd("BufWritePre", {
+  group = group,
+  callback = function(args)
+    if not is_fx_enabled()
+      or not vim.api.nvim_buf_is_valid(args.buf)
+      or vim.bo[args.buf].buftype ~= ""
+    then
+      return
+    end
+
+    local path = normalize_path(vim.api.nvim_buf_get_name(args.buf))
+    if not path or vim.fn.filereadable(path) ~= 1 then
+      pending_save_snapshots[args.buf] = nil
+      return
+    end
+
+    local ok, disk_lines = pcall(vim.fn.readfile, path)
+    if not ok or type(disk_lines) ~= "table" then
+      pending_save_snapshots[args.buf] = nil
+      return
+    end
+
+    pending_save_snapshots[args.buf] = disk_lines
+  end,
+})
+
+vim.api.nvim_create_autocmd("BufWritePost", {
+  group = group,
+  callback = function(args)
+    local old_lines = pending_save_snapshots[args.buf]
+    pending_save_snapshots[args.buf] = nil
+    local path = normalize_path(vim.api.nvim_buf_get_name(args.buf))
+    if path then
+      recent_manual_writes[path] = uv.now() + math.max(config.watch_debounce_ms * 4, 300)
+    end
+
+    if not old_lines
+      or not is_fx_enabled()
+      or not vim.api.nvim_buf_is_valid(args.buf)
+      or not is_buf_visible_in_current_tab(args.buf)
+      or vim.bo[args.buf].buftype ~= ""
+    then
+      return
+    end
+
+    start_effect(args.buf, old_lines, {
+      start_delay_ms = 0,
+      include_delete_states = false,
+      visible_only = true,
+      center = false,
+    })
   end,
 })
 
