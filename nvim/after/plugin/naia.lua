@@ -1,8 +1,17 @@
-local naia_tool_name = "inform_user"
+local naia_tool_names = {
+  inform_user = "inform_user",
+  execute_user_command = "execute_user_command",
+}
 
 local function notify_naia_tool_error(err)
   vim.schedule(function()
-    vim.notify("Naia `inform_user` tool error: " .. tostring(err), vim.log.levels.WARN)
+    vim.notify("Naia tool error: " .. tostring(err), vim.log.levels.WARN)
+  end)
+end
+
+local function notify_naia_tool_registration_error(tool_name, err)
+  vim.schedule(function()
+    vim.notify("Failed to register Naia `" .. tool_name .. "` tool: " .. tostring(err), vim.log.levels.WARN)
   end)
 end
 
@@ -32,15 +41,80 @@ local function naia_inform_user(args)
   return ""
 end
 
-local function register_naia_inform_user_tool()
+local function get_user_command_name(command_line)
+  if type(command_line) ~= "string" then
+    return nil
+  end
+
+  local trimmed = vim.trim(command_line)
+  if trimmed == "" then
+    return nil
+  end
+
+  trimmed = trimmed:gsub("^:", "")
+  return trimmed:match("^(%S+)")
+end
+
+local function naia_execute_user_command(args)
+  local command_line = args and args.command or nil
+
+  if type(command_line) ~= "string" then
+    command_line = tostring(command_line or "")
+  end
+
+  command_line = vim.trim(command_line)
+  if command_line == "" then
+    error("execute_user_command requires a non-empty command")
+  end
+
+  command_line = command_line:gsub("^:", "")
+
+  local command_name = get_user_command_name(command_line)
+  if not command_name then
+    error("Could not determine the command name")
+  end
+
+  local user_commands = vim.api.nvim_get_commands({ builtin = false })
+  if not user_commands[command_name] then
+    error(string.format("`%s` is not a registered user command", command_name))
+  end
+
+  local accepted = vim.fn.confirm(
+    "Allow Naia to run this user command?\n\n:" .. command_line,
+    "&Yes\n&No",
+    2
+  ) == 1
+
+  if not accepted then
+    return string.format("User rejected executing the user command: :%s", command_line)
+  end
+
+  local ok, result = pcall(vim.api.nvim_exec2, command_line, { output = true })
+  if not ok then
+    error(result)
+  end
+
+  local output = result and result.output or ""
+  output = vim.trim(output)
+
+  if output == "" then
+    return string.format("Executed user command: :%s", command_line)
+  end
+
+  return output
+end
+
+local function register_naia_tools()
   local ok, naia = pcall(require, "naia")
   if not ok then
     return
   end
 
-  pcall(naia.deregister_tool, naia_tool_name)
+  for _, tool_name in pairs(naia_tool_names) do
+    pcall(naia.deregister_tool, tool_name)
+  end
 
-  local registered, err = naia.register_tool(naia_tool_name, {
+  local inform_registered, inform_err = naia.register_tool(naia_tool_names.inform_user, {
     title = "Inform User",
     description = "Notify the user in Neovim and speak the message aloud.",
     input_schema = {
@@ -57,11 +131,30 @@ local function register_naia_inform_user_tool()
     callback = naia_inform_user,
   })
 
-  if not registered then
-    vim.schedule(function()
-      vim.notify("Failed to register Naia `inform_user` tool: " .. tostring(err), vim.log.levels.WARN)
-    end)
+  if not inform_registered then
+    notify_naia_tool_registration_error(naia_tool_names.inform_user, inform_err)
+  end
+
+  local command_registered, command_err = naia.register_tool(naia_tool_names.execute_user_command, {
+    title = "Execute Neovim User Command",
+    description = "Run a Neovim user command, if successful returns the commands output",
+    input_schema = {
+      type = "object",
+      properties = {
+        command = {
+          type = "string",
+          description = "The exact Neovim user command line to run, without the leading colon.",
+        },
+      },
+      required = { "command" },
+      additionalProperties = false,
+    },
+    callback = naia_execute_user_command,
+  })
+
+  if not command_registered then
+    notify_naia_tool_registration_error(naia_tool_names.execute_user_command, command_err)
   end
 end
 
-register_naia_inform_user_tool()
+register_naia_tools()
