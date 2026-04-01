@@ -41,20 +41,6 @@ local function naia_inform_user(args)
   return ""
 end
 
-local function get_user_command_name(command_line)
-  if type(command_line) ~= "string" then
-    return nil
-  end
-
-  local trimmed = vim.trim(command_line)
-  if trimmed == "" then
-    return nil
-  end
-
-  trimmed = trimmed:gsub("^:", "")
-  return trimmed:match("^(%S+)")
-end
-
 local function naia_execute_user_command(args)
   local command_line = args and args.command or nil
 
@@ -69,24 +55,14 @@ local function naia_execute_user_command(args)
 
   command_line = command_line:gsub("^:", "")
 
-  local command_name = get_user_command_name(command_line)
-  if not command_name then
-    error("Could not determine the command name")
-  end
-
-  local user_commands = vim.api.nvim_get_commands({ builtin = false })
-  if not user_commands[command_name] then
-    error(string.format("`%s` is not a registered user command", command_name))
-  end
-
   local accepted = vim.fn.confirm(
-    "Allow Naia to run this user command?\n\n:" .. command_line,
+    "Allow Naia to run this command?\n\n:" .. command_line,
     "&Yes\n&No",
     2
   ) == 1
 
   if not accepted then
-    return string.format("User rejected executing the user command: :%s", command_line)
+    return string.format("User rejected executing the command: :%s", command_line)
   end
 
   local ok, result = pcall(vim.api.nvim_exec2, command_line, { output = true })
@@ -98,7 +74,7 @@ local function naia_execute_user_command(args)
   output = vim.trim(output)
 
   if output == "" then
-    return string.format("Executed user command: :%s", command_line)
+    return string.format("Executed command: :%s", command_line)
   end
 
   return output
@@ -136,14 +112,14 @@ local function register_naia_tools()
   end
 
   local command_registered, command_err = naia.register_tool(naia_tool_names.execute_user_command, {
-    title = "Execute Neovim User Command",
-    description = "Run a Neovim user command, if successful returns the commands output",
+    title = "Execute Neovim Command",
+    description = "Run any Neovim Ex command only after asking the user to approve the exact command. If approved, execute it and return any command output. If rejected, return a rejection message instead.",
     input_schema = {
       type = "object",
       properties = {
         command = {
           type = "string",
-          description = "The exact Neovim user command line to run, without the leading colon.",
+          description = "The exact Neovim command line to run, without the leading colon.",
         },
       },
       required = { "command" },
