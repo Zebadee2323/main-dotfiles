@@ -1,8 +1,8 @@
 local config = vim.tbl_deep_extend("force", {
   start_delay_ms = 350,
   radius = 100,
-  frames = 30,
-  frame_delay_ms = 35,
+  frames = 60,
+  frame_delay_ms = 16,
   watch_debounce_ms = 80,
   charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{};:,.<>/?\\|",
 }, vim.g.file_change_fx or {})
@@ -22,6 +22,7 @@ local pending_reload = {}
 local pending_post_effect_opts = {}
 local guarded_pre_reload = {}
 local intentional_reload = {}
+local restore_autoread
 
 if persisted.watchers then
   for _, state in pairs(persisted.watchers) do
@@ -43,6 +44,9 @@ end
 persisted.watchers = watchers
 persisted.ns = ns
 persisted.group = group
+if persisted.enabled == nil then
+  persisted.enabled = vim.g.file_change_fx_enabled ~= false
+end
 
 vim.opt.autoread = true
 
@@ -67,6 +71,10 @@ set_transparent_fx_highlights()
 
 local function is_current_generation()
   return _G.__file_change_fx_state and _G.__file_change_fx_state.generation == generation
+end
+
+local function is_fx_enabled()
+  return _G.__file_change_fx_state and _G.__file_change_fx_state.enabled ~= false
 end
 
 local function normalize_path(path)
@@ -390,7 +398,23 @@ local function clear_effect(bufnr)
   active_effects[bufnr] = nil
 end
 
-local function restore_autoread(bufnr)
+local function disable_all_effects()
+  for bufnr in pairs(active_effects) do
+    clear_effect(bufnr)
+  end
+
+  for bufnr in pairs(guarded_pre_reload) do
+    restore_autoread(bufnr)
+  end
+
+  snapshots = {}
+  pending_reload = {}
+  pending_post_effect_opts = {}
+  guarded_pre_reload = {}
+  intentional_reload = {}
+end
+
+restore_autoread = function(bufnr)
   local guard = guarded_pre_reload[bufnr]
   if not guard then
     return
@@ -507,6 +531,9 @@ end
 
 local function start_effect(bufnr, old_lines, opts)
   opts = opts or {}
+  if not is_fx_enabled() then
+    return
+  end
   if not is_current_generation() or not vim.api.nvim_buf_is_valid(bufnr) or not is_buf_visible_in_current_tab(bufnr) then
     return
   end
@@ -563,6 +590,9 @@ local function start_effect(bufnr, old_lines, opts)
 end
 
 local function start_pre_delete_effect(bufnr, old_lines, new_lines, path, hunks)
+  if not is_fx_enabled() then
+    return false
+  end
   if not is_current_generation() or not vim.api.nvim_buf_is_valid(bufnr) or not is_buf_visible_in_current_tab(bufnr) then
     return false
   end
@@ -690,6 +720,11 @@ local function queue_reload(bufnr, path)
 
     local current_path = normalize_path(vim.api.nvim_buf_get_name(bufnr))
     if current_path ~= path or vim.fn.filereadable(path) ~= 1 then
+      return
+    end
+
+    if not is_fx_enabled() then
+      vim.cmd(string.format("silent! checktime %d", bufnr))
       return
     end
 
@@ -847,6 +882,11 @@ vim.api.nvim_create_autocmd("FileChangedShellPost", {
       return
     end
 
+    if not is_fx_enabled() then
+      vim.schedule(refresh_watchers)
+      return
+    end
+
     start_effect(args.buf, old_lines, opts)
     vim.schedule(refresh_watchers)
   end,
@@ -866,6 +906,17 @@ vim.api.nvim_create_autocmd("BufDelete", {
 
 vim.api.nvim_create_user_command("FileChangeFxCheck", function()
   vim.cmd("checktime")
+end, {})
+
+vim.api.nvim_create_user_command("FileChangeFxToggle", function()
+  persisted.enabled = not is_fx_enabled()
+
+  if not persisted.enabled then
+    disable_all_effects()
+  end
+
+  local status = persisted.enabled and "enabled" or "disabled"
+  vim.notify("file-change-fx " .. status, vim.log.levels.INFO, { title = "FileChangeFxToggle" })
 end, {})
 
 vim.api.nvim_create_user_command("FileChangeFxWatchInfo", function()
