@@ -173,6 +173,31 @@ local function get_target_win(bufnr)
   end
 end
 
+local function refresh_buffer_highlighting(bufnr)
+  vim.schedule(function()
+    if not vim.api.nvim_buf_is_valid(bufnr) then
+      return
+    end
+
+    local filetype = vim.bo[bufnr].filetype
+    if filetype and filetype ~= "" then
+      pcall(function()
+        local parser = vim.treesitter.get_parser(bufnr, filetype)
+        if parser then
+          parser:parse(true)
+        end
+      end)
+    end
+
+    local win = get_target_win(bufnr)
+    if win and vim.api.nvim_win_is_valid(win) then
+      pcall(vim.api.nvim_win_call, win, function()
+        vim.cmd("redraw!")
+      end)
+    end
+  end)
+end
+
 local function center_on_line(bufnr, line)
   local win = get_target_win(bufnr)
   if not win then
@@ -364,9 +389,17 @@ local function build_window_state(old_lines, new_lines, hunks, center_line, opts
   }
 end
 
-local function build_pre_delete_state(old_lines, new_lines, hunks, center_line)
-  local start_line = math.max(1, center_line - config.radius)
-  local end_line = math.min(#old_lines, center_line + config.radius)
+local function build_pre_delete_state(old_lines, new_lines, hunks, center_line, opts)
+  opts = opts or {}
+  local start_line
+  local end_line
+  if opts.start_line and opts.end_line then
+    start_line = math.max(1, opts.start_line)
+    end_line = math.min(#old_lines, math.max(opts.end_line, start_line))
+  else
+    start_line = math.max(1, center_line - config.radius)
+    end_line = math.min(#old_lines, center_line + config.radius)
+  end
   local line_states = {}
 
   for _, hunk in ipairs(hunks) do
@@ -444,6 +477,7 @@ local function clear_effect(bufnr)
   end
 
   active_effects[bufnr] = nil
+  refresh_buffer_highlighting(bufnr)
 end
 
 local function disable_all_effects()
@@ -672,7 +706,8 @@ local function start_effect(bufnr, old_lines, opts)
   end, math.max(opts.start_delay_ms ~= nil and opts.start_delay_ms or config.start_delay_ms, 0))
 end
 
-local function start_pre_delete_effect(bufnr, old_lines, new_lines, path, hunks)
+local function start_pre_delete_effect(bufnr, old_lines, new_lines, path, hunks, opts)
+  opts = opts or {}
   if not is_fx_enabled() then
     return false
   end
@@ -681,12 +716,18 @@ local function start_pre_delete_effect(bufnr, old_lines, new_lines, path, hunks)
   end
 
   local center_line = choose_old_hunk_center(hunks)
-  local effect = build_pre_delete_state(old_lines, new_lines, hunks, center_line)
+  local visible_range = opts.visible_only and get_visible_line_range(bufnr) or nil
+  local effect = build_pre_delete_state(old_lines, new_lines, hunks, center_line, {
+    start_line = visible_range and visible_range.start_line or nil,
+    end_line = visible_range and visible_range.end_line or nil,
+  })
   if not next(effect.line_states) then
     return false
   end
 
-  center_on_line(bufnr, center_line)
+  if opts.center ~= false then
+    center_on_line(bufnr, center_line)
+  end
 
   local previous_effect = active_effects[bufnr]
   if previous_effect then
@@ -726,6 +767,8 @@ local function start_pre_delete_effect(bufnr, old_lines, new_lines, path, hunks)
       pending_post_effect_opts[bufnr] = {
         start_delay_ms = 0,
         include_delete_states = false,
+        visible_only = opts.visible_only,
+        center = opts.center,
       }
       intentional_reload[bufnr] = true
       vim.cmd(string.format("silent! checktime %d", bufnr))
@@ -743,6 +786,8 @@ local function start_pre_delete_effect(bufnr, old_lines, new_lines, path, hunks)
       start_effect(bufnr, old_lines, {
         start_delay_ms = 0,
         include_delete_states = false,
+        visible_only = opts.visible_only,
+        center = opts.center,
       })
     end)
   end
@@ -881,12 +926,18 @@ local function ensure_watcher(bufnr, path)
     return
   end
 
+  local dir = vim.fs.dirname(path)
+  local basename = vim.fs.basename(path)
+  if not dir or dir == "" or not basename or basename == "" then
+    return
+  end
+
   local handle = uv.new_fs_event()
   if not handle then
     return
   end
 
-  local ok, err = pcall(handle.start, handle, path, {}, vim.schedule_wrap(function(watch_err)
+  local ok, err = pcall(handle.start, handle, dir, {}, vim.schedule_wrap(function(watch_err, filename)
     if watch_err or not is_current_generation() then
       return
     end
@@ -894,6 +945,13 @@ local function ensure_watcher(bufnr, path)
     local state = watchers[path]
     if not state then
       return
+    end
+
+    if filename and filename ~= "" then
+      local changed_path = normalize_path(vim.fs.joinpath(dir, filename))
+      if changed_path ~= path then
+        return
+      end
     end
 
     queue_reload(state.bufnr, path)
@@ -914,6 +972,8 @@ local function ensure_watcher(bufnr, path)
   watchers[path] = {
     handle = handle,
     bufnr = bufnr,
+    dir = dir,
+    basename = basename,
   }
 end
 

@@ -113,7 +113,7 @@ local function register_naia_tools()
 
   local command_registered, command_err = naia.register_tool(naia_tool_names.execute_user_command, {
     title = "Execute Neovim Command",
-    description = "Run any Neovim Ex command only after asking the user to approve the exact command. If approved, execute it and return any command output. If rejected, return a rejection message instead.",
+    description = "Run any Neovim Ex command, if successful it will return its output.",
     input_schema = {
       type = "object",
       properties = {
