@@ -3,6 +3,10 @@ local naia_tool_names = {
   execute_user_command = "execute_user_command",
 }
 
+_G.__naia_command_permissions = _G.__naia_command_permissions or {
+  allowed_patterns = {},
+}
+
 local function notify_naia_tool_error(err)
   vim.schedule(function()
     vim.notify("Naia tool error: " .. tostring(err), vim.log.levels.WARN)
@@ -41,6 +45,67 @@ local function naia_inform_user(args)
   return ""
 end
 
+local function normalize_command_line(command_line)
+  command_line = vim.trim(command_line or "")
+  return command_line:gsub("^:", "")
+end
+
+local function command_permission_store()
+  _G.__naia_command_permissions = _G.__naia_command_permissions or {
+    allowed_patterns = {},
+  }
+
+  _G.__naia_command_permissions.allowed_patterns = _G.__naia_command_permissions.allowed_patterns or {}
+  return _G.__naia_command_permissions.allowed_patterns
+end
+
+local function derive_lua_command_permission_key(command_line)
+  local lua_body = command_line:match("^lua%s+(.+)$")
+  if not lua_body then
+    return nil
+  end
+
+  lua_body = vim.trim(lua_body)
+  if lua_body == "" then
+    return nil
+  end
+
+  local assignment_target = lua_body:match("^([%w_%.%[%]'\"%-]+)%s*=[^=]")
+  if assignment_target then
+    return "lua:assign:" .. assignment_target
+  end
+
+  local local_assignment_target = lua_body:match("^local%s+([%w_]+)%s*=[^=]")
+  if local_assignment_target then
+    return "lua:local_assign:" .. local_assignment_target
+  end
+
+  local call_target = lua_body:match("^([%w_%.:]+)%s*%b()")
+  if call_target then
+    return "lua:call:" .. call_target
+  end
+
+  local member_target = lua_body:match("^return%s+([%w_%.:]+)")
+  if member_target then
+    return "lua:return:" .. member_target
+  end
+
+  return "lua:exact:" .. lua_body
+end
+
+local function describe_command_permission_key(permission_key)
+  if not permission_key then
+    return nil
+  end
+
+  return permission_key
+    :gsub("^lua:assign:", "Lua assignment: ")
+    :gsub("^lua:local_assign:", "Local Lua assignment: ")
+    :gsub("^lua:call:", "Lua call: ")
+    :gsub("^lua:return:", "Lua return: ")
+    :gsub("^lua:exact:", "Exact Lua command: ")
+end
+
 local function naia_execute_user_command(args)
   local command_line = args and args.command or nil
 
@@ -53,16 +118,31 @@ local function naia_execute_user_command(args)
     error("execute_user_command requires a non-empty command")
   end
 
-  command_line = command_line:gsub("^:", "")
+  command_line = normalize_command_line(command_line)
 
-  local accepted = vim.fn.confirm(
-    "Allow Naia to run this command?\n\n:" .. command_line,
-    "&Yes\n&No",
-    2
-  ) == 1
+  local permission_key = derive_lua_command_permission_key(command_line)
+  local allowed_patterns = command_permission_store()
+  local already_allowed = permission_key and allowed_patterns[permission_key] == true
 
-  if not accepted then
-    return string.format("User rejected executing the command: :%s", command_line)
+  if not already_allowed then
+    local prompt = "Allow Naia to run this command?\n\n:" .. command_line
+    if permission_key then
+      prompt = prompt .. "\n\nAlways-allow group:\n" .. describe_command_permission_key(permission_key)
+    end
+
+    local choice = vim.fn.confirm(
+      prompt,
+      permission_key and "&Yes\n&No\n&Always" or "&Yes\n&No",
+      2
+    )
+
+    if choice == 2 or choice == 0 then
+      return string.format("User rejected executing the command: :%s", command_line)
+    end
+
+    if permission_key and choice == 3 then
+      allowed_patterns[permission_key] = true
+    end
   end
 
   local ok, result = pcall(vim.api.nvim_exec2, command_line, { output = true })
