@@ -19,6 +19,9 @@ local snapshots = {}
 local active_effects = {}
 local watchers = {}
 local pending_reload = {}
+local pending_post_effect_opts = {}
+local guarded_pre_reload = {}
+local intentional_reload = {}
 
 if persisted.watchers then
   for _, state in pairs(persisted.watchers) do
@@ -183,11 +186,40 @@ local function choose_hunk_center(hunks)
   return math.max(1, start_new + math.floor((effective_count - 1) / 2))
 end
 
-local function build_window_state(old_lines, new_lines, hunks, center_line)
+local function choose_old_hunk_center(hunks)
+  local best_hunk
+  local best_score = -1
+
+  for _, hunk in ipairs(hunks) do
+    local old_count = hunk[2]
+    local new_count = hunk[4]
+    local span = math.max(old_count, new_count, 1)
+    local score = span * 1000 + math.min(old_count, new_count)
+    if score > best_score then
+      best_score = score
+      best_hunk = hunk
+    end
+  end
+
+  if not best_hunk then
+    return 1
+  end
+
+  local start_old = best_hunk[1]
+  local old_count = best_hunk[2]
+  local effective_count = math.max(old_count, 1)
+  return math.max(1, start_old + math.floor((effective_count - 1) / 2))
+end
+
+local function build_window_state(old_lines, new_lines, hunks, center_line, opts)
+  opts = opts or {}
   local start_line = math.max(1, center_line - config.radius)
   local end_line = math.min(#new_lines, center_line + config.radius)
   local changed_new = {}
   local old_by_new = {}
+  local kind_by_new = {}
+  local deleted_lines_by_new = {}
+  local deleted_lines_above_by_new = {}
 
   local old_index = 1
   local new_index = 1
@@ -205,18 +237,20 @@ local function build_window_state(old_lines, new_lines, hunks, center_line)
 
     if new_count == 0 and old_count > 0 then
       local anchor_new = math.min(math.max(new_start, 1), math.max(#new_lines, 1))
-      if anchor_new >= start_line and anchor_new <= end_line then
+      if opts.include_delete_states ~= false and anchor_new >= start_line and anchor_new <= end_line then
         local deleted_preview = {}
         local preview_count = math.min(old_count, 3)
         for k = 0, preview_count - 1 do
           deleted_preview[#deleted_preview + 1] = old_lines[old_start + k] or ""
         end
-        local mapped_old = table.concat(deleted_preview, " ⏎ ")
         if old_count > preview_count then
-          mapped_old = mapped_old .. " …"
+          deleted_preview[#deleted_preview + 1] = "…"
         end
-        old_by_new[anchor_new] = mapped_old
+        old_by_new[anchor_new] = new_lines[anchor_new] or ""
         changed_new[anchor_new] = true
+        kind_by_new[anchor_new] = "del"
+        deleted_lines_by_new[anchor_new] = deleted_preview
+        deleted_lines_above_by_new[anchor_new] = new_start <= #new_lines
       end
     end
 
@@ -232,6 +266,11 @@ local function build_window_state(old_lines, new_lines, hunks, center_line)
         end
         old_by_new[new_lnum] = mapped_old
         changed_new[new_lnum] = true
+        if old_count == 0 then
+          kind_by_new[new_lnum] = "add"
+        else
+          kind_by_new[new_lnum] = kind_by_new[new_lnum] or "mod"
+        end
       end
     end
 
@@ -252,17 +291,44 @@ local function build_window_state(old_lines, new_lines, hunks, center_line)
     if changed_new[lnum] then
       local old_text = old_by_new[lnum] or ""
       local new_text = new_lines[lnum] or ""
-      local kind = "mod"
-      if old_text == "" and new_text ~= "" then
-        kind = "add"
-      elseif old_text ~= "" and new_text == "" then
-        kind = "del"
-      end
+      local kind = kind_by_new[lnum] or "mod"
       line_states[lnum] = {
         old_chars = split_chars(old_text),
         new_chars = split_chars(new_text),
         kind = kind,
+        deleted_lines = deleted_lines_by_new[lnum],
+        deleted_lines_above = deleted_lines_above_by_new[lnum],
       }
+    end
+  end
+
+  return {
+    line_states = line_states,
+    center_line = center_line,
+  }
+end
+
+local function build_pre_delete_state(old_lines, new_lines, hunks, center_line)
+  local start_line = math.max(1, center_line - config.radius)
+  local end_line = math.min(#old_lines, center_line + config.radius)
+  local line_states = {}
+
+  for _, hunk in ipairs(hunks) do
+    local old_start, old_count, _, new_count = unpack(hunk)
+    local deleted_count = math.max(old_count - new_count, 0)
+    if deleted_count > 0 then
+      local delete_start = old_start + math.min(new_count, old_count)
+      for offset = 0, deleted_count - 1 do
+        local lnum = delete_start + offset
+        if lnum >= start_line and lnum <= end_line then
+          local text = old_lines[lnum] or ""
+          line_states[lnum] = {
+            old_chars = split_chars(text),
+            new_chars = {},
+            kind = "del",
+          }
+        end
+      end
     end
   end
 
@@ -324,6 +390,19 @@ local function clear_effect(bufnr)
   active_effects[bufnr] = nil
 end
 
+local function restore_autoread(bufnr)
+  local guard = guarded_pre_reload[bufnr]
+  if not guard then
+    return
+  end
+
+  guarded_pre_reload[bufnr] = nil
+
+  if vim.api.nvim_buf_is_valid(bufnr) then
+    vim.bo[bufnr].autoread = guard.autoread
+  end
+end
+
 local function should_show_fx_overlay(progress, frame, lnum)
   if progress >= 0.82 then
     return true
@@ -360,26 +439,55 @@ local function render_frame(bufnr, effect, frame)
   local progress = frame / effect.frames
 
   for lnum, state in pairs(effect.line_states) do
-    local text = morph_line(state, progress, frame, lnum)
     local hl = highlight_for_state(state.kind, progress)
-    local show_fx = should_show_fx_overlay(progress, frame, lnum)
+    local show_fx = state.kind == "del" and state.deleted_lines and #state.deleted_lines > 0
+      or should_show_fx_overlay(progress, frame, lnum)
 
     if show_fx then
-      vim.api.nvim_buf_set_extmark(bufnr, ns, lnum - 1, 0, {
-        end_line = lnum,
-        hl_group = hl,
-        hl_eol = true,
-        priority = 10000,
-        virt_text = text ~= "" and {
-          { text .. " ", hl },
-        } or nil,
-        virt_text_pos = text ~= "" and "overlay" or nil,
-      })
+      if state.kind == "del" and state.deleted_lines and #state.deleted_lines > 0 then
+        local virt_lines = {}
+
+        for index, deleted_text in ipairs(state.deleted_lines) do
+          local deleted_state = {
+            old_chars = split_chars(deleted_text),
+            new_chars = {},
+          }
+          local fake_line = morph_line(deleted_state, progress, frame, lnum + index - 1)
+          virt_lines[#virt_lines + 1] = {
+            { (fake_line ~= "" and fake_line or " ") .. " ", hl },
+          }
+        end
+
+        vim.api.nvim_buf_set_extmark(bufnr, ns, lnum - 1, 0, {
+          end_line = lnum,
+          hl_group = hl,
+          hl_eol = true,
+          priority = 10000,
+          virt_lines = virt_lines,
+          virt_lines_above = state.deleted_lines_above == true,
+        })
+      else
+        local text = morph_line(state, progress, frame, lnum)
+        vim.api.nvim_buf_set_extmark(bufnr, ns, lnum - 1, 0, {
+          end_line = lnum,
+          hl_group = hl,
+          hl_eol = true,
+          priority = 10000,
+          virt_text = text ~= "" and {
+            { text .. " ", hl },
+          } or nil,
+          virt_text_pos = text ~= "" and "overlay" or nil,
+        })
+      end
     end
   end
 
   if frame >= effect.frames then
+    local on_complete = effect.on_complete
     clear_effect(bufnr)
+    if type(on_complete) == "function" then
+      on_complete()
+    end
     return
   end
 
@@ -397,7 +505,8 @@ local function render_frame(bufnr, effect, frame)
   end, effect.frame_delay_ms)
 end
 
-local function start_effect(bufnr, old_lines)
+local function start_effect(bufnr, old_lines, opts)
+  opts = opts or {}
   if not is_current_generation() or not vim.api.nvim_buf_is_valid(bufnr) or not is_buf_visible_in_current_tab(bufnr) then
     return
   end
@@ -417,7 +526,9 @@ local function start_effect(bufnr, old_lines)
   end
 
   local center_line = choose_hunk_center(hunks)
-  local effect = build_window_state(old_lines, new_lines, hunks, center_line)
+  local effect = build_window_state(old_lines, new_lines, hunks, center_line, {
+    include_delete_states = opts.include_delete_states,
+  })
   if not next(effect.line_states) then
     return
   end
@@ -448,7 +559,116 @@ local function start_effect(bufnr, old_lines)
     end
 
     render_frame(bufnr, effect, 1)
+  end, math.max(opts.start_delay_ms ~= nil and opts.start_delay_ms or config.start_delay_ms, 0))
+end
+
+local function start_pre_delete_effect(bufnr, old_lines, new_lines, path, hunks)
+  if not is_current_generation() or not vim.api.nvim_buf_is_valid(bufnr) or not is_buf_visible_in_current_tab(bufnr) then
+    return false
+  end
+
+  local center_line = choose_old_hunk_center(hunks)
+  local effect = build_pre_delete_state(old_lines, new_lines, hunks, center_line)
+  if not next(effect.line_states) then
+    return false
+  end
+
+  center_on_line(bufnr, center_line)
+
+  local previous_effect = active_effects[bufnr]
+  if previous_effect then
+    clear_effect(bufnr)
+  end
+
+  local id = (previous_effect and previous_effect.id or 0) + 1
+  effect.id = id
+  effect.frames = math.max(config.frames, 1)
+  effect.frame_delay_ms = math.max(config.frame_delay_ms, 1)
+  effect.restore_modifiable = vim.bo[bufnr].modifiable
+  guarded_pre_reload[bufnr] = {
+    autoread = vim.bo[bufnr].autoread,
+  }
+  vim.bo[bufnr].autoread = false
+  effect.on_complete = function()
+    if not is_current_generation()
+      or not vim.api.nvim_buf_is_valid(bufnr)
+      or not is_buf_visible_in_current_tab(bufnr)
+    then
+      restore_autoread(bufnr)
+      return
+    end
+
+    local current_path = normalize_path(vim.api.nvim_buf_get_name(bufnr))
+    if current_path ~= path or vim.fn.filereadable(path) ~= 1 then
+      restore_autoread(bufnr)
+      return
+    end
+
+    local win = get_target_win(bufnr)
+    local view = nil
+    if win and vim.api.nvim_win_is_valid(win) then
+      view = vim.api.nvim_win_call(win, function()
+        return vim.fn.winsaveview()
+      end)
+    end
+
+    restore_autoread(bufnr)
+
+    local reloaded = false
+    if win and vim.api.nvim_win_is_valid(win) then
+      reloaded = pcall(vim.api.nvim_win_call, win, function()
+        vim.cmd("silent! edit!")
+      end)
+    end
+
+    if not reloaded then
+      snapshots[bufnr] = old_lines
+      pending_post_effect_opts[bufnr] = {
+        start_delay_ms = 0,
+        include_delete_states = false,
+      }
+      intentional_reload[bufnr] = true
+      vim.cmd(string.format("silent! checktime %d", bufnr))
+      return
+    end
+
+    if view and win and vim.api.nvim_win_is_valid(win) then
+      pcall(vim.api.nvim_win_call, win, function()
+        vim.fn.winrestview(view)
+      end)
+    end
+
+    vim.schedule(function()
+      if not is_current_generation()
+        or not vim.api.nvim_buf_is_valid(bufnr)
+        or not is_buf_visible_in_current_tab(bufnr)
+      then
+        return
+      end
+
+      start_effect(bufnr, old_lines, {
+        start_delay_ms = 0,
+        include_delete_states = false,
+      })
+    end)
+  end
+  vim.bo[bufnr].modifiable = false
+  active_effects[bufnr] = effect
+
+  vim.defer_fn(function()
+    if not is_current_generation() then
+      return
+    end
+
+    local current = active_effects[bufnr]
+    if not current or current.id ~= id then
+      return
+    end
+
+    render_frame(bufnr, effect, 1)
   end, math.max(config.start_delay_ms, 0))
+
+  return true
 end
 
 local function queue_reload(bufnr, path)
@@ -473,8 +693,37 @@ local function queue_reload(bufnr, path)
       return
     end
 
-    snapshots[bufnr] = buf_lines(bufnr)
-    vim.cmd(string.format("silent! checktime %d", bufnr))
+    local old_lines = buf_lines(bufnr)
+    local ok, disk_lines = pcall(vim.fn.readfile, path)
+    if not ok or type(disk_lines) ~= "table" then
+      snapshots[bufnr] = old_lines
+      vim.cmd(string.format("silent! checktime %d", bufnr))
+      return
+    end
+
+    if vim.deep_equal(old_lines, disk_lines) then
+      return
+    end
+
+    local hunks = vim.diff(join_lines(old_lines), join_lines(disk_lines), {
+      result_type = "indices",
+      algorithm = "histogram",
+    }) or {}
+
+    if #hunks == 0 then
+      snapshots[bufnr] = old_lines
+      vim.cmd(string.format("silent! checktime %d", bufnr))
+      return
+    end
+
+    if not start_pre_delete_effect(bufnr, old_lines, disk_lines, path, hunks) then
+      snapshots[bufnr] = old_lines
+      pending_post_effect_opts[bufnr] = {
+        start_delay_ms = 0,
+        include_delete_states = false,
+      }
+      vim.cmd(string.format("silent! checktime %d", bufnr))
+    end
   end, math.max(config.watch_debounce_ms, 1))
 end
 
@@ -575,6 +824,11 @@ vim.api.nvim_create_autocmd("FileChangedShell", {
       return
     end
 
+    if guarded_pre_reload[args.buf] and not intentional_reload[args.buf] then
+      vim.v.fcs_choice = ""
+      return
+    end
+
     snapshots[args.buf] = snapshots[args.buf] or buf_lines(args.buf)
     vim.v.fcs_choice = "reload"
   end,
@@ -584,12 +838,16 @@ vim.api.nvim_create_autocmd("FileChangedShellPost", {
   group = group,
   callback = function(args)
     local old_lines = snapshots[args.buf]
+    local opts = pending_post_effect_opts[args.buf]
     snapshots[args.buf] = nil
+    pending_post_effect_opts[args.buf] = nil
+    intentional_reload[args.buf] = nil
+    restore_autoread(args.buf)
     if not old_lines then
       return
     end
 
-    start_effect(args.buf, old_lines)
+    start_effect(args.buf, old_lines, opts)
     vim.schedule(refresh_watchers)
   end,
 })
@@ -598,6 +856,9 @@ vim.api.nvim_create_autocmd("BufDelete", {
   group = group,
   callback = function(args)
     snapshots[args.buf] = nil
+    pending_post_effect_opts[args.buf] = nil
+    intentional_reload[args.buf] = nil
+    restore_autoread(args.buf)
     active_effects[args.buf] = nil
     vim.schedule(refresh_watchers)
   end,
