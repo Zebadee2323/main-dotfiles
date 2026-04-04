@@ -1,7 +1,8 @@
 if vim.g.neovide then
     -- Start scale factor
     vim.g.neovide_scale_factor = vim.g.neovide_scale_factor or 1.0
-    vim.g.neovide_opacity = 0.94
+    vim.g.neovide_opacity = 0.86
+    vim.g.neovide_normal_opacity = 0.86
     vim.g.neovide_window_blurred = false
 
     local function change_scale(delta)

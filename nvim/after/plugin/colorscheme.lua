@@ -14,6 +14,8 @@ vim.api.nvim_set_hl(0, "Cursor", { fg = "#000000", bg = "#ff7d17" })
 vim.api.nvim_set_hl(0, "TermCursor", { fg = "#000000", bg = "#ff7d17" })
 vim.api.nvim_set_hl(0, "diffAdded", { fg = "#00bb00" })
 vim.api.nvim_set_hl(0, "diffSubname", { fg = "#c4693d" })
+vim.api.nvim_set_hl(0, "LineNr", { fg = "#8a8f98" })
+vim.api.nvim_set_hl(0, "CursorLineNr", { fg = "#8ecbff", bold = true })
 
 local function hex_to_rgb(hex)
     hex = hex:gsub("#", "")
