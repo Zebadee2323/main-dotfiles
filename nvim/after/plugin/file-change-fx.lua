@@ -4,6 +4,7 @@ local config = vim.tbl_deep_extend("force", {
   frames = 20,
   frame_delay_ms = 33,
   watch_debounce_ms = 80,
+  follow_scan_interval_ms = 1200,
   charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{};:,.<>/?\\|",
   sound_enabled = true,
   sound_volume = 1.0,
@@ -20,12 +21,15 @@ local uv = vim.uv or vim.loop
 local snapshots = {}
 local active_effects = {}
 local watchers = {}
+local follow_files = {}
 local pending_reload = {}
 local pending_post_effect_opts = {}
 local pending_save_snapshots = {}
 local recent_manual_writes = {}
 local guarded_pre_reload = {}
 local intentional_reload = {}
+local follow_scan_pending = false
+local follow_scan_generation = 0
 local restore_autoread
 local fx_audio_dir = vim.fn.stdpath("cache") .. "/file-change-fx"
 local change_fx_sound_path = vim.fs.joinpath(vim.fn.stdpath("config"), "after", "plugin", "change-fx.mp3")
@@ -55,10 +59,14 @@ for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
 end
 
 persisted.watchers = watchers
+persisted.follow_files = follow_files
 persisted.ns = ns
 persisted.group = group
 if persisted.enabled == nil then
   persisted.enabled = vim.g.file_change_fx_enabled ~= false
+end
+if persisted.follow_enabled == nil then
+  persisted.follow_enabled = vim.g.file_change_follow_enabled == true
 end
 
 vim.opt.autoread = true
@@ -88,6 +96,10 @@ end
 
 local function is_fx_enabled()
   return _G.__file_change_fx_state and _G.__file_change_fx_state.enabled ~= false
+end
+
+local function is_follow_enabled()
+  return _G.__file_change_fx_state and _G.__file_change_fx_state.follow_enabled == true
 end
 
 local function normalize_path(path)
@@ -392,6 +404,39 @@ local function get_target_win(bufnr)
       return win
     end
   end
+end
+
+local function is_normal_file_edit_win(win)
+  if not vim.api.nvim_win_is_valid(win) or vim.fn.win_gettype(win) ~= "" then
+    return false
+  end
+
+  local bufnr = vim.api.nvim_win_get_buf(win)
+  return vim.api.nvim_buf_is_valid(bufnr) and vim.bo[bufnr].buftype == ""
+end
+
+local function best_editing_win()
+  local best_win
+  local best_area = -1
+
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if is_normal_file_edit_win(win) then
+      local width = vim.api.nvim_win_get_width(win)
+      local height = vim.api.nvim_win_get_height(win)
+      local area = width * height
+      if area > best_area then
+        best_area = area
+        best_win = win
+      end
+    end
+  end
+
+  local current = vim.api.nvim_get_current_win()
+  if not best_win and is_normal_file_edit_win(current) then
+    best_win = current
+  end
+
+  return best_win
 end
 
 local function refresh_buffer_highlighting(bufnr)
@@ -755,6 +800,25 @@ local function reload_buffer_preserving_view(bufnr)
   end)
 
   return true
+end
+
+local function open_buffer_in_best_window(bufnr)
+  local existing = get_target_win(bufnr)
+  if existing and vim.api.nvim_win_is_valid(existing) then
+    return existing
+  end
+
+  local win = best_editing_win()
+  if not win then
+    return nil
+  end
+
+  local ok = pcall(vim.api.nvim_win_set_buf, win, bufnr)
+  if not ok then
+    return nil
+  end
+
+  return win
 end
 
 local function should_show_fx_overlay(progress, frame, lnum)
@@ -1128,6 +1192,185 @@ local function queue_reload(bufnr, path)
   end, math.max(config.watch_debounce_ms, 1))
 end
 
+local function stat_signature(path)
+  local stat = uv.fs_stat(path)
+  if not stat or stat.type ~= "file" then
+    return nil
+  end
+
+  local mtime = stat.mtime or {}
+  return {
+    mtime_sec = mtime.sec or 0,
+    mtime_nsec = mtime.nsec or 0,
+    size = stat.size or 0,
+  }
+end
+
+local function same_signature(a, b)
+  return a
+    and b
+    and a.mtime_sec == b.mtime_sec
+    and a.mtime_nsec == b.mtime_nsec
+    and a.size == b.size
+end
+
+local function snapshot_follow_tree(root)
+  local files = {}
+
+  local function scan_dir(dir)
+    local iter, err = vim.fs.dir(dir)
+    if not iter then
+      vim.schedule(function()
+        vim.notify("file-change-fx follow scan failed: " .. tostring(err), vim.log.levels.WARN)
+      end)
+      return
+    end
+
+    while true do
+      local name, kind = iter()
+      if not name then
+        break
+      end
+
+      local path = normalize_path(vim.fs.joinpath(dir, name))
+      if path then
+        if kind == "directory" then
+          scan_dir(path)
+        elseif kind == "file" then
+          local signature = stat_signature(path)
+          if signature then
+            files[path] = signature
+          end
+        end
+      end
+    end
+  end
+
+  if root and vim.fn.isdirectory(root) == 1 then
+    scan_dir(root)
+  end
+
+  return files
+end
+
+local function load_buffer_for_follow(path)
+  local bufnr = vim.fn.bufnr(path)
+  local old_lines = {}
+
+  if bufnr > 0 and vim.api.nvim_buf_is_valid(bufnr) then
+    if vim.bo[bufnr].modified then
+      return nil, nil
+    end
+    old_lines = buf_lines(bufnr)
+  else
+    bufnr = vim.fn.bufadd(path)
+    if bufnr <= 0 then
+      return nil, nil
+    end
+    vim.fn.bufload(bufnr)
+  end
+
+  local win = open_buffer_in_best_window(bufnr)
+  if not win then
+    return nil, nil
+  end
+
+  return bufnr, old_lines
+end
+
+local function handle_follow_change(path)
+  if vim.fn.filereadable(path) ~= 1 then
+    return
+  end
+
+  local bufnr, old_lines = load_buffer_for_follow(path)
+  if not bufnr then
+    return
+  end
+
+  if reload_buffer_preserving_view(bufnr) then
+    vim.schedule(function()
+      if not is_current_generation() or not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+      end
+
+      start_effect(bufnr, old_lines, {
+        start_delay_ms = 0,
+        include_delete_states = false,
+      })
+    end)
+  else
+    snapshots[bufnr] = old_lines
+    pending_post_effect_opts[bufnr] = {
+      start_delay_ms = 0,
+      include_delete_states = false,
+    }
+    vim.cmd(string.format("silent! checktime %d", bufnr))
+  end
+end
+
+local function schedule_follow_scan()
+  if not is_current_generation() or not is_follow_enabled() then
+    follow_scan_pending = false
+    return
+  end
+
+  follow_scan_pending = true
+  local scheduled_generation = generation
+  local scheduled_scan_generation = follow_scan_generation + 1
+  follow_scan_generation = scheduled_scan_generation
+
+  vim.defer_fn(function()
+    if not is_current_generation()
+      or scheduled_generation ~= generation
+      or scheduled_scan_generation ~= follow_scan_generation
+    then
+      return
+    end
+
+    follow_scan_pending = false
+    if not is_follow_enabled() then
+      return
+    end
+
+    local root = normalize_path(vim.fn.getcwd())
+    local current_files = snapshot_follow_tree(root)
+    local previous_files = follow_files
+    follow_files = current_files
+    persisted.follow_files = follow_files
+
+    for path, signature in pairs(current_files) do
+      if not same_signature(previous_files[path], signature) then
+        handle_follow_change(path)
+      end
+    end
+
+    schedule_follow_scan()
+  end, math.max(config.follow_scan_interval_ms, 200))
+end
+
+local function refresh_follow_scan()
+  if not is_current_generation() then
+    return
+  end
+
+  if not is_follow_enabled() then
+    follow_scan_generation = follow_scan_generation + 1
+    follow_scan_pending = false
+    follow_files = {}
+    persisted.follow_files = follow_files
+    return
+  end
+
+  if not follow_scan_pending then
+    if vim.tbl_isempty(follow_files) then
+      follow_files = snapshot_follow_tree(normalize_path(vim.fn.getcwd()))
+      persisted.follow_files = follow_files
+    end
+    schedule_follow_scan()
+  end
+end
+
 local function stop_watcher(path)
   local state = watchers[path]
   if not state then
@@ -1218,19 +1461,28 @@ local function refresh_watchers()
       stop_watcher(path)
     end
   end
+
+  refresh_follow_scan()
 end
 
 vim.api.nvim_create_autocmd({
   "BufEnter",
   "BufWinEnter",
   "BufWinLeave",
+  "DirChanged",
   "TabEnter",
   "TabClosed",
   "WinEnter",
   "WinClosed",
 }, {
   group = group,
-  callback = refresh_watchers,
+  callback = function(args)
+    if args.event == "DirChanged" then
+      follow_files = {}
+      persisted.follow_files = follow_files
+    end
+    refresh_watchers()
+  end,
 })
 
 vim.api.nvim_create_autocmd("FileChangedShell", {
@@ -1353,6 +1605,14 @@ vim.api.nvim_create_user_command("FileChangeFxToggle", function()
 
   local status = persisted.enabled and "enabled" or "disabled"
   vim.notify("file-change-fx " .. status, vim.log.levels.INFO, { title = "FileChangeFxToggle" })
+end, {})
+
+vim.api.nvim_create_user_command("FileChangeFollow", function()
+  persisted.follow_enabled = not is_follow_enabled()
+  refresh_follow_scan()
+
+  local status = persisted.follow_enabled and "enabled" or "disabled"
+  vim.notify("file-change-fx follow " .. status, vim.log.levels.INFO, { title = "FileChangeFollow" })
 end, {})
 
 vim.api.nvim_create_user_command("FileChangeFxWatchInfo", function()
