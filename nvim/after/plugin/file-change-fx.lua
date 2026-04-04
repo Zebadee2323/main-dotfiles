@@ -430,13 +430,38 @@ local function get_target_win(bufnr)
   end
 end
 
+local function is_real_disk_file_buffer(bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) or vim.bo[bufnr].buftype ~= "" then
+    return false
+  end
+
+  local path = normalize_path(vim.api.nvim_buf_get_name(bufnr))
+  return path ~= nil and vim.fn.filereadable(path) == 1
+end
+
 local function is_normal_file_edit_win(win)
   if not vim.api.nvim_win_is_valid(win) or vim.fn.win_gettype(win) ~= "" then
     return false
   end
 
   local bufnr = vim.api.nvim_win_get_buf(win)
-  return vim.api.nvim_buf_is_valid(bufnr) and vim.bo[bufnr].buftype == ""
+  return is_real_disk_file_buffer(bufnr)
+end
+
+local function is_probably_text_file(path)
+  local fd = uv.fs_open(path, "r", 438)
+  if not fd then
+    return false
+  end
+
+  local chunk = uv.fs_read(fd, 1024, 0)
+  uv.fs_close(fd)
+
+  if chunk == nil then
+    return false
+  end
+
+  return not chunk:find("\0", 1, true)
 end
 
 local function best_editing_win()
@@ -826,6 +851,29 @@ local function reload_buffer_preserving_view(bufnr)
   return true
 end
 
+local function create_follow_window(bufnr)
+  local anchor = best_editing_win() or vim.api.nvim_get_current_win()
+  if not vim.api.nvim_win_is_valid(anchor) then
+    return nil
+  end
+
+  local new_win
+  local ok = pcall(vim.api.nvim_win_call, anchor, function()
+    vim.cmd("leftabove vsplit")
+    new_win = vim.api.nvim_get_current_win()
+  end)
+
+  if not ok or not (new_win and vim.api.nvim_win_is_valid(new_win)) then
+    return nil
+  end
+
+  if not pcall(vim.api.nvim_win_set_buf, new_win, bufnr) then
+    return nil
+  end
+
+  return new_win
+end
+
 local function open_buffer_in_best_window(bufnr)
   local existing = get_target_win(bufnr)
   if existing and vim.api.nvim_win_is_valid(existing) then
@@ -833,16 +881,11 @@ local function open_buffer_in_best_window(bufnr)
   end
 
   local win = best_editing_win()
-  if not win then
-    return nil
+  if win and pcall(vim.api.nvim_win_set_buf, win, bufnr) then
+    return win
   end
 
-  local ok = pcall(vim.api.nvim_win_set_buf, win, bufnr)
-  if not ok then
-    return nil
-  end
-
-  return win
+  return create_follow_window(bufnr)
 end
 
 local function should_show_fx_overlay(progress, frame, lnum)
@@ -1217,10 +1260,20 @@ local function queue_reload(bufnr, path)
 end
 
 local function load_buffer_for_follow(path)
+  if not is_probably_text_file(path) then
+    push_watchman_debug("ignoring non-text file: " .. tostring(path))
+    return nil, nil
+  end
+
   local bufnr = vim.fn.bufnr(path)
   local old_lines = {}
 
   if bufnr > 0 and vim.api.nvim_buf_is_valid(bufnr) then
+    if not is_real_disk_file_buffer(bufnr) then
+      push_watchman_debug("existing buffer is not a real disk file buffer: " .. tostring(path), vim.log.levels.WARN)
+      return nil, nil
+    end
+
     if vim.bo[bufnr].modified then
       return nil, nil
     end
