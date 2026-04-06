@@ -26,11 +26,7 @@ local pending_save_snapshots = {}
 local recent_manual_writes = {}
 local guarded_pre_reload = {}
 local intentional_reload = {}
-local watchman_watch_root = nil
-local watchman_relative_root = nil
-local watchman_clock = nil
-local follow_poll_generation = 0
-local watchman_debug_log = {}
+local follow_debug_log = {}
 local restore_autoread
 local fx_audio_dir = vim.fn.stdpath("cache") .. "/file-change-fx"
 local change_fx_sound_path = vim.fs.joinpath(vim.fn.stdpath("config"), "after", "plugin", "change-fx.mp3")
@@ -100,7 +96,7 @@ local function is_follow_enabled()
   return _G.__file_change_fx_state and _G.__file_change_fx_state.follow_enabled == true
 end
 
-local function watchman_debug_enabled()
+local function follow_debug_enabled()
   return _G.__file_change_fx_state and _G.__file_change_fx_state.follow_debug == true
 end
 
@@ -110,14 +106,6 @@ local function normalize_path(path)
   end
 
   return vim.fs.normalize(path)
-end
-
-local function watchman_base_dir()
-  if watchman_relative_root and watchman_relative_root ~= "" then
-    return normalize_path(vim.fs.joinpath(watchman_watch_root, watchman_relative_root))
-  end
-
-  return normalize_path(watchman_watch_root)
 end
 
 local function buf_lines(bufnr)
@@ -148,14 +136,14 @@ local function collect_lines(target, data)
   end
 end
 
-local function push_watchman_debug(message, level)
+local function push_follow_debug(message, level)
   local entry = string.format("[%s] %s", os.date("%H:%M:%S"), tostring(message))
-  watchman_debug_log[#watchman_debug_log + 1] = entry
-  if #watchman_debug_log > 120 then
-    table.remove(watchman_debug_log, 1)
+  follow_debug_log[#follow_debug_log + 1] = entry
+  if #follow_debug_log > 120 then
+    table.remove(follow_debug_log, 1)
   end
 
-  if watchman_debug_enabled() then
+  if follow_debug_enabled() then
     vim.schedule(function()
       vim.notify(entry, level or vim.log.levels.INFO, { title = "FileChangeFollowDebug" })
     end)
@@ -888,6 +876,244 @@ local function open_buffer_in_best_window(bufnr)
   return create_follow_window(bufnr)
 end
 
+local function normalize_reported_hunks(hunks)
+  if type(hunks) ~= "table" then
+    return nil
+  end
+
+  local normalized = {}
+
+  for _, hunk in ipairs(hunks) do
+    if type(hunk) == "table" then
+      local kind = hunk.kind or hunk.type
+      local start_line = tonumber(hunk.start_line or hunk.line_start or hunk.start or hunk.from_line)
+      local end_line = tonumber(hunk.end_line or hunk.line_end or hunk["end"] or hunk.to_line)
+
+      if type(kind) == "string" then
+        kind = vim.trim(kind):lower()
+      end
+
+      if kind == "addition" then
+        kind = "add"
+      elseif kind == "modification" or kind == "modify" or kind == "change" then
+        kind = "mod"
+      elseif kind == "deletion" or kind == "remove" then
+        kind = "del"
+      end
+
+      if (kind == "add" or kind == "mod" or kind == "del") and start_line and end_line then
+        start_line = math.max(1, math.floor(start_line))
+        end_line = math.max(start_line, math.floor(end_line))
+        normalized[#normalized + 1] = {
+          kind = kind,
+          start_line = start_line,
+          end_line = end_line,
+        }
+      end
+    end
+  end
+
+  if #normalized == 0 then
+    return nil
+  end
+
+  table.sort(normalized, function(a, b)
+    if a.start_line == b.start_line then
+      return a.end_line < b.end_line
+    end
+    return a.start_line < b.start_line
+  end)
+
+  return normalized
+end
+
+local function choose_reported_hunk_center(hunks)
+  local best_hunk
+  local best_span = -1
+
+  for _, hunk in ipairs(hunks) do
+    local span = math.max(hunk.end_line - hunk.start_line + 1, 1)
+    if span > best_span then
+      best_span = span
+      best_hunk = hunk
+    end
+  end
+
+  if not best_hunk then
+    return 1
+  end
+
+  return math.max(1, best_hunk.start_line + math.floor((best_hunk.end_line - best_hunk.start_line) / 2))
+end
+
+local function build_reported_window_state(bufnr, hunks, center_line, opts)
+  opts = opts or {}
+  local new_lines = buf_lines(bufnr)
+  local max_line = math.max(#new_lines, 1)
+  local start_line
+  local end_line
+
+  if opts.start_line and opts.end_line then
+    start_line = math.max(1, opts.start_line)
+    end_line = math.max(start_line, opts.end_line)
+  else
+    start_line = math.max(1, center_line - config.radius)
+    end_line = center_line + config.radius
+  end
+
+  local line_states = {}
+
+  for _, hunk in ipairs(hunks) do
+    if hunk.kind == "del" then
+      local anchor_line = math.min(math.max(hunk.start_line, 1), max_line)
+      if anchor_line >= start_line and anchor_line <= end_line then
+        local deleted_lines = {}
+        local deleted_count = math.max(hunk.end_line - hunk.start_line + 1, 1)
+        for index = 1, deleted_count do
+          deleted_lines[#deleted_lines + 1] = string.rep(" ", 12)
+        end
+        line_states[anchor_line] = {
+          old_chars = {},
+          new_chars = split_chars(new_lines[anchor_line] or ""),
+          kind = "del",
+          deleted_lines = deleted_lines,
+          deleted_lines_above = hunk.start_line <= #new_lines,
+        }
+      end
+    else
+      local hunk_end = math.min(hunk.end_line, max_line)
+      for lnum = hunk.start_line, hunk_end do
+        if lnum >= start_line and lnum <= end_line then
+          local text = new_lines[lnum] or ""
+          local synthetic_old = hunk.kind == "add" and "" or string.rep(" ", vim.fn.strchars(text))
+          line_states[lnum] = {
+            old_chars = split_chars(synthetic_old),
+            new_chars = split_chars(text),
+            kind = hunk.kind,
+          }
+        end
+      end
+    end
+  end
+
+  return {
+    line_states = line_states,
+    center_line = center_line,
+  }
+end
+
+local render_frame
+
+local function start_prebuilt_effect(bufnr, effect, opts)
+  opts = opts or {}
+  if not is_fx_enabled() then
+    return false
+  end
+  if not is_current_generation() or not vim.api.nvim_buf_is_valid(bufnr) or not is_buf_visible_in_current_tab(bufnr) then
+    return false
+  end
+  if not effect or not next(effect.line_states or {}) then
+    return false
+  end
+
+  if opts.center ~= false then
+    center_on_line(bufnr, effect.center_line or 1)
+  end
+
+  local previous_effect = active_effects[bufnr]
+  if previous_effect then
+    clear_effect(bufnr)
+  end
+
+  local id = (previous_effect and previous_effect.id or 0) + 1
+  effect.id = id
+  effect.frames = math.max(config.frames, 1)
+  effect.frame_delay_ms = math.max(config.frame_delay_ms, 1)
+  effect.restore_modifiable = vim.bo[bufnr].modifiable
+  vim.bo[bufnr].modifiable = false
+  active_effects[bufnr] = effect
+
+  vim.defer_fn(function()
+    if not is_current_generation() then
+      return
+    end
+
+    local current = active_effects[bufnr]
+    if not current or current.id ~= id then
+      return
+    end
+
+    play_glitch_sound(effect.frames * effect.frame_delay_ms)
+    render_frame(bufnr, effect, 1)
+  end, math.max(opts.start_delay_ms ~= nil and opts.start_delay_ms or config.start_delay_ms, 0))
+
+  return true
+end
+
+local function load_buffer_for_reported_follow(path)
+  local bufnr = vim.fn.bufnr(path)
+
+  if bufnr > 0 and vim.api.nvim_buf_is_valid(bufnr) then
+    if vim.bo[bufnr].buftype ~= "" then
+      push_follow_debug("existing buffer is not a normal file buffer: " .. tostring(path), vim.log.levels.WARN)
+      return nil
+    end
+
+    if vim.bo[bufnr].modified then
+      push_follow_debug("skipping modified buffer for reported follow: " .. tostring(path), vim.log.levels.WARN)
+      return nil
+    end
+  else
+    bufnr = vim.fn.bufadd(path)
+    if bufnr <= 0 then
+      return nil
+    end
+  end
+
+  local readable = vim.fn.filereadable(path) == 1
+  if readable then
+    vim.fn.bufload(bufnr)
+  end
+
+  local win = open_buffer_in_best_window(bufnr)
+  if not win then
+    return nil
+  end
+
+  if readable then
+    reload_buffer_preserving_view(bufnr)
+  end
+
+  return bufnr
+end
+
+local function play_reported_follow_change(path, hunks)
+  push_follow_debug("handling reported follow change for " .. tostring(path))
+
+  local bufnr = load_buffer_for_reported_follow(path)
+  if not bufnr then
+    push_follow_debug("could not load/open buffer for reported change: " .. tostring(path), vim.log.levels.WARN)
+    return false, "Could not load buffer for " .. tostring(path)
+  end
+
+  local center_line = choose_reported_hunk_center(hunks)
+  local effect = build_reported_window_state(bufnr, hunks, center_line)
+
+  if not next(effect.line_states or {}) then
+    push_follow_debug("reported hunks did not map to visible lines for " .. tostring(path), vim.log.levels.WARN)
+    return false, "No valid line states for " .. tostring(path)
+  end
+
+  if not start_prebuilt_effect(bufnr, effect, {
+    start_delay_ms = 0,
+    center = true,
+  }) then
+    return false, "Could not start effect for " .. tostring(path)
+  end
+
+  return true
+end
+
 local function should_show_fx_overlay(progress, frame, lnum)
   if progress >= 0.82 then
     return true
@@ -914,7 +1140,7 @@ local function highlight_for_state(kind, progress)
   end
 end
 
-local function render_frame(bufnr, effect, frame)
+render_frame = function(bufnr, effect, frame)
   if not is_current_generation() or not vim.api.nvim_buf_is_valid(bufnr) or not is_buf_visible_in_current_tab(bufnr) then
     clear_effect(bufnr)
     return
@@ -1259,272 +1485,111 @@ local function queue_reload(bufnr, path)
   end, math.max(config.watch_debounce_ms, 1))
 end
 
-local function load_buffer_for_follow(path)
-  if not is_probably_text_file(path) then
-    push_watchman_debug("ignoring non-text file: " .. tostring(path))
-    return nil, nil
-  end
+local follow_tool_name = "report_file_edits"
 
-  local bufnr = vim.fn.bufnr(path)
-  local old_lines = {}
-
-  if bufnr > 0 and vim.api.nvim_buf_is_valid(bufnr) then
-    if not is_real_disk_file_buffer(bufnr) then
-      push_watchman_debug("existing buffer is not a real disk file buffer: " .. tostring(path), vim.log.levels.WARN)
-      return nil, nil
-    end
-
-    if vim.bo[bufnr].modified then
-      return nil, nil
-    end
-    old_lines = buf_lines(bufnr)
-  else
-    bufnr = vim.fn.bufadd(path)
-    if bufnr <= 0 then
-      return nil, nil
-    end
-    vim.fn.bufload(bufnr)
-  end
-
-  local win = open_buffer_in_best_window(bufnr)
-  if not win then
-    return nil, nil
-  end
-
-  return bufnr, old_lines
+local function notify_follow_registration_error(err)
+  vim.schedule(function()
+    vim.notify("Failed to register Naia `" .. follow_tool_name .. "` tool: " .. tostring(err), vim.log.levels.WARN)
+  end)
 end
 
-local function handle_follow_change(path)
-  if vim.fn.filereadable(path) ~= 1 then
-    push_watchman_debug("ignoring unreadable path: " .. tostring(path), vim.log.levels.WARN)
-    return
+local function resolve_reported_follow_path(path)
+  if type(path) ~= "string" then
+    path = tostring(path or "")
   end
 
-  push_watchman_debug("handling follow change for " .. path)
-  local bufnr, old_lines = load_buffer_for_follow(path)
-  if not bufnr then
-    push_watchman_debug("could not load/open buffer for " .. path, vim.log.levels.WARN)
-    return
+  path = vim.trim(path)
+  if path == "" then
+    return nil
   end
 
-  push_watchman_debug(string.format("loaded bufnr=%d for %s", bufnr, path))
-  if reload_buffer_preserving_view(bufnr) then
-    push_watchman_debug(string.format("reloaded bufnr=%d for %s", bufnr, path))
-    vim.schedule(function()
-      if not is_current_generation() or not vim.api.nvim_buf_is_valid(bufnr) then
-        return
-      end
-
-      start_effect(bufnr, old_lines, {
-        start_delay_ms = 0,
-        include_delete_states = false,
-      })
-    end)
-  else
-    push_watchman_debug(string.format("reload failed; falling back to checktime for bufnr=%d path=%s", bufnr, path), vim.log.levels.WARN)
-    snapshots[bufnr] = old_lines
-    pending_post_effect_opts[bufnr] = {
-      start_delay_ms = 0,
-      include_delete_states = false,
-    }
-    vim.cmd(string.format("silent! checktime %d", bufnr))
-  end
+  return normalize_path(vim.fs.abspath(path))
 end
 
-local function stop_watchman_follow()
-  push_watchman_debug("stopping watchman follow")
-  follow_poll_generation = follow_poll_generation + 1
-  watchman_watch_root = nil
-  watchman_relative_root = nil
-  watchman_clock = nil
-end
+local function naia_report_file_edits(args)
+  local path = resolve_reported_follow_path(args and args.path or args and args.file_path or args and args.filename)
+  local hunks = normalize_reported_hunks(args and args.hunks or nil)
 
-local function refresh_follow_scan()
-  if not is_current_generation() then
-    return
+  if not path then
+    error("report_file_edits requires a non-empty path")
+  end
+
+  if not hunks then
+    error("report_file_edits requires at least one valid hunk")
   end
 
   if not is_follow_enabled() then
-    stop_watchman_follow()
+    push_follow_debug("ignored reported file edits while follow mode is disabled: " .. path)
+    return "FileChangeFollow is disabled"
+  end
+
+  local ok, started, err = pcall(function()
+    return play_reported_follow_change(path, hunks)
+  end)
+
+  if not ok then
+    error(started)
+  end
+
+  if not started then
+    return err or ("Could not play file-change effect for " .. path)
+  end
+
+  return string.format("Played file-change follow effect for %s (%d hunks)", path, #hunks)
+end
+
+local function register_follow_naia_tool()
+  local ok, naia = pcall(require, "naia")
+  if not ok then
     return
   end
 
-  push_watchman_debug("refresh_follow_scan cwd=" .. tostring(normalize_path(vim.fn.getcwd())))
+  pcall(naia.deregister_tool, follow_tool_name)
 
-  if vim.fn.executable("watchman") ~= 1 then
-    persisted.follow_enabled = false
-    stop_watchman_follow()
-    vim.schedule(function()
-      vim.notify("FileChangeFollow requires watchman to be installed", vim.log.levels.ERROR, {
-        title = "FileChangeFollow",
-      })
-    end)
-    return
-  end
-
-  local root = normalize_path(vim.fn.getcwd())
-  if not root or vim.fn.isdirectory(root) ~= 1 then
-    return
-  end
-
-  local current_base = watchman_base_dir()
-  if current_base and current_base ~= root then
-    stop_watchman_follow()
-  end
-
-  local watch_project_output = vim.fn.system({
-    "watchman",
-    "--output-encoding=json",
-    "--no-pretty",
-    "watch-project",
-    root,
+  local registered, err = naia.register_tool(follow_tool_name, {
+    title = "Report File Edits",
+    description = "Report AI-driven file edits so Neovim can play file change FX for the given file and changed line ranges.",
+    input_schema = {
+      type = "object",
+      properties = {
+        path = {
+          type = "string",
+          description = "The edited file path, absolute or relative to the current Neovim working directory.",
+        },
+        hunks = {
+          type = "array",
+          description = "Changed line ranges in the edited file.",
+          minItems = 1,
+          items = {
+            type = "object",
+            properties = {
+              kind = {
+                type = "string",
+                description = "One of add, mod, del, addition, modification, or deletion.",
+              },
+              start_line = {
+                type = "integer",
+                description = "The 1-based start line for the changed hunk.",
+              },
+              end_line = {
+                type = "integer",
+                description = "The 1-based end line for the changed hunk.",
+              },
+            },
+            required = { "kind", "start_line", "end_line" },
+            additionalProperties = false,
+          },
+        },
+      },
+      required = { "path", "hunks" },
+      additionalProperties = false,
+    },
+    callback = naia_report_file_edits,
   })
 
-  if vim.v.shell_error ~= 0 then
-    persisted.follow_enabled = false
-    stop_watchman_follow()
-    vim.schedule(function()
-      vim.notify(
-        "file-change-fx watchman watch-project failed: " .. tostring(watch_project_output),
-        vim.log.levels.ERROR,
-        { title = "FileChangeFollow" }
-      )
-    end)
-    return
+  if not registered then
+    notify_follow_registration_error(err)
   end
-
-  push_watchman_debug("watch-project raw response: " .. tostring(watch_project_output))
-
-  local ok, watch_project = pcall(vim.json.decode, watch_project_output)
-  if not ok or type(watch_project) ~= "table" or not watch_project.watch then
-    persisted.follow_enabled = false
-    stop_watchman_follow()
-    vim.schedule(function()
-      vim.notify("file-change-fx got an invalid watchman watch-project response", vim.log.levels.ERROR, {
-        title = "FileChangeFollow",
-      })
-    end)
-    return
-  end
-
-  watchman_watch_root = normalize_path(watch_project.watch)
-  watchman_relative_root = watch_project.relative_path
-  push_watchman_debug(
-    "watch-project resolved root="
-      .. tostring(watchman_watch_root)
-      .. " relative_root="
-      .. tostring(watchman_relative_root)
-  )
-  if watchman_clock then
-    return
-  end
-
-  local clock_output = vim.fn.system({
-    "watchman",
-    "--output-encoding=json",
-    "--no-pretty",
-    "clock",
-    watchman_watch_root,
-  })
-
-  if vim.v.shell_error ~= 0 then
-    persisted.follow_enabled = false
-    stop_watchman_follow()
-    vim.schedule(function()
-      vim.notify("file-change-fx watchman clock failed: " .. tostring(clock_output), vim.log.levels.ERROR, {
-        title = "FileChangeFollow",
-      })
-    end)
-    return
-  end
-
-  push_watchman_debug("watchman clock raw response: " .. tostring(clock_output))
-
-  local clock_ok, clock_response = pcall(vim.json.decode, clock_output)
-  if not clock_ok or type(clock_response) ~= "table" or not clock_response.clock then
-    persisted.follow_enabled = false
-    stop_watchman_follow()
-    vim.schedule(function()
-      vim.notify("file-change-fx got an invalid watchman clock response", vim.log.levels.ERROR, {
-        title = "FileChangeFollow",
-      })
-    end)
-    return
-  end
-
-  watchman_clock = clock_response.clock
-  push_watchman_debug("watchman clock initialized to " .. tostring(watchman_clock))
-
-  local poll_generation = follow_poll_generation + 1
-  follow_poll_generation = poll_generation
-
-  local function poll_watchman_changes()
-    if not is_current_generation() or not is_follow_enabled() or poll_generation ~= follow_poll_generation then
-      return
-    end
-
-    if not watchman_watch_root or not watchman_clock then
-      return
-    end
-
-    local query = {
-      since = watchman_clock,
-      expression = { "allof", { "type", "f" } },
-      fields = { "name", "exists", "type" },
-    }
-    if watchman_relative_root and watchman_relative_root ~= "" then
-      query.relative_root = watchman_relative_root
-    end
-
-    local query_output = vim.fn.system({
-      "watchman",
-      "--server-encoding=json",
-      "--output-encoding=json",
-      "--no-pretty",
-      "-j",
-    }, vim.json.encode({ "query", watchman_watch_root, query }))
-
-    if vim.v.shell_error ~= 0 then
-      push_watchman_debug("watchman query failed: " .. tostring(query_output), vim.log.levels.WARN)
-    else
-      push_watchman_debug("watchman query raw response: " .. tostring(query_output))
-      local query_ok, query_response = pcall(vim.json.decode, query_output)
-      if query_ok and type(query_response) == "table" then
-        if query_response.error then
-          push_watchman_debug("watchman query error: " .. tostring(query_response.error), vim.log.levels.WARN)
-        else
-          if query_response.clock then
-            watchman_clock = query_response.clock
-          end
-
-          local base_dir = watchman_base_dir()
-          if type(query_response.files) == "table" and base_dir then
-            for _, file in ipairs(query_response.files) do
-              if type(file) == "table" and file.exists ~= false and (file.type == nil or file.type == "f") then
-                local name = file.name
-                if type(name) == "string" and name ~= "" then
-                  local path = normalize_path(vim.fs.joinpath(base_dir, name))
-                  push_watchman_debug("watchman event file=" .. name .. " resolved=" .. tostring(path))
-                  local suppress_until = recent_manual_writes[path]
-                  if not (suppress_until and suppress_until > uv.now()) then
-                    handle_follow_change(path)
-                  else
-                    push_watchman_debug("suppressed recent manual write for " .. path)
-                  end
-                end
-              end
-            end
-          end
-        end
-      else
-        push_watchman_debug("failed to decode watchman query response", vim.log.levels.WARN)
-      end
-    end
-
-    vim.defer_fn(poll_watchman_changes, math.max(config.watch_debounce_ms * 4, 250))
-  end
-
-  vim.defer_fn(poll_watchman_changes, math.max(config.watch_debounce_ms * 4, 250))
 end
 
 local function stop_watcher(path)
@@ -1617,8 +1682,6 @@ local function refresh_watchers()
       stop_watcher(path)
     end
   end
-
-  refresh_follow_scan()
 end
 
 vim.api.nvim_create_autocmd({
@@ -1634,7 +1697,7 @@ vim.api.nvim_create_autocmd({
   group = group,
   callback = function(args)
     if args.event == "DirChanged" then
-      stop_watchman_follow()
+      push_follow_debug("working directory changed to " .. tostring(normalize_path(vim.fn.getcwd())))
     end
     refresh_watchers()
   end,
@@ -1695,9 +1758,7 @@ vim.api.nvim_create_autocmd("BufDelete", {
 
 vim.api.nvim_create_autocmd("VimLeavePre", {
   group = group,
-  callback = function()
-    stop_watchman_follow()
-  end,
+  callback = function() end,
 })
 
 vim.api.nvim_create_autocmd("BufWritePre", {
@@ -1763,7 +1824,6 @@ vim.api.nvim_create_user_command("FileChangeFxToggle", function()
 
   if not persisted.enabled then
     disable_all_effects()
-    stop_watchman_follow()
   end
 
   local status = persisted.enabled and "enabled" or "disabled"
@@ -1771,37 +1831,25 @@ vim.api.nvim_create_user_command("FileChangeFxToggle", function()
 end, {})
 
 vim.api.nvim_create_user_command("FileChangeFollow", function()
-  local enable = not is_follow_enabled()
-  if enable and vim.fn.executable("watchman") ~= 1 then
-    vim.notify("FileChangeFollow requires watchman to be installed", vim.log.levels.ERROR, {
-      title = "FileChangeFollow",
-    })
-    return
-  end
-
-  persisted.follow_enabled = enable
-  refresh_follow_scan()
+  persisted.follow_enabled = not is_follow_enabled()
 
   local status = persisted.follow_enabled and "enabled" or "disabled"
   vim.notify("file-change-fx follow " .. status, vim.log.levels.INFO, { title = "FileChangeFollow" })
 end, {})
 
 vim.api.nvim_create_user_command("FileChangeFollowInfo", function()
-  local running = persisted.follow_enabled == true and watchman_clock ~= nil
   local lines = {
     string.format("follow_enabled=%s", persisted.follow_enabled == true and "yes" or "no"),
-    string.format("watchman_running=%s", running and "yes" or "no"),
     string.format("cwd=%s", normalize_path(vim.fn.getcwd()) or "(none)"),
-    string.format("watch_root=%s", watchman_watch_root or "(none)"),
-    string.format("relative_root=%s", watchman_relative_root or "(none)"),
-    string.format("clock=%s", watchman_clock or "(none)"),
+    string.format("naia_tool=%s", follow_tool_name),
+    "mode=agent_reported_hunks",
   }
 
   vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO, { title = "FileChangeFollowInfo" })
 end, {})
 
 vim.api.nvim_create_user_command("FileChangeFollowDebug", function()
-  persisted.follow_debug = not watchman_debug_enabled()
+  persisted.follow_debug = not follow_debug_enabled()
   local status = persisted.follow_debug and "enabled" or "disabled"
   vim.notify("file-change-fx follow debug " .. status, vim.log.levels.INFO, {
     title = "FileChangeFollowDebug",
@@ -1809,7 +1857,7 @@ vim.api.nvim_create_user_command("FileChangeFollowDebug", function()
 end, {})
 
 vim.api.nvim_create_user_command("FileChangeFollowDebugLog", function()
-  local lines = vim.deepcopy(watchman_debug_log)
+  local lines = vim.deepcopy(follow_debug_log)
   if #lines == 0 then
     lines = { "(no follow debug entries yet)" }
   end
@@ -1857,4 +1905,6 @@ end, {
   desc = "Play the file-change-fx glitch sound for the given duration in seconds",
 })
 
+register_follow_naia_tool()
+vim.schedule(register_follow_naia_tool)
 vim.schedule(refresh_watchers)

@@ -1,6 +1,6 @@
 local naia_tool_names = {
   inform_user = "inform_user",
-  execute_user_command = "execute_user_command",
+  execute_neovim_command = "execute_neovim_command",
 }
 
 _G.__naia_command_permissions = _G.__naia_command_permissions or {
@@ -161,7 +161,7 @@ local function naia_execute_user_command(args)
 
   command_line = vim.trim(command_line)
   if command_line == "" then
-    error("execute_user_command requires a non-empty command")
+    error("execute_neovim_command requires a non-empty command")
   end
 
   command_line = normalize_command_line(command_line)
@@ -252,7 +252,7 @@ local function register_naia_tools()
     notify_naia_tool_registration_error(naia_tool_names.inform_user, inform_err)
   end
 
-  local command_registered, command_err = naia.register_tool(naia_tool_names.execute_user_command, {
+  local command_registered, command_err = naia.register_tool(naia_tool_names.execute_neovim_command, {
     title = "Execute Neovim Command",
     description = "Run any Neovim Ex command, if successful it will return its output.",
     input_schema = {
@@ -270,8 +270,9 @@ local function register_naia_tools()
   })
 
   if not command_registered then
-    notify_naia_tool_registration_error(naia_tool_names.execute_user_command, command_err)
+    notify_naia_tool_registration_error(naia_tool_names.execute_neovim_command, command_err)
   end
 end
 
 register_naia_tools()
+vim.schedule(register_naia_tools)

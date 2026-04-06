@@ -2498,8 +2498,6 @@ local function register_naia_walkthrough_tools()
     description = "Use this before inserting extra walkthrough steps when you need to know the current walkthrough step and its id. This returns only the active step context so you can choose the right parent step for `ai_walkthrough_insert_steps`.",
     input_schema = {
       type = "object",
-      properties = vim.empty_dict(),
-      additionalProperties = false,
     },
     callback = function()
       local payload, err = build_walkthrough_context_payload()
@@ -2578,6 +2576,7 @@ end
 
 set_walkthrough_highlight()
 register_naia_walkthrough_tools()
+vim.schedule(register_naia_walkthrough_tools)
 
 create_or_replace_user_command("AIWalkStop", function()
   stop_walkthrough({
