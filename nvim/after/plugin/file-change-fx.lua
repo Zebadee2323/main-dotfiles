@@ -4,6 +4,9 @@ local config = vim.tbl_deep_extend("force", {
   frames = 20,
   frame_delay_ms = 33,
   watch_debounce_ms = 80,
+  trigger_on_save = true,
+  trigger_on_external_change = false,
+  trigger_on_ai_report = false,
   charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{};:,.<>/?\\|",
   sound_enabled = true,
   sound_volume = 1.0,
@@ -61,7 +64,15 @@ persisted.group = group
 if persisted.enabled == nil then
   persisted.enabled = vim.g.file_change_fx_enabled ~= false
 end
-persisted.follow_enabled = false
+if persisted.trigger_on_save == nil then
+  persisted.trigger_on_save = config.trigger_on_save ~= false
+end
+if persisted.trigger_on_external_change == nil then
+  persisted.trigger_on_external_change = config.trigger_on_external_change == true
+end
+if persisted.trigger_on_ai_report == nil then
+  persisted.trigger_on_ai_report = config.trigger_on_ai_report == true
+end
 
 vim.opt.autoread = true
 
@@ -92,8 +103,16 @@ local function is_fx_enabled()
   return _G.__file_change_fx_state and _G.__file_change_fx_state.enabled ~= false
 end
 
-local function is_follow_enabled()
-  return _G.__file_change_fx_state and _G.__file_change_fx_state.follow_enabled == true
+local function is_save_trigger_enabled()
+  return _G.__file_change_fx_state and _G.__file_change_fx_state.trigger_on_save ~= false
+end
+
+local function is_external_change_trigger_enabled()
+  return _G.__file_change_fx_state and _G.__file_change_fx_state.trigger_on_external_change == true
+end
+
+local function is_ai_report_trigger_enabled()
+  return _G.__file_change_fx_state and _G.__file_change_fx_state.trigger_on_ai_report == true
 end
 
 local function follow_debug_enabled()
@@ -145,7 +164,7 @@ local function push_follow_debug(message, level)
 
   if follow_debug_enabled() then
     vim.schedule(function()
-      vim.notify(entry, level or vim.log.levels.INFO, { title = "FileChangeFollowDebug" })
+      vim.notify(entry, level or vim.log.levels.INFO, { title = "FileChangeFxDebug" })
     end)
   end
 end
@@ -397,6 +416,14 @@ local function is_buf_visible_in_current_tab(bufnr)
   end
 
   return false
+end
+
+local function is_buf_visible_in_any_window(bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return false
+  end
+
+  return vim.fn.bufwinid(bufnr) ~= -1
 end
 
 local function get_target_win(bufnr)
@@ -1051,52 +1078,56 @@ local function start_prebuilt_effect(bufnr, effect, opts)
 end
 
 local function load_buffer_for_reported_follow(path)
+  if vim.fn.filereadable(path) ~= 1 then
+    push_follow_debug("skipping reported follow for missing file: " .. tostring(path), vim.log.levels.WARN)
+    return nil, nil
+  end
+
   local bufnr = vim.fn.bufnr(path)
 
   if bufnr > 0 and vim.api.nvim_buf_is_valid(bufnr) then
     if vim.bo[bufnr].buftype ~= "" then
       push_follow_debug("existing buffer is not a normal file buffer: " .. tostring(path), vim.log.levels.WARN)
-      return nil
+      return nil, nil
     end
 
     if vim.bo[bufnr].modified then
       push_follow_debug("skipping modified buffer for reported follow: " .. tostring(path), vim.log.levels.WARN)
-      return nil
+      return nil, nil
     end
   else
     bufnr = vim.fn.bufadd(path)
     if bufnr <= 0 then
-      return nil
+      return nil, nil
     end
   end
 
-  local readable = vim.fn.filereadable(path) == 1
-  if readable then
-    vim.fn.bufload(bufnr)
-  end
+  vim.fn.bufload(bufnr)
 
   local win = open_buffer_in_best_window(bufnr)
   if not win then
-    return nil
+    return nil, nil
   end
 
-  if readable then
-    reload_buffer_preserving_view(bufnr)
-  end
+  reload_buffer_preserving_view(bufnr)
 
-  return bufnr
+  return bufnr, win
 end
 
 local function play_reported_follow_change(path, hunks)
   push_follow_debug("handling reported follow change for " .. tostring(path))
 
-  local bufnr = load_buffer_for_reported_follow(path)
+  local center_line = choose_reported_hunk_center(hunks)
+  local bufnr, win = load_buffer_for_reported_follow(path)
   if not bufnr then
     push_follow_debug("could not load/open buffer for reported change: " .. tostring(path), vim.log.levels.WARN)
     return false, "Could not load buffer for " .. tostring(path)
   end
 
-  local center_line = choose_reported_hunk_center(hunks)
+  if win and vim.api.nvim_win_is_valid(win) then
+    center_on_line(bufnr, center_line)
+  end
+
   local effect = build_reported_window_state(bufnr, hunks, center_line)
 
   if not next(effect.line_states or {}) then
@@ -1518,9 +1549,18 @@ local function naia_report_file_edits(args)
     error("report_file_edits requires at least one valid hunk")
   end
 
-  if not is_follow_enabled() then
-    push_follow_debug("ignored reported file edits while follow mode is disabled: " .. path)
-    return "FileChangeFollow is disabled"
+  if not is_ai_report_trigger_enabled() then
+    push_follow_debug("ignored reported file edits while AI report trigger is disabled: " .. path)
+    return ""
+  end
+
+  local visible_bufnr = vim.fn.bufnr(path)
+  if is_external_change_trigger_enabled()
+    and visible_bufnr > 0
+    and is_buf_visible_in_any_window(visible_bufnr)
+  then
+    push_follow_debug("deferring AI-reported edit to external-change flow for visible buffer: " .. path)
+    return ""
   end
 
   local ok, started, err = pcall(function()
@@ -1532,10 +1572,10 @@ local function naia_report_file_edits(args)
   end
 
   if not started then
-    return err or ("Could not play file-change effect for " .. path)
+    return ""
   end
 
-  return string.format("Played file-change follow effect for %s (%d hunks)", path, #hunks)
+  return ""
 end
 
 local function register_follow_naia_tool()
@@ -1671,6 +1711,13 @@ local function refresh_watchers()
     return
   end
 
+  if not is_external_change_trigger_enabled() then
+    for path in pairs(watchers) do
+      stop_watcher(path)
+    end
+    return
+  end
+
   local needed = {}
   for _, item in ipairs(current_tab_visible_file_bufs()) do
     needed[item.path] = item.bufnr
@@ -1733,7 +1780,7 @@ vim.api.nvim_create_autocmd("FileChangedShellPost", {
       return
     end
 
-    if not is_fx_enabled() then
+    if not is_fx_enabled() or not is_external_change_trigger_enabled() then
       vim.schedule(refresh_watchers)
       return
     end
@@ -1799,6 +1846,7 @@ vim.api.nvim_create_autocmd("BufWritePost", {
 
     if not old_lines
       or not is_fx_enabled()
+      or not is_save_trigger_enabled()
       or not vim.api.nvim_buf_is_valid(args.buf)
       or not is_buf_visible_in_current_tab(args.buf)
       or vim.bo[args.buf].buftype ~= ""
@@ -1830,39 +1878,31 @@ vim.api.nvim_create_user_command("FileChangeFxToggle", function()
   vim.notify("file-change-fx " .. status, vim.log.levels.INFO, { title = "FileChangeFxToggle" })
 end, {})
 
-vim.api.nvim_create_user_command("FileChangeFollow", function()
-  persisted.follow_enabled = not is_follow_enabled()
+vim.api.nvim_create_user_command("FileChangeFxToggleOnSave", function()
+  persisted.trigger_on_save = not is_save_trigger_enabled()
 
-  local status = persisted.follow_enabled and "enabled" or "disabled"
-  vim.notify("file-change-fx follow " .. status, vim.log.levels.INFO, { title = "FileChangeFollow" })
-end, {})
-
-vim.api.nvim_create_user_command("FileChangeFollowInfo", function()
-  local lines = {
-    string.format("follow_enabled=%s", persisted.follow_enabled == true and "yes" or "no"),
-    string.format("cwd=%s", normalize_path(vim.fn.getcwd()) or "(none)"),
-    string.format("naia_tool=%s", follow_tool_name),
-    "mode=agent_reported_hunks",
-  }
-
-  vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO, { title = "FileChangeFollowInfo" })
-end, {})
-
-vim.api.nvim_create_user_command("FileChangeFollowDebug", function()
-  persisted.follow_debug = not follow_debug_enabled()
-  local status = persisted.follow_debug and "enabled" or "disabled"
-  vim.notify("file-change-fx follow debug " .. status, vim.log.levels.INFO, {
-    title = "FileChangeFollowDebug",
+  local status = persisted.trigger_on_save and "enabled" or "disabled"
+  vim.notify("file-change-fx on-save trigger " .. status, vim.log.levels.INFO, {
+    title = "FileChangeFxToggleOnSave",
   })
 end, {})
 
-vim.api.nvim_create_user_command("FileChangeFollowDebugLog", function()
-  local lines = vim.deepcopy(follow_debug_log)
-  if #lines == 0 then
-    lines = { "(no follow debug entries yet)" }
-  end
-  vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO, {
-    title = "FileChangeFollowDebugLog",
+vim.api.nvim_create_user_command("FileChangeFxToggleOnExternalChange", function()
+  persisted.trigger_on_external_change = not is_external_change_trigger_enabled()
+  vim.schedule(refresh_watchers)
+
+  local status = persisted.trigger_on_external_change and "enabled" or "disabled"
+  vim.notify("file-change-fx external-change trigger " .. status, vim.log.levels.INFO, {
+    title = "FileChangeFxToggleOnExternalChange",
+  })
+end, {})
+
+vim.api.nvim_create_user_command("FileChangeFxToggleOnAiReport", function()
+  persisted.trigger_on_ai_report = not is_ai_report_trigger_enabled()
+
+  local status = persisted.trigger_on_ai_report and "enabled" or "disabled"
+  vim.notify("file-change-fx AI-report trigger " .. status, vim.log.levels.INFO, {
+    title = "FileChangeFxToggleOnAiReport",
   })
 end, {})
 
