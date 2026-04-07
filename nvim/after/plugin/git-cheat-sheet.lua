@@ -193,6 +193,7 @@ vim.api.nvim_create_user_command("GitCheatSheet", function()
     "git stash -u                                          # include untracked",
     "git stash -a                                          # include ignored too (rare)",
     "git stash push -m \"msg\"                             # named stash",
+    "git stash push --staged -m \"msg\"                    # stash staged changes with message",
     "git stash list",
     "git stash show -p stash@{0}                           # patch view",
     "git stash apply stash@{0}",
