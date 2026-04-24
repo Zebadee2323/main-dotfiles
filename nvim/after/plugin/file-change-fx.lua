@@ -1945,6 +1945,6 @@ end, {
   desc = "Play the file-change-fx glitch sound for the given duration in seconds",
 })
 
-register_follow_naia_tool()
-vim.schedule(register_follow_naia_tool)
+-- register_follow_naia_tool()
+-- vim.schedule(register_follow_naia_tool)
 vim.schedule(refresh_watchers)
