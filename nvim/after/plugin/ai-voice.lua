@@ -9,6 +9,10 @@ local piper_noise_w = 0.2
 local piper_sentence_silence = 0.5
 local ai_voice_volume = tonumber(vim.g.ai_voice_volume) or 1.0
 local ai_voice_robot_mode = true
+local python_host_prog = vim.g.python3_host_prog
+if type(python_host_prog) ~= "string" or python_host_prog == "" then
+  python_host_prog = "python3"
+end
 local robot_voice_filter = table.concat({
   -- split into 4 parallel signals: dry, body, ai, extra_chorus
   "asplit=4[dry][d1][d2][d3]",
@@ -300,7 +304,7 @@ ai_voice_speak = function(message, opts)
   ensure_ai_voice_audio_dir()
 
   local cmd = {
-    "python3",
+    python_host_prog,
     "-m",
     "piper",
     "-m",
@@ -416,7 +420,7 @@ create_or_replace_user_command("AIVoiceInstall", function()
 
   local output = {}
   local job_id = vim.fn.jobstart({
-    "python3",
+    python_host_prog,
     "-m",
     "piper.download_voices",
     "--download-dir",
