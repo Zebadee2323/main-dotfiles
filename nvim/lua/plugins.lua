@@ -34,7 +34,7 @@ return require('packer').startup(function(use)
     use 'folke/sidekick.nvim'
     use 'olimorris/codecompanion.nvim'
     use({
-        "/Users/onelson/Development/nvim-naia/",
+        "~/dev/naia.nvim/",
         config = function()
             require("naia").setup()
         end,
