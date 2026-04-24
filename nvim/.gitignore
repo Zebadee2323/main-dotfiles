@@ -1,6 +1,5 @@
 /plugin/*
 **/__pycache__/**
-
 .nvimlog
-
+.codex
 nvim.log
