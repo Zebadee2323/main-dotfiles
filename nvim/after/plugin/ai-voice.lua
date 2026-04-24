@@ -199,7 +199,17 @@ local function toggle_ai_voice_robot_mode()
 end
 
 local function start_audio_playback(wav_path, request_id)
-  local play_job = vim.fn.jobstart({ "afplay", "-v", tostring(ai_voice_volume), wav_path }, {
+  local ffplay_volume = math.floor(ai_voice_volume * 100)
+  local play_job = vim.fn.jobstart({
+    "ffplay",
+    "-nodisp",
+    "-autoexit",
+    "-loglevel",
+    "error",
+    "-volume",
+    tostring(ffplay_volume),
+    wav_path,
+  }, {
     on_exit = function()
       set_voice_playback_active(false, { request_id = request_id })
 
@@ -211,7 +221,7 @@ local function start_audio_playback(wav_path, request_id)
   })
 
   if play_job <= 0 then
-    vim.notify("Generated audio at " .. wav_path .. " but failed to start afplay", vim.log.levels.WARN)
+    vim.notify("Generated audio at " .. wav_path .. " but failed to start ffplay", vim.log.levels.WARN)
     maybe_start_queued_speech()
     return
   end
