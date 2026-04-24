@@ -5,6 +5,8 @@ local themes = require('telescope.themes')
 
 ts.setup {
     defaults = {
+        file_sorter = require('telescope.sorters').get_fzf_sorter,
+        generic_sorter = require('telescope.sorters').get_fzf_sorter,
         mappings = {
             n = {
                 ["<C-q><C-w>"] = actions.send_selected_to_qflist + actions.open_qflist,
@@ -19,8 +21,18 @@ ts.setup {
                 ["<C-b>"] = require('telescope.actions').results_scrolling_up,
             }
         }
+    },
+    extensions = {
+        fzf = {
+            fuzzy = true,
+            override_generic_sorter = true,
+            override_file_sorter = true,
+            case_mode = "smart_case",
+        }
     }
 }
+
+pcall(ts.load_extension, 'fzf')
 
 vim.api.nvim_create_autocmd("FileType", {
     pattern = { "TelescopeResults" },
