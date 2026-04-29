@@ -93,6 +93,20 @@ vim.api.nvim_create_user_command("TrimWhitespace", function()
   vim.notify("Trailing whitespace trimmed", vim.log.levels.INFO)
 end, { desc = "Trim trailing whitespace in current buffer" })
 
+vim.api.nvim_create_user_command("W", "w", { desc = "Write current buffer" })
+
+vim.api.nvim_create_user_command("OpenCurrentFolder", function()
+  local dir = vim.fn.expand("%:p:h")
+
+  if vim.fn.has("mac") == 1 then
+    vim.fn.jobstart({ "open", dir }, { detach = true })
+  elseif vim.fn.has("win32") == 1 then
+    vim.fn.jobstart({ "explorer", dir }, { detach = true })
+  else
+    vim.fn.jobstart({ "xdg-open", dir }, { detach = true })
+  end
+end, { desc = "Open current file folder in system file manager" })
+
 vim.keymap.set("n", "<C-s><C-s><C-s>", vim.cmd.TrimWhitespace)
 
 -- vim.keymap.set('n', 'rn', '<CMD>set relativenumber!<CR>')
@@ -155,6 +169,8 @@ vim.keymap.set('n', '<C-b>', '<Nop>')
 
 vim.api.nvim_create_user_command("T", function(opts)
   vim.cmd("vsplit | terminal " .. (opts.args or ""))
+  vim.opt_local.number = true
+  vim.opt_local.relativenumber = true
   vim.cmd("startinsert")
 end, {
   nargs = "*",
