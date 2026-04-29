@@ -5,7 +5,7 @@ local config = vim.tbl_deep_extend("force", {
   frame_delay_ms = 33,
   watch_debounce_ms = 80,
   trigger_on_save = true,
-  trigger_on_external_change = false,
+  trigger_on_external_change = true,
   trigger_on_ai_report = false,
   charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{};:,.<>/?\\|",
   sound_enabled = true,

@@ -5,8 +5,7 @@ if not vim.g._naia_lsp_zero_client_configured then
     lsp_zero.client_config({
         capabilities = blink_caps,
         on_init = function(client)
-            client.server_capabilities.semanticTokensProvider = nil
-            client.server_capabilities.workspace.didChangeWatchedFiles.dynamicRegistration = false
+            -- client.server_capabilities.workspace.didChangeWatchedFiles.dynamicRegistration = false
         end,
     })
     vim.g._naia_lsp_zero_client_configured = true
