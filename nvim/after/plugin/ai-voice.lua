@@ -7,7 +7,7 @@ local piper_length_scale = 1.0
 local piper_noise_scale = 0.2
 local piper_noise_w = 0.2
 local piper_sentence_silence = 0.5
-local ai_voice_volume = tonumber(vim.g.ai_voice_volume) or 1.0
+local ai_voice_volume = tonumber(vim.g.ai_voice_volume) or 0.4
 local ai_voice_robot_mode = true
 local python_host_prog = vim.g.python3_host_prog
 if type(python_host_prog) ~= "string" or python_host_prog == "" then
