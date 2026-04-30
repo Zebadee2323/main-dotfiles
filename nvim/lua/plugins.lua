@@ -116,6 +116,9 @@ return require('packer').startup(function(use)
     -- Commenting
     use 'tpope/vim-commentary'
 
+    -- Motions
+    use 'justinmk/vim-sneak'
+
     -- Markdown
     use({
         'MeanderingProgrammer/render-markdown.nvim',
