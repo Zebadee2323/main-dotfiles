@@ -24,7 +24,7 @@ blink.setup({
     },
     completion = {
         documentation = { auto_show = true },
-        keyword_length = 0,
+        --keyword_length = 0,
 
         menu = {
             -- just to be explicit; default is true
