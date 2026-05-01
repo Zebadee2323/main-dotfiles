@@ -31,12 +31,26 @@ local function highlight_trailing_whitespace()
         return
     end
 
+    if vim.fn.mode() ~= "n" then
+        return
+    end
+
     vim.w.trailing_whitespace_match_id = vim.fn.matchadd("UglyTrailingWhitespace", [[\s\+$]])
 end
 
-vim.api.nvim_create_autocmd({ "BufWinEnter", "WinEnter", "ColorScheme" }, {
+vim.api.nvim_create_autocmd({ "BufWinEnter", "WinEnter", "ColorScheme", "InsertLeave", "ModeChanged" }, {
     group = trailing_whitespace_group,
     callback = highlight_trailing_whitespace,
+})
+
+vim.api.nvim_create_autocmd({ "InsertEnter" }, {
+    group = trailing_whitespace_group,
+    callback = function()
+        if vim.w.trailing_whitespace_match_id then
+            pcall(vim.fn.matchdelete, vim.w.trailing_whitespace_match_id)
+            vim.w.trailing_whitespace_match_id = nil
+        end
+    end,
 })
 
 local function hex_to_rgb(hex)
