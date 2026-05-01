@@ -17,6 +17,28 @@ vim.api.nvim_set_hl(0, "diffSubname", { fg = "#c4693d" })
 vim.api.nvim_set_hl(0, "LineNr", { fg = "#8a8f98" })
 vim.api.nvim_set_hl(0, "CursorLineNr", { fg = "#8ecbff", bold = true })
 
+vim.api.nvim_set_hl(0, "UglyTrailingWhitespace", { bg = "#ff00a8", fg = "#000000" })
+
+local trailing_whitespace_group = vim.api.nvim_create_augroup("NaiaTrailingWhitespace", { clear = true })
+
+local function highlight_trailing_whitespace()
+    if vim.w.trailing_whitespace_match_id then
+        pcall(vim.fn.matchdelete, vim.w.trailing_whitespace_match_id)
+        vim.w.trailing_whitespace_match_id = nil
+    end
+
+    if vim.bo.buftype ~= "" or not vim.bo.modifiable or vim.bo.readonly then
+        return
+    end
+
+    vim.w.trailing_whitespace_match_id = vim.fn.matchadd("UglyTrailingWhitespace", [[\s\+$]])
+end
+
+vim.api.nvim_create_autocmd({ "BufWinEnter", "WinEnter", "ColorScheme" }, {
+    group = trailing_whitespace_group,
+    callback = highlight_trailing_whitespace,
+})
+
 local function hex_to_rgb(hex)
     hex = hex:gsub("#", "")
     return {
@@ -120,3 +142,4 @@ vim.api.nvim_create_user_command("LightenBackground", function(opts)
 
     print("Background changed → " .. new_hex)
 end, { nargs = 1 })
+
