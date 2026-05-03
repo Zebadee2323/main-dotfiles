@@ -171,6 +171,24 @@ end, {
   desc = "Send git commit staged prompt to Sidekick",
 })
 
+vim.api.nvim_create_user_command("AICommitSkill", function()
+  vim.api.nvim_cmd({
+    cmd = "AIMessage",
+    args = { "Run the git-commit-staged skill." },
+  }, {})
+end, {
+  desc = "Send git commit staged prompt to Sidekick",
+})
+
+vim.api.nvim_create_user_command("AICommitSkillAuto", function()
+  vim.api.nvim_cmd({
+    cmd = "AIMessage",
+    args = { "Run the git-commit-staged skill, automated." },
+  }, {})
+end, {
+  desc = "Send git commit staged prompt to Sidekick",
+})
+
 -- Copy metadata: file + line or line range to clipboard (line info after a space)
 vim.api.nvim_create_user_command("AICopy", function(opts)
   local msg, body = build_ai_message(vim.tbl_extend("force", opts, {
