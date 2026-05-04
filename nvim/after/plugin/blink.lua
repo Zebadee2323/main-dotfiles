@@ -5,6 +5,10 @@ blink.setup({
         -- This makes Enter confirm the current completion item.
         ['<CR>'] = { 'accept', 'fallback' },
     },
+    term = {
+        enabled = true,
+        sources = { 'buffer', 'path' },
+    },
     appearance = { nerd_font_variant = 'mono' },
     sources = { 
         default = { 'lsp', 'path', 'snippets', 'buffer' },
