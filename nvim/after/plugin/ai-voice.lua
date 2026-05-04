@@ -1,4 +1,4 @@
-local voice_name = "cori-high"
+local voice_name = "en_GB-northern_english_male-medium"
 local voices_dir = vim.fs.joinpath(vim.fn.stdpath("config"), "after", "ai_voices")
 local ai_voice_audio_dir = vim.fn.stdpath("cache") .. "/ai-voice"
 local raw_wav_path = ai_voice_audio_dir .. "/latest.wav"
