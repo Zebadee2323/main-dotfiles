@@ -6,11 +6,11 @@ blink.setup({
         ['<CR>'] = { 'accept', 'fallback' },
     },
     term = {
-        enabled = true,
+        enabled = false,
         sources = { 'buffer', 'path' },
     },
     appearance = { nerd_font_variant = 'mono' },
-    sources = { 
+    sources = {
         default = { 'lsp', 'path', 'snippets', 'buffer' },
          -- IMPORTANT: extend the LSP source trigger characters
         providers = {
