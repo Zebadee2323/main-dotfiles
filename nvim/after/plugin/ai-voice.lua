@@ -1,4 +1,5 @@
-local voice_name = "en_US-data_7024-medium"
+local default_voice_name = "en_GB-northern_english_male-medium"
+local voice_name = vim.g.ai_voice_name or default_voice_name
 local voices_dir = vim.fs.joinpath(vim.fn.stdpath("config"), "after", "ai_voices")
 local ai_voice_audio_dir = vim.fn.stdpath("cache") .. "/ai-voice"
 local raw_wav_path = ai_voice_audio_dir .. "/latest.wav"
@@ -416,6 +417,67 @@ local function set_ai_voice_volume(volume)
   return true
 end
 
+local function list_ai_voice_names()
+  local names = {}
+
+  if vim.fn.isdirectory(voices_dir) ~= 1 then
+    return names
+  end
+
+  for name, type_ in vim.fs.dir(voices_dir) do
+    if type_ == "file" and name:sub(-5) == ".onnx" then
+      table.insert(names, name:sub(1, -6))
+    end
+  end
+
+  table.sort(names)
+  return names
+end
+
+local function complete_ai_voice_names(arg_lead)
+  local matches = {}
+
+  for _, name in ipairs(list_ai_voice_names()) do
+    if vim.startswith(name, arg_lead) then
+      table.insert(matches, name)
+    end
+  end
+
+  return matches
+end
+
+local function set_ai_voice_name(name)
+  name = vim.trim(name or "")
+  name = name:gsub("%.onnx$", "")
+
+  if name == "" then
+    vim.notify("Current AI voice name: " .. voice_name, vim.log.levels.INFO)
+    return true
+  end
+
+  local available = list_ai_voice_names()
+  local available_lookup = {}
+  for _, available_name in ipairs(available) do
+    available_lookup[available_name] = true
+  end
+
+  if not available_lookup[name] then
+    local message = "AI voice not found: " .. name
+    if #available > 0 then
+      message = message .. "\nAvailable voices: " .. table.concat(available, ", ")
+    else
+      message = message .. "\nNo .onnx voices found in " .. voices_dir
+    end
+    vim.notify(message, vim.log.levels.ERROR)
+    return false
+  end
+
+  voice_name = name
+  vim.g.ai_voice_name = name
+  vim.notify("AI voice name is now " .. voice_name, vim.log.levels.INFO)
+  return true
+end
+
 local function create_or_replace_user_command(name, fn, opts)
   pcall(vim.api.nvim_del_user_command, name)
   vim.api.nvim_create_user_command(name, fn, opts)
@@ -498,6 +560,14 @@ create_or_replace_user_command("AIVoiceVolume", function(opts)
 end, {
   nargs = 1,
   desc = "Set AI voice playback volume",
+})
+
+create_or_replace_user_command("AIVoiceName", function(opts)
+  set_ai_voice_name(opts.args)
+end, {
+  nargs = "?",
+  complete = complete_ai_voice_names,
+  desc = "Set AI voice name from installed .onnx voices",
 })
 
 create_or_replace_user_command("AIVoiceStop", function()
