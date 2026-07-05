@@ -30,7 +30,7 @@ if vim.g.neovide then
     vim.keymap.set("v", "<D-v>", '"+P', { desc = "Paste from system clipboard" })
     vim.keymap.set("c", "<D-v>", "<C-r>+", { desc = "Paste in command-line" })
     vim.keymap.set("i", "<D-v>", '<C-r><C-o>+', { desc = "Paste in insert mode" })
-    vim.keymap.set("t", "<D-v>", '<C-\\><C-n>"+pa', { desc = "Paste in terminal mode" })
+    vim.keymap.set("t", "<D-v>", "<C-v>", { desc = "Pass paste to terminal" })
 
     -- Windows/Linux-style (Ctrl)
     vim.keymap.set({ "n", "v" }, "<C-S-c>", '"+y', { desc = "Copy to system clipboard" })
@@ -38,5 +38,5 @@ if vim.g.neovide then
     vim.keymap.set("v", "<C-S-v>", '"+P', { desc = "Paste from system clipboard" })
     vim.keymap.set("c", "<C-S-v>", "<C-r>+", { desc = "Paste in command-line" })
     vim.keymap.set("i", "<C-S-v>", '<C-r><C-o>+', { desc = "Paste in insert mode" })
-    vim.keymap.set("t", "<C-S-v>", '<C-\\><C-n>"+pa', { desc = "Paste in terminal mode" })
+    vim.keymap.set("t", "<C-S-v>", "<C-v>", { desc = "Pass paste to terminal" })
 end

@@ -3,11 +3,19 @@ local voice_name = vim.g.ai_voice_name or default_voice_name
 local voices_dir = vim.fs.joinpath(vim.fn.stdpath("config"), "after", "ai_voices")
 local ai_voice_audio_dir = vim.fn.stdpath("cache") .. "/ai-voice"
 local raw_wav_path = ai_voice_audio_dir .. "/latest.wav"
+local raw_elevenlabs_audio_path = ai_voice_audio_dir .. "/latest-elevenlabs.mp3"
 local processed_wav_path = ai_voice_audio_dir .. "/latest-robot.wav"
+local default_ai_voice_tts_mode = "eleven"
+local ai_voice_tts_mode = vim.g.ai_voice_tts_mode or default_ai_voice_tts_mode
 local piper_length_scale = 1.0
 local piper_noise_scale = 0.2
 local piper_noise_w = 0.2
 local piper_sentence_silence = 0.5
+local default_elevenlabs_voice_id = "dXWjcPDq3Hgou49vpJPY"
+local elevenlabs_api_key_env_var = vim.g.ai_voice_elevenlabs_api_key_env_var or "ELEVENLABS_API_KEY"
+local elevenlabs_voice_id = vim.g.ai_voice_elevenlabs_voice_id or default_elevenlabs_voice_id
+local elevenlabs_model_id = vim.g.ai_voice_elevenlabs_model_id or "eleven_turbo_v2_5"
+local elevenlabs_output_format = vim.g.ai_voice_elevenlabs_output_format or "mp3_44100_128"
 local ai_voice_volume = tonumber(vim.g.ai_voice_volume) or 0.4
 local ai_voice_robot_mode = true
 local python_host_prog = vim.g.python3_host_prog
@@ -84,6 +92,47 @@ local function collect_lines(target, data)
     end
   end
 end
+
+local function json_encode(value)
+  if vim.json and vim.json.encode then
+    return vim.json.encode(value)
+  end
+
+  return vim.fn.json_encode(value)
+end
+
+local function shell_config_quote(value)
+  value = tostring(value or "")
+  value = value:gsub("\\", "\\\\"):gsub('"', '\\"')
+  return '"' .. value .. '"'
+end
+
+local function url_encode(value)
+  return tostring(value or ""):gsub("([^%w%-%._~])", function(char)
+    return string.format("%%%02X", string.byte(char))
+  end)
+end
+
+local function normalize_ai_voice_tts_mode(mode)
+  mode = vim.trim(tostring(mode or "")):lower()
+
+  if mode == "" then
+    return ai_voice_tts_mode
+  end
+
+  if mode == "eleven" or mode == "elevenlabs" or mode == "11labs" then
+    return "elevenlabs"
+  end
+
+  if mode == "piper" then
+    return "piper"
+  end
+
+  return nil
+end
+
+ai_voice_tts_mode = normalize_ai_voice_tts_mode(ai_voice_tts_mode) or default_ai_voice_tts_mode
+vim.g.ai_voice_tts_mode = ai_voice_tts_mode
 
 local function fire_user_event(pattern, data)
   vim.schedule(function()
@@ -199,6 +248,48 @@ local function toggle_ai_voice_robot_mode()
   set_ai_voice_robot_mode(not ai_voice_robot_mode)
 end
 
+local function set_ai_voice_tts_mode(mode)
+  local normalized_mode = normalize_ai_voice_tts_mode(mode)
+
+  if not normalized_mode then
+    vim.notify("AI voice mode must be one of: piper, elevenlabs", vim.log.levels.ERROR)
+    return false
+  end
+
+  ai_voice_tts_mode = normalized_mode
+  vim.g.ai_voice_tts_mode = normalized_mode
+  vim.notify("AI voice TTS mode is now " .. normalized_mode, vim.log.levels.INFO)
+  return true
+end
+
+local function set_elevenlabs_voice_id(voice_id)
+  voice_id = vim.trim(voice_id or "")
+
+  if voice_id == "" then
+    vim.notify("Current ElevenLabs voice ID: " .. elevenlabs_voice_id, vim.log.levels.INFO)
+    return true
+  end
+
+  elevenlabs_voice_id = voice_id
+  vim.g.ai_voice_elevenlabs_voice_id = voice_id
+  vim.notify("ElevenLabs voice ID is now " .. voice_id, vim.log.levels.INFO)
+  return true
+end
+
+local function set_elevenlabs_model_id(model_id)
+  model_id = vim.trim(model_id or "")
+
+  if model_id == "" then
+    vim.notify("Current ElevenLabs model ID: " .. elevenlabs_model_id, vim.log.levels.INFO)
+    return true
+  end
+
+  elevenlabs_model_id = model_id
+  vim.g.ai_voice_elevenlabs_model_id = model_id
+  vim.notify("ElevenLabs model ID is now " .. model_id, vim.log.levels.INFO)
+  return true
+end
+
 local function start_audio_playback(wav_path, request_id)
   local ffplay_volume = math.floor(ai_voice_volume * 100)
   local play_job = vim.fn.jobstart({
@@ -289,31 +380,7 @@ local function maybe_apply_robot_effects(wav_path, request_id)
   current_effect_job = effect_job
 end
 
-ai_voice_speak = function(message, opts)
-  if not ai_voice_enabled then
-    return false
-  end
-
-  message = vim.trim(message or "")
-  if message == "" then
-    vim.notify("AIVoice requires a message", vim.log.levels.ERROR)
-    return
-  end
-
-  last_spoken_message = message
-
-  local request_id = opts and opts.request_id
-
-  if not request_id and not (opts and opts.keep_queue) then
-    clear_speech_queue()
-  end
-
-  if not request_id then
-    request_id = prepare_speech_request()
-  end
-
-  ensure_ai_voice_audio_dir()
-
+local function synthesize_with_piper(message, request_id)
   local cmd = {
     python_host_prog,
     "-m",
@@ -363,12 +430,149 @@ ai_voice_speak = function(message, opts)
   if job_id <= 0 then
     vim.notify("Failed to start piper", vim.log.levels.ERROR)
     maybe_start_queued_speech()
-    return
+    return false
   end
 
   current_tts_job = job_id
   vim.fn.chansend(job_id, message .. "\n")
   vim.fn.chanclose(job_id, "stdin")
+  return true
+end
+
+local function synthesize_with_elevenlabs(message, request_id)
+  if vim.fn.executable("curl") ~= 1 then
+    vim.notify("ElevenLabs voice mode requires curl", vim.log.levels.ERROR)
+    maybe_start_queued_speech()
+    return false
+  end
+
+  local api_key = vim.env[elevenlabs_api_key_env_var]
+  if not api_key or api_key == "" then
+    vim.notify("ElevenLabs voice mode requires $" .. elevenlabs_api_key_env_var, vim.log.levels.ERROR)
+    maybe_start_queued_speech()
+    return false
+  end
+
+  local payload = {
+    text = message,
+    model_id = elevenlabs_model_id,
+  }
+
+  if type(vim.g.ai_voice_elevenlabs_voice_settings) == "table" then
+    payload.voice_settings = vim.g.ai_voice_elevenlabs_voice_settings
+  end
+
+  local ok, encoded_payload = pcall(json_encode, payload)
+  if not ok then
+    vim.notify("Failed to encode ElevenLabs request: " .. tostring(encoded_payload), vim.log.levels.ERROR)
+    maybe_start_queued_speech()
+    return false
+  end
+
+  local payload_path = ai_voice_audio_dir .. "/latest-elevenlabs-payload.json"
+  local write_ok, write_err = pcall(vim.fn.writefile, { encoded_payload }, payload_path, "b")
+  if not write_ok or write_err ~= 0 then
+    vim.notify("Failed to write ElevenLabs request payload", vim.log.levels.ERROR)
+    maybe_start_queued_speech()
+    return false
+  end
+
+  local url = "https://api.elevenlabs.io/v1/text-to-speech/"
+    .. url_encode(elevenlabs_voice_id)
+    .. "/stream?output_format="
+    .. url_encode(elevenlabs_output_format)
+
+  pcall(vim.fn.delete, raw_elevenlabs_audio_path)
+
+  local stderr = {}
+  local job_id = vim.fn.jobstart({
+    "curl",
+    "--fail-with-body",
+    "--silent",
+    "--show-error",
+    "--location",
+    "--request",
+    "POST",
+    url,
+    "--header",
+    "Content-Type: application/json",
+    "--data-binary",
+    "@" .. payload_path,
+    "--output",
+    raw_elevenlabs_audio_path,
+    "--config",
+    "-",
+  }, {
+    stderr_buffered = true,
+    on_stderr = function(_, data)
+      collect_lines(stderr, data)
+    end,
+    on_exit = function(_, code)
+      vim.schedule(function()
+        if speech_request_id ~= request_id then
+          return
+        end
+
+        current_tts_job = nil
+
+        if code ~= 0 then
+          local msg = #stderr > 0 and table.concat(stderr, "\n") or ("curl exited with code " .. code)
+          local read_ok, error_body = pcall(vim.fn.readfile, raw_elevenlabs_audio_path, "", 8)
+          if read_ok and #error_body > 0 then
+            msg = msg .. "\n" .. table.concat(error_body, "\n")
+          end
+          vim.notify("ElevenLabs TTS failed:\n" .. msg, vim.log.levels.ERROR)
+          maybe_start_queued_speech()
+          return
+        end
+
+        maybe_apply_robot_effects(raw_elevenlabs_audio_path, request_id)
+      end)
+    end,
+  })
+
+  if job_id <= 0 then
+    vim.notify("Failed to start ElevenLabs TTS request", vim.log.levels.ERROR)
+    maybe_start_queued_speech()
+    return false
+  end
+
+  current_tts_job = job_id
+  vim.fn.chansend(job_id, "header = " .. shell_config_quote("xi-api-key: " .. api_key) .. "\n")
+  vim.fn.chanclose(job_id, "stdin")
+  return true
+end
+
+ai_voice_speak = function(message, opts)
+  if not ai_voice_enabled then
+    return false
+  end
+
+  message = vim.trim(message or "")
+  if message == "" then
+    vim.notify("AIVoice requires a message", vim.log.levels.ERROR)
+    return
+  end
+
+  last_spoken_message = message
+
+  local request_id = opts and opts.request_id
+
+  if not request_id and not (opts and opts.keep_queue) then
+    clear_speech_queue()
+  end
+
+  if not request_id then
+    request_id = prepare_speech_request()
+  end
+
+  ensure_ai_voice_audio_dir()
+
+  if ai_voice_tts_mode == "elevenlabs" then
+    return synthesize_with_elevenlabs(message, request_id)
+  end
+
+  return synthesize_with_piper(message, request_id)
 end
 
 queue_ai_voice_speak = function(message, opts)
@@ -440,6 +644,18 @@ local function complete_ai_voice_names(arg_lead)
   for _, name in ipairs(list_ai_voice_names()) do
     if vim.startswith(name, arg_lead) then
       table.insert(matches, name)
+    end
+  end
+
+  return matches
+end
+
+local function complete_ai_voice_tts_modes(arg_lead)
+  local matches = {}
+
+  for _, mode in ipairs({ "piper", "elevenlabs" }) do
+    if vim.startswith(mode, arg_lead) then
+      table.insert(matches, mode)
     end
   end
 
@@ -568,6 +784,45 @@ end, {
   nargs = "?",
   complete = complete_ai_voice_names,
   desc = "Set AI voice name from installed .onnx voices",
+})
+
+create_or_replace_user_command("AIVoiceMode", function(opts)
+  if opts.args == "" then
+    vim.notify("Current AI voice TTS mode: " .. ai_voice_tts_mode, vim.log.levels.INFO)
+    return
+  end
+
+  set_ai_voice_tts_mode(opts.args)
+end, {
+  nargs = "?",
+  complete = complete_ai_voice_tts_modes,
+  desc = "Set AI voice TTS mode: piper or elevenlabs",
+})
+
+create_or_replace_user_command("AIEnableVoicePiper", function()
+  set_ai_voice_tts_mode("piper")
+end, {
+  desc = "Use local piper for AI voice TTS",
+})
+
+create_or_replace_user_command("AIEnableVoiceElevenLabs", function()
+  set_ai_voice_tts_mode("elevenlabs")
+end, {
+  desc = "Use ElevenLabs for AI voice TTS",
+})
+
+create_or_replace_user_command("AIVoiceElevenLabsVoiceId", function(opts)
+  set_elevenlabs_voice_id(opts.args)
+end, {
+  nargs = "?",
+  desc = "Set the ElevenLabs voice ID for AI voice TTS",
+})
+
+create_or_replace_user_command("AIVoiceElevenLabsModel", function(opts)
+  set_elevenlabs_model_id(opts.args)
+end, {
+  nargs = "?",
+  desc = "Set the ElevenLabs model ID for AI voice TTS",
 })
 
 create_or_replace_user_command("AIVoiceStop", function()

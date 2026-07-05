@@ -55,7 +55,7 @@ local unity_library_ignored_dirs = {
     "Library/Artifacts/",
     "Library/Bee/",
     "Library/BurstCache/",
-    "Library/PackageCache/",
+    -- "Library/PackageCache/",
     "Library/ScriptAssemblies/",
     "Library/ShaderCache/",
 }
@@ -93,7 +93,11 @@ vim.keymap.set('n', '<C-p><C-f>', function()
     })
 end)
 vim.keymap.set('n', '<C-p><C-s>', function()
-    builtin.lsp_dynamic_workspace_symbols({ layout_strategy = 'vertical', layout_config = { width = 0.95 }, symbol_width = 60 })
+    builtin.lsp_dynamic_workspace_symbols({
+        layout_strategy = 'vertical',
+        layout_config = { width = 0.95 },
+        symbol_width = 60,
+    })
 end)
 vim.keymap.set('n', '<C-p><C-b>', function() 
     builtin.buffers {

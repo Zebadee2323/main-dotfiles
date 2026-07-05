@@ -20,6 +20,13 @@ require("sidekick").setup({
         continue = { "resume", "--last" },
         url = "https://github.com/openai/codex",
       },
+      claude_naia = {
+        cmd = { sidekick_naia_wrapper, "claude" },
+        is_proc = "\\<claude\\>",
+        continue = { "--continue" },
+        native_scroll = true,
+        url = "https://github.com/anthropics/claude-code",
+      },
     },
   },
 })
@@ -27,7 +34,7 @@ require("sidekick").setup({
 vim.keymap.set('n', '<c-p><c-g>', ':Sidekick cli toggle<CR>')
 
 vim.api.nvim_create_user_command("AI", function()
-  require("sidekick.cli").toggle("codex_naia")
+  require("sidekick.cli").toggle("opencode_naia")
 end, {
   desc = "Open Sidekick with the codex_naia tool",
 })

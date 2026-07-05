@@ -44,11 +44,177 @@ require("roslyn").setup({
     silent = false,
 })
 
+local source_generated_group = vim.api.nvim_create_augroup("NaiaRoslynSourceGenerated", { clear = true })
+
+local function get_preferred_roslyn_clients(bufnr)
+  local ordered = {}
+  local seen = {}
+
+  local function add(client)
+    if not client or client.name ~= "roslyn" or seen[client.id] then
+      return
+    end
+    seen[client.id] = true
+    table.insert(ordered, client)
+  end
+
+  local preferred_client_id = vim.w.roslyn_source_generated_client_id
+  if preferred_client_id then
+    local preferred = vim.lsp.get_client_by_id(preferred_client_id)
+    add(preferred)
+  end
+
+  for _, client in ipairs(vim.lsp.get_clients({ name = "roslyn", bufnr = bufnr })) do
+    add(client)
+  end
+
+  for _, client in ipairs(vim.lsp.get_clients({ name = "roslyn" })) do
+    add(client)
+  end
+
+  return ordered
+end
+
+local function open_source_generated_definition()
+  local bufnr = vim.api.nvim_get_current_buf()
+  local client = vim.lsp.get_clients({ name = "roslyn", bufnr = bufnr })[1]
+  if not client then
+    return vim.lsp.buf.definition()
+  end
+
+  local params = vim.lsp.util.make_position_params(0, client.offset_encoding)
+  client:request("textDocument/definition", params, function(err, result)
+    if err then
+      vim.notify(err.message or tostring(err), vim.log.levels.ERROR)
+      return
+    end
+
+    local locations = vim.islist(result) and result or result and { result } or {}
+    if #locations ~= 1 then
+      return vim.lsp.buf.definition()
+    end
+
+    local location = locations[1]
+    local uri = location.uri or location.targetUri
+    if not uri or not uri:match("^roslyn%-source%-generated://") then
+      return vim.lsp.buf.definition()
+    end
+
+    vim.w.roslyn_source_generated_client_id = client.id
+    vim.lsp.util.show_document(location, client.offset_encoding, { reuse_win = true, focus = true })
+    vim.schedule(function()
+      if vim.w.roslyn_source_generated_client_id == client.id then
+        vim.w.roslyn_source_generated_client_id = nil
+      end
+    end)
+  end, bufnr)
+end
+
 vim.api.nvim_create_autocmd("BufRead", {
   pattern = { "roslyn-source-generated://*" },
   callback = function(ev)
     vim.bo[ev.buf].buftype = "nofile"
     vim.bo[ev.buf].bufhidden = "wipe"
+  end,
+})
+
+-- roslyn.nvim falls back to the first global Roslyn client for source-generated
+-- buffers, which breaks when multiple Roslyn workspaces are alive in one session.
+pcall(vim.api.nvim_clear_autocmds, {
+  group = "roslyn.nvim",
+  event = "BufReadCmd",
+  pattern = "roslyn-source-generated://*",
+})
+
+vim.api.nvim_create_autocmd("BufReadCmd", {
+  group = source_generated_group,
+  pattern = "roslyn-source-generated://*",
+  callback = function(args)
+    vim.bo[args.buf].modifiable = true
+    vim.bo[args.buf].swapfile = false
+    vim.bo[args.buf].filetype = "cs"
+
+    local clients = get_preferred_roslyn_clients(args.buf)
+    local client = clients[1]
+    if client then
+      vim.lsp.buf_attach_client(args.buf, client.id)
+    else
+      vim.wait(5000, function()
+        return next(vim.lsp.get_clients({ name = "roslyn", bufnr = args.buf })) ~= nil
+      end)
+      clients = get_preferred_roslyn_clients(args.buf)
+      client = clients[1]
+    end
+
+    assert(client, "Must have a `roslyn` client to load roslyn source generated file")
+
+    local content
+    local tried = {}
+    local function apply_result(result)
+      content = result.text or ""
+      if content == vim.NIL then
+        content = ""
+      end
+      local normalized = string.gsub(content, "\r\n", "\n")
+      local source_lines = vim.split(normalized, "\n", { plain = true })
+      vim.api.nvim_buf_set_lines(args.buf, 0, -1, false, source_lines)
+      vim.b[args.buf].resultId = result.resultId
+      vim.bo[args.buf].modifiable = false
+      vim.bo[args.buf].modified = false
+    end
+
+    local function request_from(index)
+      local candidate = clients[index]
+      if not candidate then
+        vim.notify(
+          string.format(
+            "No Roslyn client could load source-generated document %s%s",
+            args.match,
+            next(tried) and (": " .. table.concat(tried, " | ")) or ""
+          ),
+          vim.log.levels.ERROR
+        )
+        content = ""
+        vim.bo[args.buf].modifiable = false
+        vim.bo[args.buf].modified = false
+        return
+      end
+
+      vim.lsp.buf_attach_client(args.buf, candidate.id)
+      candidate:request("sourceGeneratedDocument/_roslyn_getText", {
+        textDocument = { uri = args.match },
+        resultId = nil,
+      }, function(err, result)
+        if err then
+          table.insert(tried, string.format("client %d: %s", candidate.id, err.message or vim.inspect(err)))
+          return request_from(index + 1)
+        end
+
+        apply_result(result)
+      end, args.buf)
+    end
+
+    request_from(1)
+
+    vim.wait(1000, function()
+      return content ~= nil
+    end)
+  end,
+})
+
+vim.api.nvim_create_autocmd("LspAttach", {
+  group = source_generated_group,
+  callback = function(args)
+    local client = vim.lsp.get_client_by_id(args.data.client_id)
+    if not client or client.name ~= "roslyn" then
+      return
+    end
+
+    vim.keymap.set("n", "<C-l><C-l>", open_source_generated_definition, {
+      noremap = true,
+      silent = true,
+      buffer = args.buf,
+    })
   end,
 })
 

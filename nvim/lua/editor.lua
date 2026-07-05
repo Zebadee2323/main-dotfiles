@@ -8,6 +8,9 @@ vim.opt.shiftwidth = 4
 vim.opt.autoindent = true
 vim.opt.smartindent = true
 
+vim.o.exrc = true
+vim.o.secure = true
+
 -- NOTE:
 -- 'scroll' must be between 0 and (window height - 1). On Windows (or small terminals),
 -- setting it to 30 at startup can throw: E49: Invalid scroll size.
