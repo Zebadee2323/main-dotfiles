@@ -11,11 +11,15 @@ local piper_length_scale = 1.0
 local piper_noise_scale = 0.2
 local piper_noise_w = 0.2
 local piper_sentence_silence = 0.5
-local default_elevenlabs_voice_id = "dXWjcPDq3Hgou49vpJPY"
+local default_elevenlabs_voice_id = "pYYFYeYrSgj4lcmIMcOL"
 local elevenlabs_api_key_env_var = vim.g.ai_voice_elevenlabs_api_key_env_var or "ELEVENLABS_API_KEY"
 local elevenlabs_voice_id = vim.g.ai_voice_elevenlabs_voice_id or default_elevenlabs_voice_id
 local elevenlabs_model_id = vim.g.ai_voice_elevenlabs_model_id or "eleven_turbo_v2_5"
 local elevenlabs_output_format = vim.g.ai_voice_elevenlabs_output_format or "mp3_44100_128"
+local default_elevenlabs_speed = 1.0
+local elevenlabs_min_speed = 0.7
+local elevenlabs_max_speed = 1.2
+local elevenlabs_speed = tonumber(vim.g.ai_voice_elevenlabs_speed) or default_elevenlabs_speed
 local ai_voice_volume = tonumber(vim.g.ai_voice_volume) or 0.4
 local ai_voice_robot_mode = true
 local python_host_prog = vim.g.python3_host_prog
@@ -131,8 +135,24 @@ local function normalize_ai_voice_tts_mode(mode)
   return nil
 end
 
+local function normalize_elevenlabs_speed(speed)
+  speed = tonumber(speed)
+
+  if not speed or speed ~= speed then
+    return nil
+  end
+
+  if speed < elevenlabs_min_speed or speed > elevenlabs_max_speed then
+    return nil
+  end
+
+  return speed
+end
+
 ai_voice_tts_mode = normalize_ai_voice_tts_mode(ai_voice_tts_mode) or default_ai_voice_tts_mode
 vim.g.ai_voice_tts_mode = ai_voice_tts_mode
+elevenlabs_speed = normalize_elevenlabs_speed(elevenlabs_speed) or default_elevenlabs_speed
+vim.g.ai_voice_elevenlabs_speed = elevenlabs_speed
 
 local function fire_user_event(pattern, data)
   vim.schedule(function()
@@ -287,6 +307,26 @@ local function set_elevenlabs_model_id(model_id)
   elevenlabs_model_id = model_id
   vim.g.ai_voice_elevenlabs_model_id = model_id
   vim.notify("ElevenLabs model ID is now " .. model_id, vim.log.levels.INFO)
+  return true
+end
+
+local function set_elevenlabs_speed(speed)
+  local normalized_speed = normalize_elevenlabs_speed(speed)
+
+  if not normalized_speed then
+    vim.notify(
+      "ElevenLabs voice speed must be a number from "
+        .. string.format("%.2f", elevenlabs_min_speed)
+        .. " to "
+        .. string.format("%.2f", elevenlabs_max_speed),
+      vim.log.levels.ERROR
+    )
+    return false
+  end
+
+  elevenlabs_speed = normalized_speed
+  vim.g.ai_voice_elevenlabs_speed = normalized_speed
+  vim.notify("ElevenLabs voice speed is now " .. string.format("%.2f", normalized_speed), vim.log.levels.INFO)
   return true
 end
 
@@ -458,9 +498,12 @@ local function synthesize_with_elevenlabs(message, request_id)
     model_id = elevenlabs_model_id,
   }
 
+  local voice_settings = {}
   if type(vim.g.ai_voice_elevenlabs_voice_settings) == "table" then
-    payload.voice_settings = vim.g.ai_voice_elevenlabs_voice_settings
+    voice_settings = vim.deepcopy(vim.g.ai_voice_elevenlabs_voice_settings)
   end
+  voice_settings.speed = elevenlabs_speed
+  payload.voice_settings = voice_settings
 
   local ok, encoded_payload = pcall(json_encode, payload)
   if not ok then
@@ -823,6 +866,18 @@ create_or_replace_user_command("AIVoiceElevenLabsModel", function(opts)
 end, {
   nargs = "?",
   desc = "Set the ElevenLabs model ID for AI voice TTS",
+})
+
+create_or_replace_user_command("AIVoiceElevenLabsSpeed", function(opts)
+  if opts.args == "" then
+    vim.notify("Current ElevenLabs voice speed: " .. string.format("%.2f", elevenlabs_speed), vim.log.levels.INFO)
+    return
+  end
+
+  set_elevenlabs_speed(opts.args)
+end, {
+  nargs = "?",
+  desc = "Set the ElevenLabs voice speed for AI voice TTS",
 })
 
 create_or_replace_user_command("AIVoiceStop", function()
