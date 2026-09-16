@@ -5,9 +5,11 @@ require("sidekick").setup({
     enabled = false,
   },
   cli = {
+    -- Neovim's terminal handles OSC52 directly, not tmux passthrough escapes.
     tools = {
       opencode_naia = {
         cmd = { sidekick_naia_wrapper, "opencode" },
+        env = { TMUX = false, TMUX_PANE = false },
         is_proc = "\\<opencode\\>",
         continue = { "--continue" },
         native_scroll = true,
@@ -15,6 +17,15 @@ require("sidekick").setup({
       },
       codex_naia = {
         cmd = { sidekick_naia_wrapper, "codex" },
+        env = { TMUX = false, TMUX_PANE = false },
+        is_proc = "\\<codex\\>",
+        resume = { "resume" },
+        continue = { "resume", "--last" },
+        url = "https://github.com/openai/codex",
+      },
+      codex_naia_deepseek = {
+        cmd = { sidekick_naia_wrapper, "codex", "-p", "deepseek" },
+        env = { TMUX = false, TMUX_PANE = false },
         is_proc = "\\<codex\\>",
         resume = { "resume" },
         continue = { "resume", "--last" },
@@ -22,6 +33,7 @@ require("sidekick").setup({
       },
       claude_naia = {
         cmd = { sidekick_naia_wrapper, "claude" },
+        env = { TMUX = false, TMUX_PANE = false },
         is_proc = "\\<claude\\>",
         continue = { "--continue" },
         native_scroll = true,

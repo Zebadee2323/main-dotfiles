@@ -47,7 +47,9 @@ vim.opt.updatetime = 50
 
 vim.opt.mouse = "a"
 
-vim.opt.clipboard = "unnamedplus"
+-- Keep deletes/changes in Vim's registers instead of overwriting the system
+-- clipboard. The y/p mappings below opt in to the + register explicitly.
+vim.opt.clipboard = ""
 
 -- Remaps ------------------------------------------------------------------------------------------------------------
 
@@ -68,18 +70,14 @@ vim.keymap.set("v", "K", ":m '<-2<CR>gv=gv")
 vim.keymap.set("n", "n", "nzzzv")
 vim.keymap.set("n", "N", "Nzzzv")
 
--- Copy and Paste
-vim.keymap.set("n", "y", '"+y')
-vim.keymap.set("v", "y", '"+y')
-vim.keymap.set("n", "Y", '"+Y')
-
-vim.keymap.set("n", "p", '"+p')
-vim.keymap.set("v", "p", '"+p')
-vim.keymap.set("n", "P", '"+P')
-
-vim.keymap.set("n", "d", '"+d')
-vim.keymap.set("v", "d", '"+d')
-vim.keymap.set("n", "D", '"+D')
+-- Copy and paste through the system clipboard. Deletes and changes retain
+-- their normal Vim behaviour, so editing cannot destroy a pending paste.
+vim.keymap.set({ "n", "x" }, "y", '"+y', { desc = "Yank to system clipboard" })
+vim.keymap.set("n", "Y", '"+Y', { desc = "Yank line to system clipboard" })
+vim.keymap.set("x", "<D-c>", '"+y', { desc = "Copy selection to system clipboard" })
+vim.keymap.set("x", "<F12>", '"+y', { desc = "Copy selection from Kitty/tmux" })
+vim.keymap.set({ "n", "x" }, "p", '"+p', { desc = "Paste from system clipboard" })
+vim.keymap.set("n", "P", '"+P', { desc = "Paste before from system clipboard" })
 
 vim.keymap.set("n", "<C-k>", "<cmd>cprev<cr>zz")
 vim.keymap.set("n", "<C-j>", "<cmd>cnext<cr>zz")
@@ -113,6 +111,35 @@ vim.api.nvim_create_user_command("OpenCurrentFolder", function()
     vim.fn.jobstart({ "xdg-open", dir }, { detach = true })
   end
 end, { desc = "Open current file folder in system file manager" })
+
+vim.api.nvim_create_user_command("OpenFolder", function(opts)
+  local path = vim.fn.expand(opts.args)
+
+  if path == "" then
+    vim.notify("OpenFolder: a path is required", vim.log.levels.ERROR)
+    return
+  end
+
+  -- Resolve to a directory: if the path is a file, open its parent folder.
+  local dir = (vim.fn.isdirectory(path) == 1) and path or vim.fn.fnamemodify(path, ":h")
+
+  if vim.fn.isdirectory(dir) ~= 1 then
+    vim.notify("OpenFolder: no such directory: " .. dir, vim.log.levels.ERROR)
+    return
+  end
+
+  if vim.fn.has("mac") == 1 then
+    vim.fn.jobstart({ "open", dir }, { detach = true })
+  elseif vim.fn.has("win32") == 1 then
+    vim.fn.jobstart({ "explorer", dir }, { detach = true })
+  else
+    vim.fn.jobstart({ "xdg-open", dir }, { detach = true })
+  end
+end, {
+  nargs = 1,
+  complete = "file",
+  desc = "Open the given folder (or a file's folder) in the system file manager",
+})
 
 vim.keymap.set("n", "<C-s><C-s><C-s>", vim.cmd.TrimWhitespace)
 
