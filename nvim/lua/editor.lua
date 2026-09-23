@@ -224,12 +224,30 @@ vim.keymap.set("n", "<C-d>", function() scroll_by_option(1) end, { desc = "Scrol
 vim.keymap.set("n", "<C-u>", function() scroll_by_option(-1) end, { desc = "Scroll up N lines, keep cursor row" })
 vim.keymap.set('n', '<C-b>', '<Nop>')
 
-vim.api.nvim_create_user_command("T", function(opts)
-  vim.cmd("vsplit | terminal " .. (opts.args or ""))
+-- :T/:Ts/:Tb all open a terminal running the given command; they differ only in
+-- how the window is split.
+local function open_terminal(split, args)
+  vim.cmd(split .. " | terminal " .. (args or ""))
   vim.opt_local.number = true
   vim.opt_local.relativenumber = true
   vim.cmd("startinsert")
-end, {
+end
+
+local terminal_opts = {
   nargs = "*",
   complete = "shellcmd",
-})
+}
+
+vim.api.nvim_create_user_command("T", function(opts)
+  open_terminal("vsplit", opts.args)
+end, terminal_opts)
+
+vim.api.nvim_create_user_command("Ts", function(opts)
+  open_terminal("split", opts.args)
+end, terminal_opts)
+
+-- botright forces the split to span the full width below every other window,
+-- rather than only splitting the current one.
+vim.api.nvim_create_user_command("Tb", function(opts)
+  open_terminal("botright 10split", opts.args)
+end, terminal_opts)

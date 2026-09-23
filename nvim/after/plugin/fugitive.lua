@@ -137,3 +137,14 @@ vim.api.nvim_create_autocmd("FileType", {
     end
   end,
 })
+
+-- :Gv is :Git in a vertical split pinned to the far left. `topleft` (rather
+-- than plain `vertical`) makes it full-height alongside every other window
+-- instead of only splitting the current one.
+vim.api.nvim_create_user_command("Gv", function(opts)
+  vim.cmd("vertical topleft Git " .. opts.args)
+end, {
+  nargs = "*",
+  complete = "customlist,fugitive#Complete",
+  desc = "Fugitive :Git in a full-height vertical split on the far left",
+})
