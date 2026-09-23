@@ -141,6 +141,29 @@ end, {
   desc = "Open the given folder (or a file's folder) in the system file manager",
 })
 
+vim.api.nvim_create_user_command("OpenInBrowser", function()
+  local file = vim.fn.expand("%:p")
+
+  if file == "" then
+    vim.notify("OpenInBrowser: current buffer has no file", vim.log.levels.ERROR)
+    return
+  end
+
+  -- Percent-encode so paths with spaces or other odd characters survive the URL.
+  local url = "file://"
+    .. file:gsub("[^%w%-%._~/]", function(c)
+      return string.format("%%%02X", string.byte(c))
+    end)
+
+  if vim.fn.has("mac") == 1 then
+    vim.fn.jobstart({ "open", url }, { detach = true })
+  elseif vim.fn.has("win32") == 1 then
+    vim.fn.jobstart({ "cmd", "/c", "start", "", url }, { detach = true })
+  else
+    vim.fn.jobstart({ "xdg-open", url }, { detach = true })
+  end
+end, { desc = "Open current file in the default web browser" })
+
 vim.keymap.set("n", "<C-s><C-s><C-s>", vim.cmd.TrimWhitespace)
 
 -- vim.keymap.set('n', 'rn', '<CMD>set relativenumber!<CR>')

@@ -121,3 +121,19 @@ vim.api.nvim_create_user_command("GGoneBranches", function()
 end, {
   desc = "Fetch/prune remotes and list local branches with upstream status",
 })
+
+-- Disable `-` in Fugitive buffers: it sits right next to `=` and gets hit by
+-- accident. It only stages/unstages (nothing is lost), but `s` and `u` do the
+-- same job unambiguously. Fugitive's ftplugin maps run first, so this wins.
+vim.api.nvim_create_autocmd("FileType", {
+  pattern = "fugitive",
+  callback = function(ev)
+    for _, mode in ipairs({ "n", "x" }) do
+      vim.keymap.set(mode, "-", "<Nop>", {
+        buffer = ev.buf,
+        nowait = true,
+        desc = "Fugitive: disabled (use s/u to stage/unstage)",
+      })
+    end
+  end,
+})
