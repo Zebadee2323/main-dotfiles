@@ -47,8 +47,7 @@ vim.opt.updatetime = 50
 
 vim.opt.mouse = "a"
 
--- Keep deletes/changes in Vim's registers instead of overwriting the system
--- clipboard. The y/p mappings below opt in to the + register explicitly.
+-- Keep Vim registers separate from the system clipboard.
 vim.opt.clipboard = ""
 
 -- Remaps ------------------------------------------------------------------------------------------------------------
@@ -70,14 +69,9 @@ vim.keymap.set("v", "K", ":m '<-2<CR>gv=gv")
 vim.keymap.set("n", "n", "nzzzv")
 vim.keymap.set("n", "N", "Nzzzv")
 
--- Copy and paste through the system clipboard. Deletes and changes retain
--- their normal Vim behaviour, so editing cannot destroy a pending paste.
-vim.keymap.set({ "n", "x" }, "y", '"+y', { desc = "Yank to system clipboard" })
-vim.keymap.set("n", "Y", '"+Y', { desc = "Yank line to system clipboard" })
+-- Explicit system clipboard shortcuts; standard editing keys stay vanilla.
 vim.keymap.set("x", "<D-c>", '"+y', { desc = "Copy selection to system clipboard" })
 vim.keymap.set("x", "<F12>", '"+y', { desc = "Copy selection from Kitty/tmux" })
-vim.keymap.set({ "n", "x" }, "p", '"+p', { desc = "Paste from system clipboard" })
-vim.keymap.set("n", "P", '"+P', { desc = "Paste before from system clipboard" })
 
 vim.keymap.set("n", "<C-k>", "<cmd>cprev<cr>zz")
 vim.keymap.set("n", "<C-j>", "<cmd>cnext<cr>zz")

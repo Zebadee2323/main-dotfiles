@@ -20,7 +20,7 @@ local default_elevenlabs_speed = 1.0
 local elevenlabs_min_speed = 0.7
 local elevenlabs_max_speed = 1.2
 local elevenlabs_speed = tonumber(vim.g.ai_voice_elevenlabs_speed) or default_elevenlabs_speed
-local ai_voice_volume = tonumber(vim.g.ai_voice_volume) or 0.4
+local ai_voice_volume = tonumber(vim.g.ai_voice_volume) or 1.0
 local ai_voice_robot_mode = true
 local python_host_prog = vim.g.python3_host_prog
 if type(python_host_prog) ~= "string" or python_host_prog == "" then
