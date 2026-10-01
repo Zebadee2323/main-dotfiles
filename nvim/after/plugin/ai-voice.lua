@@ -1,7 +1,8 @@
 local default_voice_name = "en_GB-northern_english_male-medium"
 local voice_name = vim.g.ai_voice_name or default_voice_name
 local voices_dir = vim.fs.joinpath(vim.fn.stdpath("config"), "after", "ai_voices")
-local ai_voice_audio_dir = vim.fn.stdpath("cache") .. "/ai-voice"
+-- Use Neovim's session temp directory, which is cleaned up when Neovim exits.
+local ai_voice_audio_dir = vim.fn.tempname() .. "-ai-voice"
 local raw_wav_path = ai_voice_audio_dir .. "/latest.wav"
 local raw_elevenlabs_audio_path = ai_voice_audio_dir .. "/latest-elevenlabs.mp3"
 local processed_wav_path = ai_voice_audio_dir .. "/latest-robot.wav"
