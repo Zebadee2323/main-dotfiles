@@ -5,6 +5,34 @@ require("sidekick").setup({
     enabled = false,
   },
   cli = {
+    win = {
+      config = function(terminal)
+        -- Sidekick uses nvim_put for both text and submit, wrapping Enter in a
+        -- bracketed paste. Keep text pasted, but send Enter as a real keypress
+        -- for every CLI (OpenCode otherwise reads the clipboard on empty paste).
+        terminal.on_ready = function(self)
+          self.timer:start(0, 100, function()
+            local input = table.remove(self.send_queue, 1)
+            if not input then
+              return
+            end
+
+            input = input:gsub("\r\n", "\n")
+            vim.schedule(function()
+              if not self:is_running() then
+                return
+              end
+
+              local bytes = input == "\r" and input or ("\27[200~" .. input .. "\27[201~")
+              vim.api.nvim_chan_send(self.job, bytes)
+              if self:is_focused() then
+                vim.cmd.startinsert()
+              end
+            end)
+          end)
+        end
+      end,
+    },
     -- Neovim's terminal handles OSC52 directly, not tmux passthrough escapes.
     tools = {
       opencode_naia = {
@@ -169,16 +197,16 @@ vim.api.nvim_create_user_command("AISend", function(opts)
     separator = ":",
   }))
 
-  vim.api.nvim_cmd({
-    cmd = "AIMessage",
-    args = { msg },
-  }, {})
+  require("sidekick.cli").send({
+    msg = msg,
+    submit = false,
+  })
 
   maybe_restore_visual(opts)
 end, {
   nargs = "*",
   range = true,
-  desc = "Send file line or file start-end to Sidekick",
+  desc = "Insert file line or file start-end into the Sidekick prompt",
 })
 
 vim.api.nvim_create_user_command("AICommit", function()
