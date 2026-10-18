@@ -3,4 +3,4 @@
 vim.opt.packpath = { vim.env.VIMRUNTIME }
 
 require('editor')
-require('plugins')
+require('config.lazy')

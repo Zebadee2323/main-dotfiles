@@ -1,4 +1,4 @@
--- init.lua or lua/plugin/fugitive_branch_dd.lua
+-- Fugitive commands and buffer-local shortcuts.
 
 local function trim(s)
   return (s:gsub("^%s+", ""):gsub("%s+$", ""))

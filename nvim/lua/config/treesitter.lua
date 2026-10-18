@@ -37,7 +37,7 @@ end
 
 local MAX_FILESIZE = 200 * 1024 -- skip TS on files larger than 200 KB (matches old config)
 
--- Filetypes whose folding is configured elsewhere (see folding.lua); don't let
+-- Filetypes whose folding is configured elsewhere (see after/plugin/folding.lua); don't let
 -- Treesitter override their foldmethod.
 local fold_managed_elsewhere = { git = true }
 

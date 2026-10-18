@@ -1,5 +1,5 @@
 -- nvim-dap + Unity (VSTU Code) attach helper
--- Drop this in (for example) lua/dap/unity.lua and require it from your dap setup file
+-- Loaded after the shared DAP setup by lua/plugins/debugging.lua.
 
 local dap = require("dap")
 

@@ -203,7 +203,6 @@ require("oil").setup({
     border = nil,
   },
 })
-require("oil-git-status").setup()
 
 vim.keymap.set("n", "<C-p><C-[>", require("oil").toggle_float, { desc = "Oil float" })
 vim.keymap.set("n", "<C-p><C-]>", function()

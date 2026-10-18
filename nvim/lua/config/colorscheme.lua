@@ -156,4 +156,3 @@ vim.api.nvim_create_user_command("LightenBackground", function(opts)
 
     print("Background changed → " .. new_hex)
 end, { nargs = 1 })
-

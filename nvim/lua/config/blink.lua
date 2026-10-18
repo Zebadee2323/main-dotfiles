@@ -66,4 +66,4 @@ blink.setup({
 })
 
 vim.api.nvim_set_hl(0, "BlinkSignatureHelp", { bg = "#101010", fg = "#d0d0d0" })
-vim.keymap.set('i', '<C-l><C-k>', blink.show, bufopts)
+vim.keymap.set('i', '<C-l><C-k>', blink.show, { desc = 'Show completion' })
