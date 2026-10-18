@@ -7,7 +7,7 @@ blink.setup({
     },
     term = {
         enabled = false,
-        sources = { 'buffer', 'path' },
+        sources = { default = { 'buffer', 'path' } },
     },
     appearance = { nerd_font_variant = 'mono' },
     sources = {
