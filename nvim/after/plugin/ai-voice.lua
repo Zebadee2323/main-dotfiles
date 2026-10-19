@@ -1,5 +1,38 @@
+-- Machine-local preferences live outside the shared configuration repository.
+local preferences_path = vim.fs.joinpath(vim.fn.stdpath("state"), "ai-voice.json")
+local preferences = {}
+if vim.fn.filereadable(preferences_path) == 1 then
+  local ok, decoded = pcall(function()
+    return vim.json.decode(table.concat(vim.fn.readfile(preferences_path), "\n"))
+  end)
+  if ok and type(decoded) == "table" then
+    for _, key in ipairs({ "tts_mode", "voice_name", "elevenlabs_voice_id" }) do
+      if type(decoded[key]) == "string" and vim.trim(decoded[key]) ~= "" then
+        preferences[key] = decoded[key]
+      end
+    end
+  else
+    vim.schedule(function()
+      vim.notify("Could not load AI voice preferences from " .. preferences_path, vim.log.levels.WARN)
+    end)
+  end
+end
+
+local function save_preference(key, value)
+  preferences[key] = value
+  local ok, err = pcall(function()
+    vim.fn.mkdir(vim.fn.stdpath("state"), "p")
+    if vim.fn.writefile({ vim.json.encode(preferences) }, preferences_path) ~= 0 then
+      error("writefile failed")
+    end
+  end)
+  if not ok then
+    vim.notify("Could not save AI voice preferences: " .. tostring(err), vim.log.levels.WARN)
+  end
+end
+
 local default_voice_name = "en_GB-northern_english_male-medium"
-local voice_name = vim.g.ai_voice_name or default_voice_name
+local voice_name = vim.g.ai_voice_name or preferences.voice_name or default_voice_name
 local voices_dir = vim.fs.joinpath(vim.fn.stdpath("config"), "after", "ai_voices")
 -- Use Neovim's session temp directory, which is cleaned up when Neovim exits.
 local ai_voice_audio_dir = vim.fn.tempname() .. "-ai-voice"
@@ -7,14 +40,16 @@ local raw_wav_path = ai_voice_audio_dir .. "/latest.wav"
 local raw_elevenlabs_audio_path = ai_voice_audio_dir .. "/latest-elevenlabs.mp3"
 local processed_wav_path = ai_voice_audio_dir .. "/latest-robot.wav"
 local default_ai_voice_tts_mode = "piper"
-local ai_voice_tts_mode = vim.g.ai_voice_tts_mode or default_ai_voice_tts_mode
+local ai_voice_tts_mode = vim.g.ai_voice_tts_mode or preferences.tts_mode or default_ai_voice_tts_mode
 local piper_length_scale = 1.0
 local piper_noise_scale = 0.2
 local piper_noise_w = 0.2
 local piper_sentence_silence = 0.5
 local default_elevenlabs_voice_id = "6IwYbsNENZgAB1dtBZDp"
 local elevenlabs_api_key_env_var = vim.g.ai_voice_elevenlabs_api_key_env_var or "ELEVENLABS_API_KEY"
-local elevenlabs_voice_id = vim.g.ai_voice_elevenlabs_voice_id or default_elevenlabs_voice_id
+local elevenlabs_voice_id = vim.g.ai_voice_elevenlabs_voice_id
+  or preferences.elevenlabs_voice_id
+  or default_elevenlabs_voice_id
 local elevenlabs_model_id = vim.g.ai_voice_elevenlabs_model_id or "eleven_turbo_v2_5"
 local elevenlabs_output_format = vim.g.ai_voice_elevenlabs_output_format or "mp3_44100_128"
 local default_elevenlabs_speed = 1.0
@@ -279,6 +314,7 @@ local function set_ai_voice_tts_mode(mode)
 
   ai_voice_tts_mode = normalized_mode
   vim.g.ai_voice_tts_mode = normalized_mode
+  save_preference("tts_mode", normalized_mode)
   vim.notify("AI voice TTS mode is now " .. normalized_mode, vim.log.levels.INFO)
   return true
 end
@@ -293,6 +329,7 @@ local function set_elevenlabs_voice_id(voice_id)
 
   elevenlabs_voice_id = voice_id
   vim.g.ai_voice_elevenlabs_voice_id = voice_id
+  save_preference("elevenlabs_voice_id", voice_id)
   vim.notify("ElevenLabs voice ID is now " .. voice_id, vim.log.levels.INFO)
   return true
 end
@@ -734,6 +771,7 @@ local function set_ai_voice_name(name)
 
   voice_name = name
   vim.g.ai_voice_name = name
+  save_preference("voice_name", name)
   vim.notify("AI voice name is now " .. voice_name, vim.log.levels.INFO)
   return true
 end
