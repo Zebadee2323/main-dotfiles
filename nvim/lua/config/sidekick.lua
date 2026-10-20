@@ -80,13 +80,11 @@ end, {
 })
 
 -- Get git root if available
-local function get_git_root(path)
-  local dir = path and vim.fn.fnamemodify(path, ":p:h") or nil
-  local cmd = dir and ("git -C " .. vim.fn.shellescape(dir) .. " rev-parse --show-toplevel")
-    or "git rev-parse --show-toplevel"
+local function get_git_root(dir)
+  local cmd = "git -C " .. vim.fn.shellescape(dir) .. " rev-parse --show-toplevel"
 
   local ok, lines = pcall(vim.fn.systemlist, cmd)
-  if not ok or type(lines) ~= "table" or #lines == 0 then
+  if not ok or vim.v.shell_error ~= 0 or type(lines) ~= "table" or #lines == 0 then
     return nil
   end
 
@@ -98,7 +96,7 @@ local function get_git_root(path)
   return root
 end
 
--- Return path relative to git repo if possible
+-- Use workspace-relative paths only for files inside the current workspace.
 local function get_repo_relative_path()
   local bufname = vim.api.nvim_buf_get_name(0)
   if bufname == "" then
@@ -106,27 +104,14 @@ local function get_repo_relative_path()
   end
 
   local abs_buf = vim.fn.fnamemodify(bufname, ":p")
-  local git_root = get_git_root(abs_buf)
-
-  if git_root then
-    local abs_root = vim.fn.fnamemodify(git_root, ":p"):gsub("[/\\]$", "")
-
-    local rel = vim.fs.relpath(abs_root, abs_buf)
-    if rel then
-      if rel == "" then
-        return "."
-      end
-      return rel
-    end
+  local cwd = vim.fn.getcwd()
+  local workspace_root = get_git_root(cwd) or cwd
+  local rel = vim.fs.relpath(workspace_root, abs_buf)
+  if rel and rel ~= ".." and not rel:match("^%.%.[/\\]") then
+    return rel == "" and "." or rel
   end
 
-  -- fallback: path relative to cwd
-  local cwd_rel = vim.fn.fnamemodify(bufname, ":.")
-  if cwd_rel ~= "" then
-    return cwd_rel
-  end
-
-  return bufname
+  return abs_buf
 end
 
 -- Restore visual selection after running command
