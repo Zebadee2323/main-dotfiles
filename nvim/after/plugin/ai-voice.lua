@@ -97,6 +97,8 @@ local robot_voice_filter = table.concat({
 local current_tts_job = nil
 local current_effect_job = nil
 local current_play_job = nil
+local current_analysis_job = nil
+local voice_visualizer = require("ai_voice_visualizer")
 local last_spoken_message = nil
 local speech_request_id = 0
 local speech_queue = {}
@@ -219,10 +221,15 @@ local function clear_speech_queue()
 end
 
 local function has_active_audio_jobs()
-  return current_tts_job ~= nil or current_effect_job ~= nil or current_play_job ~= nil
+  return current_tts_job ~= nil or current_effect_job ~= nil or current_play_job ~= nil or current_analysis_job ~= nil
 end
 
 local function stop_audio_jobs()
+  if current_analysis_job then
+    current_analysis_job:kill(15)
+    current_analysis_job = nil
+  end
+  voice_visualizer.stop()
   if current_tts_job and vim.fn.jobwait({ current_tts_job }, 0)[1] == -1 then
     vim.fn.jobstop(current_tts_job)
   end
@@ -368,7 +375,7 @@ local function set_elevenlabs_speed(speed)
   return true
 end
 
-local function start_audio_playback(wav_path, request_id)
+local function play_prepared_audio(wav_path, request_id, samples)
   local ffplay_volume = math.floor(ai_voice_volume * 100)
   local play_job = vim.fn.jobstart({
     "ffplay",
@@ -381,9 +388,9 @@ local function start_audio_playback(wav_path, request_id)
     wav_path,
   }, {
     on_exit = function()
-      set_voice_playback_active(false, { request_id = request_id })
-
       if speech_request_id == request_id then
+        voice_visualizer.stop()
+        set_voice_playback_active(false, { request_id = request_id })
         current_play_job = nil
         maybe_start_queued_speech()
       end
@@ -397,10 +404,32 @@ local function start_audio_playback(wav_path, request_id)
   end
 
   current_play_job = play_job
+  voice_visualizer.start(samples, ai_voice_volume)
   set_voice_playback_active(true, {
     request_id = request_id,
     wav_path = wav_path,
   })
+end
+
+local function start_audio_playback(wav_path, request_id)
+  if vim.g.ai_voice_visualizer_enabled == false or vim.fn.executable("ffmpeg") ~= 1 then
+    play_prepared_audio(wav_path, request_id)
+    return
+  end
+
+  local ok, job = pcall(voice_visualizer.analyse, wav_path, function(samples)
+    if speech_request_id ~= request_id then
+      return
+    end
+    current_analysis_job = nil
+    play_prepared_audio(wav_path, request_id, samples)
+  end)
+  if ok then
+    current_analysis_job = job
+  else
+    vim.notify("AI voice waveform analysis unavailable: " .. tostring(job), vim.log.levels.WARN)
+    play_prepared_audio(wav_path, request_id)
+  end
 end
 
 local function maybe_apply_robot_effects(wav_path, request_id)
@@ -431,11 +460,11 @@ local function maybe_apply_robot_effects(wav_path, request_id)
     end,
     on_exit = function(_, code)
       vim.schedule(function()
-        current_effect_job = nil
-
         if speech_request_id ~= request_id then
           return
         end
+
+        current_effect_job = nil
 
         if code ~= 0 then
           local msg = #stderr > 0 and table.concat(stderr, "\n") or ("ffmpeg exited with code " .. code)
@@ -783,6 +812,15 @@ end
 
 vim.keymap.set("n", "[v", "<Cmd>AIVoiceStop<CR>", {
   desc = "Stop AI voice playback",
+})
+
+vim.api.nvim_create_autocmd("VimLeavePre", {
+  group = vim.api.nvim_create_augroup("AIVoiceJobCleanup", { clear = true }),
+  callback = function()
+    clear_speech_queue()
+    speech_request_id = speech_request_id + 1
+    stop_audio_jobs()
+  end,
 })
 
 create_or_replace_user_command("AIVoiceInstall", function()
