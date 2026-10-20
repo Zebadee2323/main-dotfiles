@@ -6,6 +6,8 @@ require("sidekick").setup({
   },
   cli = {
     win = {
+      -- Keep quickfix/source jumps from replacing the CLI terminal buffer.
+      wo = { winfixbuf = true },
       config = function(terminal)
         -- Sidekick uses nvim_put for both text and submit, wrapping Enter in a
         -- bracketed paste. Keep text pasted, but send Enter as a real keypress
