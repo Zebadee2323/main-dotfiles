@@ -2,7 +2,7 @@
 local file = debug.getinfo(1, "S").source:sub(2)
 vim.opt.rtp:prepend(vim.fn.fnamemodify(file, ":p:h:h"))
 vim.g.naia_ui_policies = { companion = "allow", quickfix = "ask", navigation = "off", card = "off" }
-local ui = require("naia_ui")
+local ui = require("features.naia_ui")
 assert(ui.request("navigation", {}).status == "muted", "navigation should auto-reject")
 assert(ui.request("card", {}).status == "muted", "cards should auto-reject")
 local request = ui.request("companion", { title = "Auto-approved", content = "A note", reason = "Test startup policy" })

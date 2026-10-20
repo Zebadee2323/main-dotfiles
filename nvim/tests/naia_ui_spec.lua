@@ -1,8 +1,8 @@
 -- Run: nvim --headless -u NONE -l tests/naia_ui_spec.lua
 local file = debug.getinfo(1, "S").source:sub(2)
 vim.opt.rtp:prepend(vim.fn.fnamemodify(file, ":p:h:h"))
-local ui = require("naia_ui")
-local actions = require("naia_ui_actions")
+local ui = require("features.naia_ui")
+local actions = require("features.naia_ui.actions")
 local warnings = {}
 vim.notify = function(message) warnings[#warnings + 1] = message end
 local function flush() vim.wait(40, function() return false end, 5) end
@@ -200,7 +200,7 @@ for pulse = 1, 3 do
   flash_steps[start].callback()
   assert(vim.w[first_card.window].naia_card_flashing, "new card did not flash")
   assert(flash_steps[start + 1].delay == 150, "pulse should last 150ms")
-  require("naia_ui_style").refresh()
+  require("features.naia_ui.style").refresh()
   assert(vim.wo[first_card.window].winhighlight:find("Normal:NaiaUICardFlashNormal", 1, true))
   flash_steps[start + 1].callback()
   assert(not vim.w[first_card.window].naia_card_flashing, "pulse did not return to normal")
@@ -270,7 +270,7 @@ flush()
 assert(status(request).status == "expired")
 
 local tools = {}
-require("naia_ui_tools").register({
+  require("features.naia_ui.tools").register({
   deregister_tool = function(name) tools[name] = nil; return true end,
   register_tool = function(name, spec) tools[name] = spec; return true end,
 })
@@ -288,7 +288,7 @@ assert(not pcall(actions.prepare, "card", { title = "Large", content = string.re
 
 -- Surfaces remain distinct even when the theme gives NormalFloat the same
 -- background as Normal. Dark/light theme changes must not alter editor colours.
-local style = require("naia_ui_style")
+local style = require("features.naia_ui.style")
 for _, palette in ipairs({
   { mode = "dark", background = 0x181818, foreground = 0xeeeeee },
   { mode = "light", background = 0xf5f5f5, foreground = 0x202020 },
@@ -322,7 +322,7 @@ end
 ui.reject(request.request_id)
 flush()
 actions.close_card()
-local visualizer = require("ai_voice_visualizer")
+local visualizer = require("features.voice.visualizer")
 visualizer.start({ 0.1, waveform = { 0.1, -0.1 } }, 1)
 flush()
 local found_voice

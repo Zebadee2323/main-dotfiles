@@ -1,6 +1,6 @@
 local M = {}
-local captions = require("ai_voice_captions")
-local style = require("naia_ui_style")
+local captions = require("features.voice.captions")
+local style = require("features.naia_ui.style")
 local uv = vim.uv or vim.loop
 local namespace = vim.api.nvim_create_namespace("ai_voice_visualizer")
 local sample_seconds = 0.01

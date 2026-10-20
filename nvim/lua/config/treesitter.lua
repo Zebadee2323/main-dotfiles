@@ -37,7 +37,7 @@ end
 
 local MAX_FILESIZE = 200 * 1024 -- skip TS on files larger than 200 KB (matches old config)
 
--- Filetypes whose folding is configured elsewhere (see after/plugin/folding.lua); don't let
+-- Filetypes whose folding is configured elsewhere (see after/ftplugin/git.lua); don't let
 -- Treesitter override their foldmethod.
 local fold_managed_elsewhere = { git = true }
 
@@ -68,7 +68,7 @@ vim.api.nvim_create_autocmd("FileType", {
     pcall(vim.treesitter.start, ev.buf, lang)
 
     -- Treesitter folding, window-local to this buffer+window. Global foldlevel
-    -- is 99 (editor.lua) so nothing starts folded; use zM/za to collapse.
+    -- is 99 (core/options.lua) so nothing starts folded; use zM/za to collapse.
     if not fold_managed_elsewhere[ev.match] then
       vim.wo[0][0].foldmethod = "expr"
       vim.wo[0][0].foldexpr = "v:lua.vim.treesitter.foldexpr()"

@@ -1,14 +1,40 @@
 # Neovim configuration
 
-- `init.lua` loads general editor settings and bootstraps Lazy.
-- `lua/editor.lua` contains general options, mappings, and commands.
+- `init.lua` loads `lua/core/` and bootstraps Lazy.
+- `lua/core/` contains editor options, general mappings, commands, and Neovide
+  settings. `core/init.lua` also enables the early scrolling and terminal helpers.
 - `lua/config/lazy.lua` bootstraps Lazy and imports `lua/plugins/*.lua`.
 - `lua/plugins/` contains plugin specs grouped by plugin or feature. Declare
   dependencies, build steps, loading triggers, and setup callbacks here.
 - `lua/config/` contains the larger setup modules, loaded only by the owning
   spec's `config` callback. Small setups can use `opts` directly in the spec.
-- `after/plugin/` contains standalone editor utilities, not third-party plugin
-  setup. Neovim still sources these automatically at startup.
+- `lua/features/` contains custom functionality, grouped by feature rather than
+  scattered among runtime scripts. `voice/`, `naia_ui/`, and `file_change_fx/`
+  own their related modules; small utilities stay as single modules.
+- `after/plugin/features.lua` is the sole custom-feature runtime hook. It calls
+  `features.setup()` after plugin loading, preserving the existing startup phase
+  and ordering for voice, file-change effects, and standalone utilities.
+- `after/ftplugin/` contains filetype-local wrapping and Git folding settings,
+  including undo instructions for filetype changes.
+
+### Custom-feature ownership
+
+`features.voice.setup()` and `features.file_change_fx.setup()` load their runtime
+modules once. Those runtimes retain ownership of state, commands, timers, jobs,
+watchers, and shutdown cleanup. The initial layout migration deliberately keeps
+their implementation intact; splitting providers, rendering, or watching into
+smaller modules can happen separately without mixing behaviour changes into moves.
+Small standalone helpers register commands on their first `require`.
+
+Naia-dependent setup belongs to `config/naia.lua`, called by Naia's Lazy spec:
+custom MCP tools live in `features/naia_tools.lua`, UI modules in
+`features/naia_ui/`, and the walkthrough is provided by the external Naia plugin.
+The `naia` module namespace remains reserved for that plugin. UI commands and
+cleanup hooks are registered when the UI module is first required.
+
+Assets have not moved: voice models remain in `after/ai_voices/`, and the effect
+sound remains at `after/plugin/change-fx.mp3`. Their paths are independent of the
+Lua module layout. Machine-local voice preferences remain outside this repository.
 
 Plugins remain eagerly loaded to preserve the existing startup behavior. To
 defer a plugin, add `lazy = true` and appropriate `keys`, `cmd`, `event`, or `ft`
@@ -91,11 +117,11 @@ targets so paths and locations never have to be interpreted as editor commands:
 ```json
 {
   "title": "Speech playback",
-  "content": "See the [speech queue](after/plugin/ai-voice.lua#L696).",
+  "content": "See the [speech queue](lua/features/voice/runtime.lua#L696).",
   "links": [{
     "display_line": 1,
     "label": "speech queue",
-    "path": "after/plugin/ai-voice.lua",
+    "path": "lua/features/voice/runtime.lua",
     "line": 696
   }],
   "reason": "Explain how queued speech reaches playback"
@@ -119,4 +145,5 @@ Run the isolated UI regression tests with:
 ```sh
 nvim --headless -u NONE -l tests/naia_ui_spec.lua
 nvim --headless -u NONE -l tests/naia_ui_policy_spec.lua
+nvim --headless -u NONE -l tests/layout_spec.lua
 ```

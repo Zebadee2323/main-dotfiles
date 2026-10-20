@@ -42,7 +42,7 @@ require('lualine').setup {
         },
         lualine_x = {
             function()
-                return require('ai_voice_visualizer').statusline()
+                return require('features.voice.visualizer').statusline()
             end,
             'encoding', 'fileformat', 'filetype'
         },

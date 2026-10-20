@@ -1,4 +1,4 @@
-local ui = require("naia_ui")
+local ui = require("features.naia_ui")
 local M = {}
 
 local reason = { type = "string", minLength = 1, maxLength = 2000,

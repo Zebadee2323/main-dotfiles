@@ -1,5 +1,5 @@
 local M = {}
-local style = require("naia_ui_style")
+local style = require("features.naia_ui.style")
 local window, buffer, shown_id, origin
 -- This also supports moving a live prompt without disturbing its request,
 -- callbacks, or focus. Leave the command line and statusline unobstructed.
