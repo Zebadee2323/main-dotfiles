@@ -6,6 +6,8 @@ require("sidekick").setup({
   },
   cli = {
     win = {
+      -- Let the CLI handle Ctrl-P instead of opening Sidekick's prompt picker.
+      keys = { prompt = false },
       -- Keep quickfix/source jumps from replacing the CLI terminal buffer.
       wo = { winfixbuf = true },
       config = function(terminal)
