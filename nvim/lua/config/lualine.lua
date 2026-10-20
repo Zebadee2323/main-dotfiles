@@ -40,7 +40,12 @@ require('lualine').setup {
                 return require('lsp-progress').progress()
             end,
         },
-        lualine_x = { 'encoding', 'fileformat', 'filetype' },
+        lualine_x = {
+            function()
+                return require('ai_voice_visualizer').statusline()
+            end,
+            'encoding', 'fileformat', 'filetype'
+        },
         lualine_y = { 'progress' },
         lualine_z = { 'location' }
     },

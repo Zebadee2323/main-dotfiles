@@ -230,6 +230,7 @@ local function stop_audio_jobs()
     current_analysis_job = nil
   end
   voice_visualizer.stop()
+  voice_visualizer.set_status("idle")
   if current_tts_job and vim.fn.jobwait({ current_tts_job }, 0)[1] == -1 then
     vim.fn.jobstop(current_tts_job)
   end
@@ -261,7 +262,12 @@ local function prepare_speech_request(opts)
 end
 
 local function maybe_start_queued_speech()
-  if has_active_audio_jobs() or #speech_queue == 0 then
+  if has_active_audio_jobs() then
+    return
+  end
+
+  if #speech_queue == 0 then
+    voice_visualizer.set_status("idle")
     return
   end
 
@@ -375,7 +381,7 @@ local function set_elevenlabs_speed(speed)
   return true
 end
 
-local function play_prepared_audio(wav_path, request_id, samples)
+local function play_prepared_audio(wav_path, request_id, samples, message)
   local ffplay_volume = math.floor(ai_voice_volume * 100)
   local play_job = vim.fn.jobstart({
     "ffplay",
@@ -404,16 +410,17 @@ local function play_prepared_audio(wav_path, request_id, samples)
   end
 
   current_play_job = play_job
-  voice_visualizer.start(samples, ai_voice_volume)
+  voice_visualizer.set_status("speaking")
+  voice_visualizer.start(samples, ai_voice_volume, message)
   set_voice_playback_active(true, {
     request_id = request_id,
     wav_path = wav_path,
   })
 end
 
-local function start_audio_playback(wav_path, request_id)
+local function start_audio_playback(wav_path, request_id, message)
   if vim.g.ai_voice_visualizer_enabled == false or vim.fn.executable("ffmpeg") ~= 1 then
-    play_prepared_audio(wav_path, request_id)
+    play_prepared_audio(wav_path, request_id, nil, message)
     return
   end
 
@@ -422,25 +429,25 @@ local function start_audio_playback(wav_path, request_id)
       return
     end
     current_analysis_job = nil
-    play_prepared_audio(wav_path, request_id, samples)
+    play_prepared_audio(wav_path, request_id, samples, message)
   end)
   if ok then
     current_analysis_job = job
   else
     vim.notify("AI voice waveform analysis unavailable: " .. tostring(job), vim.log.levels.WARN)
-    play_prepared_audio(wav_path, request_id)
+    play_prepared_audio(wav_path, request_id, nil, message)
   end
 end
 
-local function maybe_apply_robot_effects(wav_path, request_id)
+local function maybe_apply_robot_effects(wav_path, request_id, message)
   if not ai_voice_robot_mode then
-    start_audio_playback(wav_path, request_id)
+    start_audio_playback(wav_path, request_id, message)
     return
   end
 
   if vim.fn.executable("ffmpeg") ~= 1 then
     vim.notify("Robot mode requires ffmpeg; playing original audio", vim.log.levels.WARN)
-    start_audio_playback(wav_path, request_id)
+    start_audio_playback(wav_path, request_id, message)
     return
   end
 
@@ -469,18 +476,18 @@ local function maybe_apply_robot_effects(wav_path, request_id)
         if code ~= 0 then
           local msg = #stderr > 0 and table.concat(stderr, "\n") or ("ffmpeg exited with code " .. code)
           vim.notify("Robot mode failed, playing original audio:\n" .. msg, vim.log.levels.WARN)
-          start_audio_playback(wav_path, request_id)
+          start_audio_playback(wav_path, request_id, message)
           return
         end
 
-        start_audio_playback(processed_wav_path, request_id)
+        start_audio_playback(processed_wav_path, request_id, message)
       end)
     end,
   })
 
   if effect_job <= 0 then
     vim.notify("Failed to start ffmpeg for robot mode; playing original audio", vim.log.levels.WARN)
-    start_audio_playback(wav_path, request_id)
+    start_audio_playback(wav_path, request_id, message)
     return
   end
 
@@ -529,7 +536,7 @@ local function synthesize_with_piper(message, request_id)
           return
         end
 
-        maybe_apply_robot_effects(raw_wav_path, request_id)
+        maybe_apply_robot_effects(raw_wav_path, request_id, message)
       end)
     end,
   })
@@ -636,7 +643,7 @@ local function synthesize_with_elevenlabs(message, request_id)
           return
         end
 
-        maybe_apply_robot_effects(raw_elevenlabs_audio_path, request_id)
+        maybe_apply_robot_effects(raw_elevenlabs_audio_path, request_id, message)
       end)
     end,
   })
@@ -677,6 +684,7 @@ ai_voice_speak = function(message, opts)
   end
 
   ensure_ai_voice_audio_dir()
+  voice_visualizer.set_status("preparing")
 
   if ai_voice_tts_mode == "elevenlabs" then
     return synthesize_with_elevenlabs(message, request_id)

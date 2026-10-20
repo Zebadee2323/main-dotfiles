@@ -1,8 +1,11 @@
 local M = {}
+local captions = require("ai_voice_captions")
 local uv = vim.uv or vim.loop
 local namespace = vim.api.nvim_create_namespace("ai_voice_visualizer")
 local sample_seconds = 0.01
 local waveform_rate = 8000
+local waveform_height = 5
+local centre_row = math.floor(waveform_height / 2) + 1
 -- Braille provides a 2 x 4 dot grid per terminal cell, rather than one block.
 local dot_bits = { { 1, 2, 4, 64 }, { 8, 16, 32, 128 } }
 local glyphs = {}
@@ -10,18 +13,50 @@ for mask = 1, 255 do
   glyphs[mask] = vim.fn.nr2char(0x2800 + mask)
 end
 local state
+local voice_status = "idle"
 
-local function highlights()
-  vim.api.nvim_set_hl(0, "NAIAVoiceNormal", { bg = "#081820", fg = "#36d9e8" })
-  vim.api.nvim_set_hl(0, "NAIAVoiceBorder", { bg = "#081820", fg = "#287887" })
-  vim.api.nvim_set_hl(0, "NAIAVoiceTitle", { bg = "#081820", fg = "#b8faff", bold = true })
-  vim.api.nvim_set_hl(0, "NAIAVoiceBaseline", { fg = "#19434d" })
-  vim.api.nvim_set_hl(0, "NAIAVoicePeak", { fg = "#b8faff" })
+function M.set_status(status)
+  if voice_status == status then
+    return
+  end
+  voice_status = status
+  vim.schedule(function()
+    -- Do not load a statusline plugin just to refresh it.
+    local lualine = package.loaded.lualine
+    if lualine then
+      lualine.refresh({ place = { "statusline" } })
+    end
+  end)
 end
 
-local function window_config()
-  local width = math.min(36, vim.o.columns - 4)
-  local height = 7
+function M.statusline()
+  if voice_status == "idle" or vim.g.ai_voice_statusline_enabled == false then
+    return ""
+  end
+  return "N.A.I.A · " .. voice_status
+end
+
+local function highlights()
+  local function hl(name)
+    return vim.api.nvim_get_hl(0, { name = name, link = false, create = false })
+  end
+  local normal, float = hl("Normal"), hl("NormalFloat")
+  local border, comment = hl("FloatBorder"), hl("Comment")
+  local accent = hl("DiagnosticInfo").fg or hl("Function").fg or float.fg or normal.fg
+  local background = float.bg or normal.bg
+  local bright = hl("Title").fg or float.fg or normal.fg or accent
+  vim.api.nvim_set_hl(0, "NAIAVoiceNormal", { bg = background, fg = accent })
+  vim.api.nvim_set_hl(0, "NAIAVoiceBorder", { bg = background, fg = border.fg or comment.fg or accent })
+  vim.api.nvim_set_hl(0, "NAIAVoiceTitle", { bg = background, fg = bright, bold = true })
+  vim.api.nvim_set_hl(0, "NAIAVoiceBaseline", { fg = comment.fg or border.fg or accent })
+  vim.api.nvim_set_hl(0, "NAIAVoicePeak", { fg = bright })
+  vim.api.nvim_set_hl(0, "NAIAVoiceCaption", { fg = float.fg or normal.fg or bright })
+end
+
+local function window_config(current)
+  local width = math.min(44, vim.o.columns - 4)
+  local show_captions = current.message ~= "" and vim.g.ai_voice_captions_enabled ~= false
+  local height = waveform_height + (show_captions and 4 or 0)
   local bottom = vim.o.lines - vim.o.cmdheight - (vim.o.laststatus == 0 and 0 or 1)
   if width < 12 or bottom < height + 3 then
     return nil
@@ -33,15 +68,15 @@ local function window_config()
   if not vim.tbl_contains({ "NW", "NE", "SW", "SE" }, anchor) then
     anchor = "SW"
   end
-  local function offset(value, maximum)
+  local function offset(value, maximum, default)
     value = tonumber(value)
     if not value or value ~= value or math.abs(value) == math.huge then
-      value = 1
+      value = default
     end
     return math.max(0, math.min(maximum, math.floor(value)))
   end
-  local x = offset(vim.g.ai_voice_visualizer_offset_x, vim.o.columns - width - 2)
-  local y = offset(vim.g.ai_voice_visualizer_offset_y, bottom - height - 2)
+  local x = offset(vim.g.ai_voice_visualizer_offset_x, vim.o.columns - width - 2, 7)
+  local y = offset(vim.g.ai_voice_visualizer_offset_y, bottom - height - 2, 1)
   return {
     relative = "editor",
     anchor = anchor,
@@ -57,6 +92,36 @@ local function window_config()
     mouse = false,
     zindex = 45,
   }
+end
+
+local function competing_float(current, config)
+  if vim.g.ai_voice_visualizer_hide_for_floats == false then
+    return false
+  end
+  if vim.fn.pumvisible() == 1 then
+    return true
+  end
+  local top = config.row - (config.anchor:sub(1, 1) == "S" and config.height + 2 or 0)
+  local left = config.col - (config.anchor:sub(2, 2) == "E" and config.width + 2 or 0)
+  for _, window in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if window ~= current.window then
+      local other = vim.api.nvim_win_get_config(window)
+      if other.relative ~= "" and not other.external and not other.hide then
+        -- Pickers, hover documentation, prompts, etc. get the whole stage.
+        if other.focusable then
+          return true
+        end
+        -- Passive notifications only suppress the panel when they overlap it.
+        local position = vim.api.nvim_win_get_position(window)
+        if (other.zindex or 50) >= config.zindex
+            and position[1] < top + config.height + 2 and position[1] + other.height + 2 > top
+            and position[2] < left + config.width + 2 and position[2] + other.width + 2 > left then
+          return true
+        end
+      end
+    end
+  end
+  return false
 end
 
 function M.stop()
@@ -125,7 +190,14 @@ local function render(current)
   if state ~= current then
     return
   end
-  local config = window_config()
+  local config = window_config(current)
+  if config and competing_float(current, config) then
+    -- A short grace period avoids flickering between completion/hover popups.
+    current.resume_after = uv.hrtime() + 200e6
+  end
+  if current.resume_after and uv.hrtime() < current.resume_after then
+    config = nil
+  end
   if not config then
     if current.window and vim.api.nvim_win_is_valid(current.window) then
       vim.api.nvim_win_close(current.window, true)
@@ -141,11 +213,13 @@ local function render(current)
     current.window = vim.api.nvim_open_win(current.buffer, false, config)
     vim.wo[current.window].winhighlight = "Normal:NAIAVoiceNormal,FloatBorder:NAIAVoiceBorder,FloatTitle:NAIAVoiceTitle"
     vim.wo[current.window].wrap = false
-  elseif current.width ~= config.width or current.row ~= config.row or current.col ~= config.col
+  elseif current.width ~= config.width or current.height ~= config.height
+      or current.row ~= config.row or current.col ~= config.col
       or current.anchor ~= config.anchor then
     vim.api.nvim_win_set_config(current.window, config)
   end
   current.width, current.row, current.col = config.width, config.row, config.col
+  current.height = config.height
   current.anchor = config.anchor
 
   -- Positive delay holds the picture back to compensate for player/device startup.
@@ -174,18 +248,22 @@ local function render(current)
     return first + ((waveform[index + 1] or 0) - first) * fraction
   end
   local rows, bytes, marks = {}, {}, {}
-  for row = 1, 7 do
+  for row = 1, waveform_height do
     rows[row] = {}
     bytes[row] = 0
   end
   local previous_pixel
   for col = 1, config.width do
-    local masks, tips = { 0, 0, 0, 0, 0, 0, 0 }, {}
+    local masks, tips = {}, {}
+    for row = 1, waveform_height do
+      masks[row] = 0
+    end
     for subcol = 1, 2 do
       local dot = (col - 1) * 2 + subcol - 1
       local sample = sample_at(position + dot * (span - 1) / (config.width * 2 - 1))
       local amplitude = math.max(-1, math.min(1, sample * current.volume * 2.2))
-      local pixel_y = math.floor(13.5 - amplitude * 12.5 + 0.5)
+      local centre_pixel = (waveform_height * 4 - 1) / 2
+      local pixel_y = math.floor(centre_pixel - amplitude * (centre_pixel - 1) + 0.5)
       -- Join successive points with a thin stroke, never a filled silhouette.
       for pixel = math.min(previous_pixel or pixel_y, pixel_y), math.max(previous_pixel or pixel_y, pixel_y) do
         local row = math.floor(pixel / 4) + 1
@@ -196,13 +274,13 @@ local function render(current)
       end
       previous_pixel = pixel_y
     end
-    for row = 1, 7 do
+    for row = 1, waveform_height do
       local char = glyphs[masks[row]] or " "
       local byte_start = bytes[row]
       if masks[row] > 0 then
         marks[#marks + 1] = {
           row - 1, byte_start, byte_start + #char,
-          tips[row] and "NAIAVoicePeak" or (row == 4 and "NAIAVoiceBaseline" or "NAIAVoiceNormal"),
+          tips[row] and "NAIAVoicePeak" or (row == centre_row and "NAIAVoiceBaseline" or "NAIAVoiceNormal"),
         }
       end
       rows[row][col] = char
@@ -210,24 +288,45 @@ local function render(current)
     end
   end
   local lines = {}
-  for row = 1, 7 do
+  for row = 1, waveform_height do
     lines[row] = table.concat(rows[row])
+  end
+  if config.height > waveform_height then
+    if current.caption_width ~= config.width then
+      current.captions = captions.prepare(current.message, config.width - 2)
+      current.caption_width = config.width
+    end
+    lines[waveform_height + 1] = string.rep("─", config.width)
+    local duration = #waveform > 0 and #waveform / waveform_rate or #current.samples * sample_seconds
+    for row, text in ipairs(captions.lines(current.captions, elapsed, duration)) do
+      lines[waveform_height + 1 + row] = " " .. text
+    end
   end
   vim.bo[current.buffer].modifiable = true
   vim.api.nvim_buf_set_lines(current.buffer, 0, -1, false, lines)
   vim.bo[current.buffer].modifiable = false
   vim.api.nvim_buf_clear_namespace(current.buffer, namespace, 0, -1)
-  vim.api.nvim_buf_set_extmark(current.buffer, namespace, 3, 0, {
-    end_col = #lines[4], hl_group = "NAIAVoiceBaseline", priority = 100,
+  vim.api.nvim_buf_set_extmark(current.buffer, namespace, centre_row - 1, 0, {
+    end_col = #lines[centre_row], hl_group = "NAIAVoiceBaseline", priority = 100,
   })
   for _, mark in ipairs(marks) do
     vim.api.nvim_buf_set_extmark(current.buffer, namespace, mark[1], mark[2], {
       end_col = mark[3], hl_group = mark[4], priority = 110,
     })
   end
+  if config.height > waveform_height then
+    vim.api.nvim_buf_set_extmark(current.buffer, namespace, waveform_height, 0, {
+      end_col = #lines[waveform_height + 1], hl_group = "NAIAVoiceBaseline",
+    })
+    for row = waveform_height + 1, config.height - 1 do
+      vim.api.nvim_buf_set_extmark(current.buffer, namespace, row, 0, {
+        end_col = #lines[row + 1], hl_group = "NAIAVoiceCaption",
+      })
+    end
+  end
 end
 
-function M.start(samples, volume)
+function M.start(samples, volume, message)
   M.stop()
   if not samples or vim.g.ai_voice_visualizer_enabled == false then
     return
@@ -238,6 +337,7 @@ function M.start(samples, volume)
   vim.bo[buffer].swapfile = false
   local current = {
     samples = samples,
+    message = vim.trim(message or ""),
     volume = math.max(0, math.min(1, volume or 1)),
     started = uv.hrtime(),
     buffer = buffer,
