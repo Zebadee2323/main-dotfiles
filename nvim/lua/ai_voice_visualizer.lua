@@ -1,5 +1,6 @@
 local M = {}
 local captions = require("ai_voice_captions")
+local style = require("naia_ui_style")
 local uv = vim.uv or vim.loop
 local namespace = vim.api.nvim_create_namespace("ai_voice_visualizer")
 local sample_seconds = 0.01
@@ -43,7 +44,8 @@ local function highlights()
   local normal, float = hl("Normal"), hl("NormalFloat")
   local border, comment = hl("FloatBorder"), hl("Comment")
   local accent = hl("DiagnosticInfo").fg or hl("Function").fg or float.fg or normal.fg
-  local background = float.bg or normal.bg
+  style.highlights()
+  local background = hl("NaiaUIVoiceNormal").bg
   local bright = hl("Title").fg or float.fg or normal.fg or accent
   vim.api.nvim_set_hl(0, "NAIAVoiceNormal", { bg = background, fg = accent })
   vim.api.nvim_set_hl(0, "NAIAVoiceBorder", { bg = background, fg = border.fg or comment.fg or accent })
@@ -213,6 +215,7 @@ local function render(current)
     current.window = vim.api.nvim_open_win(current.buffer, false, config)
     vim.wo[current.window].winhighlight = "Normal:NAIAVoiceNormal,FloatBorder:NAIAVoiceBorder,FloatTitle:NAIAVoiceTitle"
     vim.wo[current.window].wrap = false
+    style.apply(current.window, "voice")
   elseif current.width ~= config.width or current.height ~= config.height
       or current.row ~= config.row or current.col ~= config.col
       or current.anchor ~= config.anchor then
@@ -223,7 +226,7 @@ local function render(current)
   current.anchor = config.anchor
 
   -- Positive delay holds the picture back to compensate for player/device startup.
-  local delay = (tonumber(vim.g.ai_voice_visualizer_delay_ms) or 0) / 1000
+  local delay = (tonumber(vim.g.ai_voice_visualizer_delay_ms) or 200) / 1000
   local elapsed = (uv.hrtime() - current.started) / 1e9 - delay
   local waveform = current.samples.waveform or {}
   local span = math.floor(waveform_rate * 0.02)

@@ -272,6 +272,8 @@ local function register_naia_tools()
   if not command_registered then
     notify_naia_tool_registration_error(naia_tool_names.execute_neovim_command, command_err)
   end
+
+  require("naia_ui_tools").register(naia)
 end
 
 register_naia_tools()
