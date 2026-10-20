@@ -65,6 +65,9 @@ limited to eight wrapped rows at 46 columns. It does not replace the voice panel
 - Cards, approvals, and the voice visualiser use opaque, contrasting theme-derived
   surfaces. Cards use the informational accent; approvals use the warning accent. Colours follow
   theme changes without changing the background of regular editing buffers.
+- Bottom-anchored voice visualisers automatically sit above short, wide bottom
+  splits overlapping their horizontal position, including stacked panels. Top
+  anchors are unchanged; configured vertical offsets apply above the panels.
 - `:NaiaApprove [id]` / `:NaiaReject [id]` act on the displayed request by default.
 - In the approval card: `y` allows once, `n`/`q` reject, `a` allows this capability
   for the session, and `m` disables it for the session. These keys apply only when

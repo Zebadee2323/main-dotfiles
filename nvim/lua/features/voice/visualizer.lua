@@ -55,6 +55,37 @@ local function highlights()
   vim.api.nvim_set_hl(0, "NAIAVoiceCaption", { fg = float.fg or normal.fg or bright })
 end
 
+local function bottom_window_boundary(bottom, left, right)
+  local panels = {}
+  for _, window in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local config = vim.api.nvim_win_get_config(window)
+    if config.relative == "" and not config.external then
+      local info = vim.fn.getwininfo(window)[1]
+      local top, col = info.winrow - 1, info.wincol - 1
+      -- Avoid treating the main editing area (or a tall sidebar) as a panel.
+      if info.height < bottom / 2 and info.width > info.height
+          and col < right and col + info.width > left then
+        panels[#panels + 1] = {
+          top = top,
+          bottom = top + info.height + info.winbar + info.status_height,
+        }
+      end
+    end
+  end
+  -- Walk upwards through stacked bottom splits, independent of window order.
+  local boundary = bottom
+  local previous
+  repeat
+    previous = boundary
+    for _, panel in ipairs(panels) do
+      if panel.top < boundary and panel.bottom >= boundary then
+        boundary = panel.top
+      end
+    end
+  until boundary == previous
+  return boundary
+end
+
 local function window_config(current)
   local width = math.min(44, vim.o.columns - 4)
   local show_captions = current.message ~= "" and vim.g.ai_voice_captions_enabled ~= false
@@ -78,12 +109,20 @@ local function window_config(current)
     return math.max(0, math.min(maximum, math.floor(value)))
   end
   local x = offset(vim.g.ai_voice_visualizer_offset_x, vim.o.columns - width - 2, 7)
+  local col = anchor:sub(2, 2) == "E" and vim.o.columns - x or x
+  if anchor:sub(1, 1) == "S" then
+    local left = col - (anchor:sub(2, 2) == "E" and width + 2 or 0)
+    bottom = bottom_window_boundary(bottom, left, left + width + 2)
+    if bottom < height + 3 then
+      return nil
+    end
+  end
   local y = offset(vim.g.ai_voice_visualizer_offset_y, bottom - height - 2, 1)
   return {
     relative = "editor",
     anchor = anchor,
     row = anchor:sub(1, 1) == "S" and bottom - y or y,
-    col = anchor:sub(2, 2) == "E" and vim.o.columns - x or x,
+    col = col,
     width = width,
     height = height,
     style = "minimal",
