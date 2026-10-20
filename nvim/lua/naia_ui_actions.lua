@@ -320,6 +320,14 @@ function M.focus_card()
   vim.api.nvim_set_current_win(card_window)
 end
 
+function M.toggle_card()
+  if card_window and vim.api.nvim_win_is_valid(card_window) then
+    M.close_card()
+  else
+    M.focus_card()
+  end
+end
+
 function M.cycle_card(direction)
   assert(#card_history > 0, "No pinned card history")
   local focused = card_window and vim.api.nvim_get_current_win() == card_window
@@ -334,7 +342,9 @@ local function show_card(data, request_navigation)
   card_history[#card_history + 1] = entry
   if #card_history > 8 then table.remove(card_history, 1) end
   card_index = #card_history
-  return render_card(entry)
+  local result = render_card(entry)
+  style.flash(result.window)
+  return result
 end
 
 function M.apply(kind, data, request_navigation)

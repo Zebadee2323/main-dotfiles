@@ -25,17 +25,14 @@ local function mapping(buffer, lhs)
   end
   error("Missing mapping " .. lhs)
 end
-local function press_button(label)
+local function approval_key(key)
   local prompt
   for _, win in ipairs(vim.api.nvim_list_wins()) do
     if vim.w[win].naia_approval then prompt = win end
   end
-  assert(prompt, "no approval to click")
-  local footer = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(prompt), 4, 5, false)[1]
-  local column = assert(footer:find(label, 1, true))
+  assert(prompt, "no approval to focus")
   vim.api.nvim_set_current_win(prompt)
-  vim.api.nvim_win_set_cursor(prompt, { 5, column - 1 })
-  mapping(vim.api.nvim_win_get_buf(prompt), "<CR>")
+  mapping(vim.api.nvim_win_get_buf(prompt), key)
   flush()
 end
 
@@ -52,11 +49,16 @@ local function assert_approval_position()
       local bottom = vim.o.lines - vim.o.cmdheight - (vim.o.laststatus == 0 and 0 or 1)
       assert(config.anchor == "SW" and config.row == bottom - 1, "approval is not bottom-aligned")
       assert(config.col == math.floor((vim.o.columns - config.width - 2) / 2), "approval is not centred")
-      if not vim.w[win].naia_approval_review then
-        assert(config.height == 5 and config.width <= 64, "passive approval should be compact")
-        local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), 0, -1, false)
-        assert(lines[1]:find("Jump to ", 1, true))
-        assert(lines[5] == "[Allow]  [Reject]  [Details]")
+      assert(config.height == 6 and config.width <= 64, "approval should be compact")
+      local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), 0, -1, false)
+      assert(lines[1]:find("Jump to ", 1, true))
+      assert(lines[5] == "Focused: y allow · n/q reject")
+      assert(lines[6] == ":NaiaApprove · :NaiaReject")
+      assert(not table.concat(lines):find("[Allow]", 1, true), "approval still renders buttons")
+      assert(not table.concat(lines):find("NaiaReview", 1, true), "review command remains visible")
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(vim.api.nvim_win_get_buf(win), "n")) do
+        assert(map.lhs ~= "<Tab>" and map.lhs ~= "<S-Tab>" and map.lhs ~= "<CR>", "button navigation remains installed")
+        assert(map.lhs ~= "r" and map.lhs ~= "b", "review mappings remain installed")
       end
       found = true
     end
@@ -70,13 +72,8 @@ vim.api.nvim_exec_autocmds("VimResized", {})
 assert_approval_position()
 vim.o.columns, vim.o.lines = old_columns, old_lines
 vim.api.nvim_exec_autocmds("VimResized", {})
-press_button("[Details]")
-assert(vim.api.nvim_win_get_config(0).relative == "editor")
-assert(vim.w[vim.api.nvim_get_current_win()].naia_approval_review, "Details button did not expand")
-assert_approval_position()
-press_button("[Back]")
-assert(vim.api.nvim_get_current_win() == source, "Back did not return editing focus")
-press_button("[Allow]")
+assert(vim.fn.exists(":NaiaReview") == 0, "review command remains installed")
+approval_key("y")
 assert(status(request).status == "applied", vim.inspect(status(request)))
 assert(vim.api.nvim_buf_get_name(0) == target and vim.api.nvim_win_get_cursor(0)[1] == 3)
 assert(not vim.g.injected, "filename interpreted as Ex")
@@ -86,15 +83,13 @@ assert(vim.api.nvim_buf_get_name(0) == origin and vim.api.nvim_win_get_cursor(0)
 flush()
 request = nav()
 flush()
-press_button("[Reject]")
+approval_key("n")
 assert(status(request).status == "rejected" and vim.api.nvim_buf_get_name(0) == origin)
 flush()
 request = nav()
 flush()
-vim.cmd("NaiaReview")
-mapping(vim.api.nvim_get_current_buf(), "<Tab>")
-mapping(vim.api.nvim_get_current_buf(), "<CR>")
-assert(status(request).status == "applied", "keyboard buttons did not allow request")
+vim.cmd("NaiaApprove")
+assert(status(request).status == "applied", "direct approval command did not allow request")
 vim.api.nvim_cmd({ cmd = "normal", bang = true, args = { string.char(15) } }, {})
 flush()
 
@@ -192,10 +187,36 @@ local function card(index)
   assert(status(result).status == "applied", vim.inspect(status(result)))
   return status(result).result
 end
-for index = 1, 10 do card(index) end
+local defer_flash, flash_steps = vim.defer_fn, {}
+vim.defer_fn = function(callback, delay)
+  flash_steps[#flash_steps + 1] = { callback = callback, delay = delay }
+end
+local first_card = card(1)
+assert(#flash_steps == 1 and flash_steps[1].delay == 100, "flash needs a short lead-in")
+assert(not vim.w[first_card.window].naia_card_flashing, "card should paint normally before pulsing")
+for pulse = 1, 3 do
+  local start = pulse * 2 - 1
+  assert(flash_steps[start].delay == 100, "pulse gap should be 100ms")
+  flash_steps[start].callback()
+  assert(vim.w[first_card.window].naia_card_flashing, "new card did not flash")
+  assert(flash_steps[start + 1].delay == 150, "pulse should last 150ms")
+  require("naia_ui_style").refresh()
+  assert(vim.wo[first_card.window].winhighlight:find("Normal:NaiaUICardFlashNormal", 1, true))
+  flash_steps[start + 1].callback()
+  assert(not vim.w[first_card.window].naia_card_flashing, "pulse did not return to normal")
+end
+assert(#flash_steps == 6, "card should pulse exactly three times")
+vim.defer_fn = defer_flash
+assert(not vim.w[first_card.window].naia_card_flashing, "flash did not stop")
+assert(vim.wo[first_card.window].winhighlight:find("Normal:NaiaUICardNormal", 1, true))
+vim.g.naia_ui_card_flash = false
+assert(not vim.w[card(2).window].naia_card_flashing, "disabled flash still ran")
+vim.g.naia_ui_card_flash = nil
+for index = 3, 10 do card(index) end
 assert(vim.api.nvim_get_current_win() == source, "card stole focus")
 local prior = actions.cycle_card(-1)
 assert(prior.title == "Card 9")
+assert(not vim.w[prior.window].naia_card_flashing, "history browsing should not flash")
 assert(vim.api.nvim_win_get_config(prior.window).focusable == false)
 for _ = 1, 6 do prior = actions.cycle_card(-1) end
 assert(prior.title == "Card 3", "card history should retain only eight snapshots")
@@ -204,6 +225,11 @@ vim.cmd("NaiaCardClose")
 vim.cmd("NaiaCard")
 local card_window = vim.api.nvim_get_current_win()
 assert(vim.api.nvim_win_get_config(card_window).relative == "editor", "cannot reopen/focus card")
+vim.cmd("NaiaCard")
+assert(not vim.api.nvim_win_is_valid(card_window), "NaiaCard did not close the visible card")
+vim.cmd("NaiaCard")
+assert(vim.api.nvim_win_get_config(0).relative == "editor", "NaiaCard did not reopen the selected card")
+assert(not vim.w[vim.api.nvim_get_current_win()].naia_card_flashing, "reopening a card should not flash")
 mapping(vim.api.nvim_get_current_buf(), "[h")
 assert(vim.api.nvim_buf_get_lines(0, 0, 1, false)[1] == "Note 9")
 ui.set_policy("card", "off")
@@ -278,6 +304,8 @@ for _, palette in ipairs({
       "surface blends into the active buffer")
   end
   assert(vim.api.nvim_get_hl(0, { name = "Normal" }).bg == palette.background)
+  assert(vim.api.nvim_get_hl(0, { name = "NaiaUICardNormal" }).bg
+    == vim.api.nvim_get_hl(0, { name = "NaiaUIVoiceNormal" }).bg, "card/voice backgrounds differ")
 end
 local surface_card = actions.cycle_card(1)
 assert(vim.wo[surface_card.window].winblend == 0)

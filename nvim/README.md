@@ -32,18 +32,17 @@ The small pinned card is allowed by default, opens without taking focus, and is
 limited to eight wrapped rows at 46 columns. It does not replace the voice panel.
 
 - Approval prompts sit at the bottom centre; pinned cards remain in the top-right.
-- Passive approvals use a five-line summary: action, target, reason, and controls.
-  Use `:NaiaApprove` or `:NaiaReject` directly; **Details** is optional and shows
-  the full proposal. Approval actions are keyboard-only; no mouse handlers are installed.
+- Passive approvals show a compact summary with action, target, reason, and plain
+  keybinding/command hints—no buttons or button-navigation mappings.
+  Use `:NaiaApprove` or `:NaiaReject` directly. There is no separate review step.
+  Approval actions are keyboard-only; no mouse handlers are installed.
 - Cards, approvals, and the voice visualiser use opaque, contrasting theme-derived
   surfaces. Cards use the informational accent; approvals use the warning accent. Colours follow
   theme changes without changing the background of regular editing buffers.
-- `:NaiaReview [id]` focuses the approval card and shows the full proposal.
-  Normal editing continues until you choose to review it.
 - `:NaiaApprove [id]` / `:NaiaReject [id]` act on the displayed request by default.
 - In the approval card: `y` allows once, `n`/`q` reject, `a` allows this capability
-  for the session, and `m` disables it for the session. Tab/Shift-Tab select buttons
-  and Enter activates them. Details has a Back button to return to the short prompt.
+  for the session, and `m` disables it for the session. These keys apply only when
+  the prompt is focused; commands work directly from the editor.
 - `:NaiaUIPolicy {companion|quickfix|navigation|card} {ask|allow|off}` controls each
   feature independently. `off` silently rejects future requests and cancels
   pending ones; for cards it also closes the current float. `allow` skips future
@@ -75,12 +74,16 @@ user-owned; agents must not change it to bypass approvals.
   window is reused rather than accumulating splits. Use `:NaiaCompanionPrevious`
   / `:NaiaCompanionNext`, or `[h` / `]h` inside a companion, to cycle history.
   Normal buffer pickers and `:buffers` also show these snapshots.
-- `:NaiaCard` focuses the pinned float; `q` or `:NaiaCardClose` dismisses it.
+- `:NaiaCard` toggles the pinned float: close it if showing, otherwise reopen/focus
+  the selected snapshot. `q` or `:NaiaCardClose` explicitly dismisses it.
   Dismissing a card does not disable later cards; use `:NaiaUIPolicy card off` for that.
 - Cards keep the last **eight** snapshots in memory. `:NaiaCardPrevious` /
   `:NaiaCardNext` cycle without taking focus; `[h` / `]h` work inside a focused
   card. `:NaiaCard` reopens the selected snapshot after dismissal. History is
   session-local; muting stops agent updates but does not prevent manual browsing.
+- Cards share the voice panel's dark background. New cards settle for 100ms, then
+  pulse three times (150ms each, with 100ms gaps); history browsing does not flash. Disable with
+  `vim.g.naia_ui_card_flash = false`.
 
 Companion text is ordinary Markdown. Pair inline source links with structured
 targets so paths and locations never have to be interpreted as editor commands:

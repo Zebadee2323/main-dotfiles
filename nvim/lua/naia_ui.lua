@@ -89,7 +89,7 @@ function M.set_policy(kind, policy)
   end
 end
 
-present = function(focus)
+present = function()
   local request = selected and requests[selected]
   if not request or request.status ~= "pending" then
     selected, request = nil, nil
@@ -106,7 +106,7 @@ present = function(focus)
     reject = function() M.reject(request.id) end,
     allow = function() M.set_policy(request.kind, "allow"); M.approve(request.id) end,
     mute = function() M.set_policy(request.kind, "off") end,
-  }, focus)
+  })
 end
 
 function M.request(kind, args)
@@ -178,10 +178,7 @@ command("NaiaApprove", function(opts) M.approve(opts.args ~= "" and opts.args or
   { nargs = "?", desc = "Approve one pending Naia UI request" })
 command("NaiaReject", function(opts) M.reject(opts.args ~= "" and opts.args or nil) end,
   { nargs = "?", desc = "Reject one pending Naia UI request" })
-command("NaiaReview", function(opts)
-  if opts.args ~= "" then selected = pending(opts.args).id end
-  present(true)
-end, { nargs = "?", desc = "Focus the non-blocking Naia approval card" })
+pcall(vim.api.nvim_del_user_command, "NaiaReview")
 command("NaiaUIPolicy", function(opts)
   local kind, policy = opts.fargs[1], opts.fargs[2]
   assert(#opts.fargs <= 2, "Use :NaiaUIPolicy [companion|quickfix|navigation|card] [ask|allow|off]")
@@ -200,7 +197,7 @@ command("NaiaCompanionPrevious", function() actions.cycle_companion(-1) end,
   { desc = "Show the previous companion buffer" })
 command("NaiaCompanionNext", function() actions.cycle_companion(1) end,
   { desc = "Show the next companion buffer" })
-command("NaiaCard", actions.focus_card, { desc = "Focus the small pinned Naia card" })
+command("NaiaCard", actions.toggle_card, { desc = "Toggle the selected pinned Naia card" })
 command("NaiaCardClose", actions.close_card, { desc = "Dismiss the current pinned Naia card" })
 command("NaiaCardPrevious", function() actions.cycle_card(-1) end,
   { desc = "Show the previous pinned card" })

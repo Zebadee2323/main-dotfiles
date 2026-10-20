@@ -2,10 +2,13 @@ return {
     'tpope/vim-commentary',
     'justinmk/vim-sneak',
     {
-        'karb94/neoscroll.nvim',
-        config = function()
-            require('config.neoscroll')
-        end,
+        'folke/snacks.nvim',
+        lazy = false,
+        opts = {
+            scroll = {
+                enabled = not vim.g.neovide,
+            },
+        },
     },
     {
         'mvllow/modes.nvim',

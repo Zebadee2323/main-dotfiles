@@ -1,4 +1,5 @@
 local M = {}
+local flashes = {}
 
 local function blend(a, b, amount)
   local result = 0
@@ -45,23 +46,65 @@ function M.highlights()
     Approval = hl("DiagnosticWarn").fg or hl("Question").fg or foreground,
   }
   for name, accent in pairs(roles) do
-    local background = name == "Voice" and voice_background or blend(surface, accent, 0.035)
+    local background = name ~= "Approval" and voice_background or blend(surface, accent, 0.035)
     vim.api.nvim_set_hl(0, "NaiaUI" .. name .. "Normal", { fg = foreground, bg = background })
     vim.api.nvim_set_hl(0, "NaiaUI" .. name .. "Border", { fg = accent, bg = background })
     vim.api.nvim_set_hl(0, "NaiaUI" .. name .. "Title", { fg = accent, bg = background, bold = true })
     vim.api.nvim_set_hl(0, "NaiaUI" .. name .. "Muted", { fg = hl("Comment").fg or foreground, bg = background })
   end
+  local flash_background = blend(voice_background, foreground, 0.24)
+  vim.api.nvim_set_hl(0, "NaiaUICardFlashNormal", { fg = foreground, bg = flash_background })
+  vim.api.nvim_set_hl(0, "NaiaUICardFlashBorder", { fg = foreground, bg = flash_background, bold = true })
+  vim.api.nvim_set_hl(0, "NaiaUICardFlashTitle", { fg = roles.Card, bg = flash_background, bold = true })
 end
 
 function M.apply(window, kind)
   if not vim.api.nvim_win_is_valid(window) then return end
   local prefix = ({ approval = "NaiaUIApproval", card = "NaiaUICard", voice = "NaiaUIVoice" })[kind]
   assert(prefix, "Unknown Naia surface kind")
+  if kind == "card" and vim.w[window].naia_card_flashing then prefix = "NaiaUICardFlash" end
   vim.wo[window].winhighlight = table.concat({
     "Normal:" .. prefix .. "Normal", "NormalNC:" .. prefix .. "Normal",
     "FloatBorder:" .. prefix .. "Border", "FloatTitle:" .. prefix .. "Title",
   }, ",")
   vim.wo[window].winblend = 0
+end
+
+function M.flash(window)
+  if vim.g.naia_ui_card_flash == false or not vim.api.nvim_win_is_valid(window)
+      or flashes[window] then return end
+  local token = {}
+  flashes[window] = token
+  local function clear()
+    if flashes[window] == token then
+      flashes[window] = nil
+      if vim.api.nvim_win_is_valid(window) then
+        vim.w[window].naia_card_flashing = nil
+        M.apply(window, "card")
+      end
+    end
+  end
+  local function valid()
+    return flashes[window] == token and vim.api.nvim_win_is_valid(window) and vim.g.naia_ui_card_flash ~= false
+  end
+  -- Paint normally first, then three short, soft pulses. Every step checks its
+  -- window/token so closing, replacing, or muting the card cancels the sequence.
+  local function pulse(number)
+    if not valid() then clear(); return end
+    vim.w[window].naia_card_flashing = true
+    M.apply(window, "card")
+    vim.defer_fn(function()
+      if not valid() then clear(); return end
+      vim.w[window].naia_card_flashing = nil
+      M.apply(window, "card")
+      if number < 3 then
+        vim.defer_fn(function() pulse(number + 1) end, 100)
+      else
+        flashes[window] = nil
+      end
+    end, 150)
+  end
+  vim.defer_fn(function() pulse(1) end, 100)
 end
 
 -- Recognise already-open panels too, so styles can be reloaded without losing
