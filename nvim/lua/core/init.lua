@@ -1,0 +1,5 @@
+require("core.options")
+require("core.commands")
+require("core.keymaps")
+require("features.scrolling").setup()
+require("features.terminal").setup()
