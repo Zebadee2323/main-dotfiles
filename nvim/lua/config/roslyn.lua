@@ -132,13 +132,11 @@ vim.api.nvim_create_autocmd("BufReadCmd", {
   callback = function(args)
     vim.bo[args.buf].modifiable = true
     vim.bo[args.buf].swapfile = false
-    vim.bo[args.buf].filetype = "cs"
 
     local clients = get_preferred_roslyn_clients(args.buf)
     local client = clients[1]
-    if client then
-      vim.lsp.buf_attach_client(args.buf, client.id)
-    else
+    if not client then
+      vim.bo[args.buf].filetype = "cs"
       vim.wait(5000, function()
         return next(vim.lsp.get_clients({ name = "roslyn", bufnr = args.buf })) ~= nil
       end)
@@ -150,17 +148,31 @@ vim.api.nvim_create_autocmd("BufReadCmd", {
 
     local content
     local tried = {}
-    local function apply_result(result)
+    local function apply_result(result, candidate)
       content = result.text or ""
       if content == vim.NIL then
         content = ""
       end
-      local normalized = string.gsub(content, "\r\n", "\n")
-      local source_lines = vim.split(normalized, "\n", { plain = true })
+      -- Keep didOpen text identical to Roslyn's generated text. A terminal
+      -- newline belongs in 'endofline', not an additional empty buffer line.
+      local without_crlf = content:gsub("\r\n", "")
+      local is_dos = content:find("\r\n", 1, true) ~= nil and not without_crlf:find("\n", 1, true)
+      local line_ending = is_dos and "\r\n" or "\n"
+      local has_eol = content:sub(-#line_ending) == line_ending
+      local source_lines = vim.split(content, line_ending, { plain = true })
+      if has_eol then
+        table.remove(source_lines)
+      end
+      vim.bo[args.buf].fileformat = is_dos and "dos" or "unix"
+      vim.bo[args.buf].endofline = has_eol
+      vim.bo[args.buf].fixendofline = false
       vim.api.nvim_buf_set_lines(args.buf, 0, -1, false, source_lines)
       vim.b[args.buf].resultId = result.resultId
       vim.bo[args.buf].modifiable = false
       vim.bo[args.buf].modified = false
+      -- Do not send an empty/partially populated generated document to Roslyn.
+      vim.bo[args.buf].filetype = "cs"
+      vim.lsp.buf_attach_client(args.buf, candidate.id)
     end
 
     local function request_from(index)
@@ -180,7 +192,6 @@ vim.api.nvim_create_autocmd("BufReadCmd", {
         return
       end
 
-      vim.lsp.buf_attach_client(args.buf, candidate.id)
       candidate:request("sourceGeneratedDocument/_roslyn_getText", {
         textDocument = { uri = args.match },
         resultId = nil,
@@ -190,7 +201,7 @@ vim.api.nvim_create_autocmd("BufReadCmd", {
           return request_from(index + 1)
         end
 
-        apply_result(result)
+        apply_result(result, candidate)
       end, args.buf)
     end
 
