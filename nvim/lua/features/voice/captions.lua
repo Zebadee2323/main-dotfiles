@@ -1,6 +1,17 @@
 local M = {}
 local page_height = 3
 
+-- Roughly 180 words/minute at five non-whitespace characters per word.
+-- Like caption page weights, count characters rather than UTF-8 bytes.
+-- This estimates speech only; synthesis and player startup are not included.
+function M.estimate_talk_seconds(message)
+  local weight = 0
+  for word in message:gmatch("%S+") do
+    weight = weight + vim.fn.strchars(word, 1)
+  end
+  return weight / 15
+end
+
 function M.prepare(message, width)
   local lines = {}
   local line = ""

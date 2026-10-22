@@ -70,19 +70,67 @@ end
 
 -- ---------- find Unity root ----------
 local function find_unity_root(startpath)
-    local start = startpath
-    if not start or start == "" then
-        start = vim.api.nvim_buf_get_name(0)
-        if not start or start == "" then start = uv.cwd() end
-    end
     local function is_root(p)
-        return vim.fn.isdirectory(p .. "/Assets") == 1 and vim.fn.isdirectory(p .. "/Library") == 1
+        return vim.fn.isdirectory(p .. "/Assets") == 1
+            and vim.fn.filereadable(p .. "/ProjectSettings/ProjectVersion.txt") == 1
     end
-    if is_root(start) then return start end
-    for p in vim.fs.parents(start) do
-        if is_root(p) then return p end
+
+    local start = startpath or vim.api.nvim_buf_get_name(0)
+    if start ~= "" and not start:match("^%w+://") then
+        if is_root(start) then return start end
+        for p in vim.fs.parents(start) do
+            if is_root(p) then return p end
+        end
     end
-    return nil
+
+    -- Respect window/tab-local working directories as well as the global cwd.
+    local workspace = vim.fn.getcwd()
+    if is_root(workspace) then return workspace end
+
+    -- Search only a few levels, pruning generated/large directories and symlinks.
+    local skip = {
+        Assets = true, Packages = true, ProjectSettings = true,
+        Library = true, Temp = true, Obj = true, obj = true,
+        Logs = true, UserSettings = true, node_modules = true,
+    }
+    local roots, visited = {}, 0
+    local function scan(path, depth)
+        visited = visited + 1
+        if visited > 1000 then error("Unity project search exceeded 1000 directories; narrow Neovim's working directory") end
+        if is_root(path) then
+            table.insert(roots, path)
+            return
+        end
+        if depth == 3 then return end
+        for name, kind in vim.fs.dir(path) do
+            if kind == "directory" and name:sub(1, 1) ~= "." and not skip[name] then
+                scan(path .. "/" .. name, depth + 1)
+            end
+        end
+    end
+    scan(workspace, 0)
+    table.sort(roots)
+    if #roots == 1 then return roots[1] end
+    if #roots == 0 then
+        vim.notify("No Unity project found under " .. workspace .. " (searched 3 levels)", vim.log.levels.WARN)
+        return nil
+    end
+
+    -- EditorInstance.json may outlive its process, so check that PID is live.
+    local running = {}
+    for _, root in ipairs(roots) do
+        local instance = read_json(root .. "/Library/EditorInstance.json") or {}
+        local pid = tonumber(instance.process_id or instance.processId)
+        if pid and pid > 0 and uv.kill(pid, 0) then table.insert(running, root) end
+    end
+    if #running == 1 then return running[1] end
+
+    local choices = { "Select Unity project (0 to cancel):" }
+    for i, root in ipairs(roots) do
+        table.insert(choices, ("%d. %s"):format(i, root))
+    end
+    local choice = vim.fn.inputlist(choices)
+    return roots[choice]
 end
 
 -- ---------- read EditorInstance.json (PID etc.) ----------
@@ -240,44 +288,34 @@ local function list_listen_ports_for_pid(pid)
 
     -- ---------- DAP config ----------
     dap.configurations.cs = {
-        {
+        setmetatable({
             type = "vstuc",
             request = "attach",
             name = "Attach to Unity (Editor/Player)",
+        }, {
+            -- nvim-dap calls this once per attach, before expanding config fields.
+            __call = function(config)
+                local root = find_unity_root()
+                if not root then return { projectPath = dap.ABORT } end
+                local resolved = vim.deepcopy(config)
+                setmetatable(resolved, nil)
+                resolved.projectPath = root
+                resolved.cwd = root
 
-            projectPath = function()
-                return find_unity_root(vim.api.nvim_buf_get_name(0)) or uv.cwd()
-            end,
-
-            -- Prefer Editor PID for Unity 6+/modern editors
-            processId = function()
-                local root = find_unity_root(vim.api.nvim_buf_get_name(0)) or uv.cwd()
+                -- All attach fields share the same selected Unity project.
                 local info = read_editor_instance(root)
-                return info.processId -- may be nil; that's fine
-            end,
-
-            -- Player / older editors: infer endpoint without Editor.log
-            endPoint = function()
-                local root = find_unity_root(vim.api.nvim_buf_get_name(0)) or uv.cwd()
-                local ep = detect_unity_endpoint(root)
-                if not ep then
-                    -- Optional: show a hint once so users know what failed
+                resolved.processId = info.processId
+                resolved.endPoint = detect_unity_endpoint(root)
+                if not resolved.endPoint then
                     vim.schedule(function()
                         vim.notify(
                             "Unity debugger endpoint could not be inferred. Is the player/editor started with Script Debugging enabled?",
                             vim.log.levels.WARN)
                         end)
-                    end
-                    return ep
-                end,
-
-                cwd = function()
-                    return find_unity_root(vim.api.nvim_buf_get_name(0)) or vim.loop.cwd()
-                end,
-
-                -- logFile = vim.fn.stdpath("cache") .. "/unity-vstuc.log",
-                -- trace   = true,
-            },
+                end
+                return resolved
+            end,
+        }),
         }
 
         dap.listeners.after["event_initialized"]["vstuc_path_fix"] = function(session, _)
@@ -312,6 +350,11 @@ local function list_listen_ports_for_pid(pid)
             end
 
             session.request = function(self, command, arguments, callback)
+                -- MCP's empty Lua table encodes as []; VSTUC expects an object.
+                if command == "threads" and type(arguments) == "table" and next(arguments) == nil then
+                    arguments = vim.empty_dict()
+                end
+
                 if command ~= "stackTrace" then
                     return original_request(self, command, arguments, callback)
                 end

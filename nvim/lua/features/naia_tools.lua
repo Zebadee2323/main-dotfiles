@@ -45,7 +45,11 @@ local function naia_inform_user(args)
     end
   end)
 
-  return ""
+  local seconds = require("features.voice.captions").estimate_talk_seconds(message)
+  return string.format(
+    "Message queued for speech. Estimated talk time: %.1f seconds (approximate; excludes synthesis and playback startup).",
+    seconds
+  )
 end
 
 local function normalize_command_line(command_line)
@@ -234,7 +238,7 @@ local function register_naia_tools()
   end
 
   local inform_registered, inform_err = naia.register_tool(naia_tool_names.inform_user, {
-    description = "Notify the user in Neovim and speak the message aloud.",
+    description = "Notify the user in Neovim and speak the message aloud. Returns an approximate talk time in seconds, excluding synthesis and playback startup.",
     args = {
       message = {
         type = "string",
