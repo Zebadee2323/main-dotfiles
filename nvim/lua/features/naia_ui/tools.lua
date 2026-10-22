@@ -21,7 +21,8 @@ local links = {
     required = { "label", "path" },
   },
 }
-local pending = " Returns a pending request ID immediately; the editor remains responsive. "
+local pending = " Auto-allowed by default; user policies may require approval or disable this capability. "
+  .. "Returns a pending request ID immediately while the action is queued; the editor remains responsive. "
   .. "Do not claim success until get_ui_request_status reports applied. Do not poll repeatedly while waiting "
   .. "for approval. Respect muted/rejected requests; never bypass them with execute_neovim_command or change user policies."
 
@@ -62,8 +63,8 @@ local specs = {
     kind = "quickfix",
     properties = {
       title = { type = "string", minLength = 1, maxLength = 100 }, reason = reason,
-      mode = { type = "string", enum = { "new", "append", "replace" } },
-      open = { type = "boolean", description = "Open quickfix without taking focus after approval; defaults to false." },
+      mode = { type = "string", description = "One of: new, append, replace. Defaults to new." },
+      open = { type = "boolean", description = "Open quickfix without taking focus when applied; defaults to false." },
       items = {
         type = "array", maxItems = 500,
         items = {
@@ -91,24 +92,20 @@ local specs = {
 function M.register(naia)
   for name, spec in pairs(specs) do
     pcall(naia.deregister_tool, name)
+    local args = vim.deepcopy(spec.properties)
+    for key, field in pairs(args) do field.required = vim.tbl_contains(spec.required, key) end
     local ok, err = naia.register_tool(name, {
-      title = spec.title, description = spec.description,
-      input_schema = {
-        type = "object", properties = spec.properties, required = spec.required, additionalProperties = false,
-      },
+      description = spec.description,
+      args = args,
       callback = function(args) return vim.json.encode(ui.request(spec.kind, args)) end,
     })
     if not ok then vim.notify("Could not register Naia " .. name .. ": " .. tostring(err), vim.log.levels.WARN) end
   end
   pcall(naia.deregister_tool, "get_ui_request_status")
   local ok, err = naia.register_tool("get_ui_request_status", {
-    title = "Get UI Request Status",
     description = "Read the outcome of a UI request by ID: pending, applied, rejected, muted, expired, or failed. "
       .. "Use on demand, not in a polling loop; a pending approval is not success.",
-    input_schema = {
-      type = "object", additionalProperties = false, required = { "request_id" },
-      properties = { request_id = { type = "string", minLength = 1 } },
-    },
+    args = { request_id = { type = "string", required = true, description = "Non-empty UI request ID returned by a display tool." } },
     callback = function(args) return vim.json.encode(ui.status(args.request_id)) end,
   })
   if not ok then vim.notify("Could not register Naia UI status tool: " .. tostring(err), vim.log.levels.WARN) end

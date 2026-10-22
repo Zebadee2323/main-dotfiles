@@ -234,18 +234,13 @@ local function register_naia_tools()
   end
 
   local inform_registered, inform_err = naia.register_tool(naia_tool_names.inform_user, {
-    title = "Inform User",
     description = "Notify the user in Neovim and speak the message aloud.",
-    input_schema = {
-      type = "object",
-      properties = {
-        message = {
-          type = "string",
-          description = "The user-facing message to announce.",
-        },
+    args = {
+      message = {
+        type = "string",
+        required = true,
+        description = "The user-facing message to announce.",
       },
-      required = { "message" },
-      additionalProperties = false,
     },
     callback = naia_inform_user,
   })
@@ -255,18 +250,13 @@ local function register_naia_tools()
   end
 
   local command_registered, command_err = naia.register_tool(naia_tool_names.execute_neovim_command, {
-    title = "Execute Neovim Command",
     description = "Run any Neovim Ex command, if successful it will return its output.",
-    input_schema = {
-      type = "object",
-      properties = {
-        command = {
-          type = "string",
-          description = "The exact Neovim command line to run, without the leading colon.",
-        },
+    args = {
+      command = {
+        type = "string",
+        required = true,
+        description = "The exact Neovim command line to run, without the leading colon.",
       },
-      required = { "command" },
-      additionalProperties = false,
     },
     callback = naia_execute_user_command,
   })

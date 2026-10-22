@@ -1587,17 +1587,16 @@ local function register_follow_naia_tool()
   pcall(naia.deregister_tool, follow_tool_name)
 
   local registered, err = naia.register_tool(follow_tool_name, {
-    title = "Report File Edits",
     description = "Report AI-driven file edits so Neovim can play file change FX for the given file and changed line ranges.",
-    input_schema = {
-      type = "object",
-      properties = {
+    args = {
         path = {
           type = "string",
+          required = true,
           description = "The edited file path, absolute or relative to the current Neovim working directory.",
         },
         hunks = {
           type = "array",
+          required = true,
           description = "Changed line ranges in the edited file.",
           minItems = 1,
           items = {
@@ -1620,9 +1619,6 @@ local function register_follow_naia_tool()
             additionalProperties = false,
           },
         },
-      },
-      required = { "path", "hunks" },
-      additionalProperties = false,
     },
     callback = naia_report_file_edits,
   })

@@ -48,14 +48,52 @@ Use `:Lazy profile` to inspect loading costs. Plugin versions remain pinned in
 
 ## Naia companion and editor tools
 
-Naia exposes `show_companion`, `show_card`, `set_quickfix`, and
-`jump_to_location` through MCP. Requests return an ID immediately rather than
-blocking Neovim. `get_ui_request_status` reports the actual outcome; pending
+### Shared MCP bridge ownership
+
+`guill/mcp-tools.nvim` is independently configured by `config/mcp_tools.lua` and
+starts before Naia loads. Naia registers individual tools alongside other
+providers; it does not initialize, configure, start or stop this shared server.
+The upstream OpenCode integration stays disabled because Sidekick handles the
+OpenCode V2 connection to the exact parent editor.
+
+`features/mcp_tools_runtime.lua` is a temporary, Naia-independent safety guard:
+the pinned upstream shutdown handler sends `qa!` to Neovim. The guard retains
+the normal mcp-tools public API/settings but runs a direct Node/Bun child and
+terminates only that child on stop. It relies on upstream bridge internals and
+should be revisited when upstream fixes shutdown. The dependency's npm security
+advisories also remain unresolved; review package updates before production use.
+The Node import loader is passed as an escaped file URL, including on Windows;
+the script entry point remains a normal filesystem path.
+
+- `:MCPToolsStart`, `:MCPToolsStop`, `:MCPToolsRestart`, `:MCPToolsStatus` control
+  the shared transport independently of Naia.
+- `:NaiaStart`, `:NaiaStop`, `:NaiaRestart` attach/detach only Naia registrations.
+- Sidekick configures native HTTP connections to the existing bridge; no stdio
+  adapter is used and it never starts transport. Relaunch through Sidekick after
+  a bridge restart to refresh its launch-scoped URL/token. Claude/Codex approvals follow the
+  harness's policy rather than blanket approval of every shared-server tool.
+- Run `nvim --headless -u NONE -l tests/mcp_tools_spec.lua` to test configuration
+  and editor-safe transport stop/restart without loading Naia.
+- Tool definitions use upstream `args`, not full input schemas. Responses are
+  ordinary text/JSON; all MCP tool names have upstream's `nvim_` prefix.
+  Walkthrough tools are `nvim_walkthrough_*` (no `ai_`). Register before connecting;
+  reconnect after adding/removing tools. Existing walkthrough edits need no reconnect.
+- Instructions are attached by the launcher, not the MCP server. Launch new Naia
+  sessions through Sidekick rather than assuming new in-TUI sessions inherit them.
+- Run `nvim --headless -u NONE -l tests/naia_native_tools_spec.lua` to verify your
+  configured tools against the upstream registry without starting a bridge.
+
+Naia exposes `nvim_show_companion`, `nvim_show_card`, `nvim_set_quickfix`, and
+`nvim_jump_to_location` through MCP. Requests return an ID immediately rather than
+blocking Neovim. `nvim_get_ui_request_status` reports the actual outcome; pending
 does not mean an action has happened. Approval requests expire after two minutes.
 
-Companion splits, quickfix updates, and navigation require approval by default.
-The small pinned card is allowed by default, opens without taking focus, and is
-limited to eight wrapped rows at 46 columns. It does not replace the voice panel.
+All four UI policies—companion, card, quickfix and navigation—**auto-allow by
+default**. Explicit startup/session policies can still require approval or
+disable a capability. Auto-allowed requests are queued non-blockingly; pending
+does not yet mean applied. The small pinned card opens without taking focus and
+is limited to eight wrapped rows at 46 columns. It does not replace the voice panel.
+These defaults do not change harness tool permissions or walkthrough confirmation.
 
 - Approval prompts sit at the bottom centre; pinned cards remain in the top-right.
 - Passive approvals show a compact summary with action, target, reason, and plain
@@ -88,7 +126,7 @@ vim.g.naia_ui_policies = {
 }
 ```
 
-Omitted features retain their defaults. Change a feature immediately for the
+Omitted features remain auto-allowed. Change a feature immediately for the
 current session with `:NaiaUIPolicy companion allow` (auto-approve),
 `:NaiaUIPolicy companion off` (auto-reject), or `:NaiaUIPolicy companion ask`.
 Setting `off` also cancels that feature's pending approvals. Configuration is
@@ -102,6 +140,9 @@ user-owned; agents must not change it to bypass approvals.
   and its links remain intact until you delete those buffers. The companion
   window is reused rather than accumulating splits. Use `:NaiaCompanionPrevious`
   / `:NaiaCompanionNext`, or `[h` / `]h` inside a companion, to cycle history.
+  Companion buffers stay read-only, but the split is not buffer-locked: Telescope
+  or ordinary buffer commands may replace it. The snapshot remains in history;
+  reopening notes will not overwrite a window you have repurposed for a file.
   Normal buffer pickers and `:buffers` also show these snapshots.
 - `:NaiaCard` toggles the pinned float: close it if showing, otherwise reopen/focus
   the selected snapshot. `q` or `:NaiaCardClose` explicitly dismisses it.
@@ -148,5 +189,7 @@ Run the isolated UI regression tests with:
 ```sh
 nvim --headless -u NONE -l tests/naia_ui_spec.lua
 nvim --headless -u NONE -l tests/naia_ui_policy_spec.lua
+nvim --headless -u NONE -l tests/naia_ui_defaults_spec.lua
+nvim --headless -u NONE -l tests/mcp_tools_loader_spec.lua
 nvim --headless -u NONE -l tests/layout_spec.lua
 ```

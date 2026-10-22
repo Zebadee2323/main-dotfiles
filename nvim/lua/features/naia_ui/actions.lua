@@ -211,11 +211,11 @@ function M.open_companion(focus)
     if vim.b[vim.api.nvim_win_get_buf(candidate)].naia_companion then window = candidate; break end
   end
   if window then
-    local fixed = vim.wo[window].winfixbuf
+    -- Companion buffers are read-only, but the split is still an ordinary
+    -- editing window: Telescope/:buffer must be able to replace its contents.
+    -- Clear locks left on existing views by older versions as well.
     vim.wo[window].winfixbuf = false
-    local ok, err = pcall(vim.api.nvim_win_set_buf, window, buffer)
-    vim.wo[window].winfixbuf = fixed
-    assert(ok, err)
+    vim.api.nvim_win_set_buf(window, buffer)
     if focus then vim.api.nvim_set_current_win(window) end
   else
     local source = editing_window()
@@ -230,7 +230,7 @@ function M.open_companion(focus)
     vim.wo[window].linebreak = true
     vim.wo[window].number = false
     vim.wo[window].relativenumber = false
-    vim.wo[window].winfixbuf = true
+    vim.wo[window].winfixbuf = false
   end
   vim.wo[window].winbar = string.format("N.A.I.A · %s [%d/%d]",
     vim.b[buffer].naia_companion_title:gsub("%%", "%%%%"), companion_index, #companion_history)

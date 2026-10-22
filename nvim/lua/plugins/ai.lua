@@ -1,8 +1,17 @@
 return {
     'github/copilot.vim',
     {
+        'guill/mcp-tools.nvim',
+        dependencies = { 'mfussenegger/nvim-dap' },
+        build = 'cd bridge && npm install',
+        config = function()
+            require('config.mcp_tools')
+        end,
+    },
+    {
         dir = '/Users/onelson/Development/nvim-naia',
         name = 'nvim-naia',
+        dependencies = { 'guill/mcp-tools.nvim' },
         config = function()
             require('naia').setup()
             require('config.naia')
