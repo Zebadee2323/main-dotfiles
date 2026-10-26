@@ -1,0 +1,41 @@
+onboarding = false
+
+[keys]
+# Match ~/.config/dotfiles/tmux/.tmux.conf and the tmux-agent-bar sidebar.
+# All prefix+ bindings require Ctrl+A first; Ctrl+hjkl are not global shortcuts.
+prefix = "ctrl+a"
+focus_pane_left = ["prefix+h", "prefix+ctrl+h", "prefix+left"]
+focus_pane_down = ["prefix+j", "prefix+ctrl+j", "prefix+down"]
+focus_pane_up = ["prefix+k", "prefix+ctrl+k", "prefix+up"]
+focus_pane_right = ["prefix+l", "prefix+ctrl+l", "prefix+right"]
+split_vertical = ["prefix+v", "prefix+%"]
+split_horizontal = ["prefix+s", 'prefix+"']
+
+detach = "prefix+d"
+toggle_sidebar = "prefix+o"
+rename_tab = "prefix+comma"
+close_tab = "prefix+ampersand"
+last_pane = "prefix+;"
+
+# Herdr workspaces are the closest equivalent to tmux sessions.
+rename_workspace = "prefix+$"
+previous_workspace = "prefix+("
+next_workspace = "prefix+)"
+
+# Direct resizing after the prefix, like tmux's Ctrl+arrow bindings.
+# Herdr controls the resize step; tmux's repeat table / Alt+arrow 5-cell
+# behavior is not reproduced here. Herdr's prefix+r resize mode stays available.
+resize_pane_left = "prefix+ctrl+left"
+resize_pane_down = "prefix+ctrl+down"
+resize_pane_up = "prefix+ctrl+up"
+resize_pane_right = "prefix+ctrl+right"
+
+# Move Herdr-only actions off keys now used for splitting and the sidebar.
+settings = "prefix+shift+s"
+open_notification_target = "prefix+shift+o"
+
+# Defaults already match tmux: c (new tab), n/p (next/previous tab),
+# z (zoom), x (close pane), [ (copy mode), ? (help), and w (navigation).
+# Herdr's tab indexing remains 1-9, unlike tmux's zero-based windows.
+# Keep Herdr's directional swap bindings: tmux's {/} cycle through panes
+# rather than swapping in a specific direction.
