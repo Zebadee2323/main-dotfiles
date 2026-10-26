@@ -462,7 +462,12 @@ def identify(paths, config):
     if identity is None:
         raise CommsError("Cannot resolve identity outside a tuios pane. No caller-selected identity or session fallback is allowed.")
     prefix = expected_prefix(config, identity, source)
-    return {"id": identity, "name": clean_text(config["identities"][identity]["name"]), "prefix": prefix}
+    name = clean_text(config["identities"][identity]["name"])
+    try:
+        pane_identity.update_title(paths, name, source, private_dir=private_dir, lock=FileLock, atomic_json=atomic_json)
+    except (OSError, ValueError, CommsError) as exc:
+        print(f"agent-comms: pane name unchanged: {exc}", file=sys.stderr)
+    return {"id": identity, "name": name, "prefix": prefix}
 
 
 def expected_prefix(config, identity, source):
@@ -650,6 +655,8 @@ def cell_width(text: str) -> int:
 def truncate(text: str, width: int) -> str:
     if cell_width(text) <= width:
         return text
+    if width <= 3:
+        return "." * max(0, width)
     result, used = [], 0
     for char in text:
         size = cell_width(char)
@@ -783,11 +790,14 @@ async def present_message(paths, state, settings, emit, width, muted, flash, vfx
     message = state["message"]
     display_name = truncate(message["name"], max(4, min(24, width // 3)))
     available = max(2, width - cell_width(f"[o_o] {display_name}: "))
-    captions = speech.pages(clean_text(message["msg"]), available)
-    voice = asyncio.create_task(watcher_speech(paths, state, settings, muted))
+    voice = asyncio.create_task(watcher_speech(paths, state, settings, muted or state.get("audio_muted", False)))
     try:
         while True:
+            if state.get("audio_muted") or state.get("speech_suppressed"):
+                voice.cancel()  # Never restart this message's speech on unmute.
+                await asyncio.gather(voice, return_exceptions=True)
             message = state["message"]
+            captions = speech.pages(clean_text(message["msg"]), max(2, available - state.get("audio_badge_width", 0)))
             elapsed = time.monotonic() - message.get("started_at", time.monotonic())
             text = speech.page_at(captions, elapsed, message.get("duration", 1))
             since_arrival = time.monotonic() - state["arrived"]
@@ -802,10 +812,20 @@ async def present_message(paths, state, settings, emit, width, muted, flash, vfx
 
 async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=True, settings=None, vfx=True):
     last, delay = None, 0.25
+    audio = {}
+
+    def mute_badge():
+        if not (muted or audio.get("muted")):
+            return ""
+        remaining = audio.get("remaining_seconds")
+        return f"[Muted {remaining}s] " if not muted and remaining is not None else "[Muted] "
 
     def emit(message=None, offline=False, highlight=False, frame=None):
         nonlocal last
         line = dock_line(message, color=color, width=width, offline=offline, highlight=highlight, frame=frame)
+        if not offline and (badge := mute_badge()):
+            line = badge + dock_line(message, color=color, width=max(1, width - len(badge)),
+                                     highlight=highlight, frame=frame)
         if line != last:
             print(line, flush=True)
             last = line
@@ -818,6 +838,12 @@ async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=Tru
             while True:
                 if response.get("event") != "state":
                     raise CommsError("Unexpected listener response.")
+                audio = response.get("audio", {})
+                if state is not None:
+                    state["audio_badge_width"] = len(mute_badge())
+                    state["audio_muted"] = bool(audio.get("muted"))
+                    if audio.get("muted"):
+                        state["speech_suppressed"] = True
                 message = response.get("message")
                 if message is not None and (
                     not isinstance(message, dict)
@@ -839,7 +865,9 @@ async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=Tru
                     if presentation:
                         presentation.cancel()
                         await asyncio.gather(presentation, return_exceptions=True)
-                    state = {"message": message, "changed": asyncio.Event(), "arrived": time.monotonic()}
+                    state = {"message": message, "changed": asyncio.Event(), "arrived": time.monotonic(),
+                             "audio_muted": bool(audio.get("muted")), "speech_suppressed": bool(audio.get("muted")),
+                             "audio_badge_width": len(mute_badge())}
                     presentation = asyncio.create_task(present_message(paths, state, settings or {}, emit, width, muted, flash, vfx and color))
                 response = await read_frame(reader, timeout=False)
         except (CommsError, OSError, asyncio.TimeoutError):
@@ -908,13 +936,56 @@ class Server:
         self.ready = asyncio.Event()
         self.lease = None
         self.audio_duration = None
+        self.audio_muted = False
+        self.muted_until = None
+        self.audio_timer = None
+
+    def audio_status(self):
+        remaining = max(0, math.ceil(self.muted_until - time.monotonic())) if self.muted_until is not None else None
+        return {"muted": self.audio_muted, "remaining_seconds": remaining}
+
+    def set_audio(self, action, seconds=None):
+        if action not in ("status", "toggle", "mute", "unmute"):
+            raise CommsError("Unknown audio action.")
+        if seconds is not None and (action != "mute" or type(seconds) not in (int, float)
+                                    or not math.isfinite(seconds) or not 0 < seconds <= 86400):
+            raise CommsError("--seconds must be greater than 0 and at most 86400, for mute only.")
+        if action == "status":
+            return self.audio_status()
+        if self.audio_timer:
+            self.audio_timer.cancel()
+            self.audio_timer = None
+        self.audio_muted = not self.audio_muted if action == "toggle" else action == "mute"
+        self.muted_until = time.monotonic() + seconds if self.audio_muted and seconds is not None else None
+        if self.audio_muted:
+            # Release a synthesizing watcher without holding captions for its HTTP request.
+            self.audio_duration = None
+            self.claimed.set()
+            self.ready.set()
+        self.broadcast()
+        if self.muted_until is not None:
+            self.audio_timer = asyncio.get_running_loop().call_later(min(1, seconds), self.audio_tick)
+        return self.audio_status()
+
+    def audio_tick(self):
+        self.audio_timer = None
+        if time.monotonic() >= self.muted_until:
+            self.set_audio("unmute")
+        else:
+            self.broadcast()
+            self.audio_timer = asyncio.get_running_loop().call_later(
+                min(1, self.muted_until - time.monotonic()), self.audio_tick)
 
     def snapshot(self):
-        return {"ok": True, "protocol_version": VERSION, "event": "state", "message": dict(self.current) if self.current else None}
+        return {"ok": True, "protocol_version": VERSION, "event": "state", "message": dict(self.current) if self.current else None,
+                "audio": self.audio_status()}
 
     def publish(self, message):
         self.current = message
         self.display.show(message)
+        self.broadcast()
+
+    def broadcast(self):
         for writer, queue in list(self.watchers.items()):
             try:
                 queue.put_nowait(self.snapshot())
@@ -930,8 +1001,9 @@ class Server:
             self.publish({**message, "phase": "preparing"})
             # Give local watchers a short opportunity to claim speech. A single
             # lease prevents duplicate synthesis charges and overlapping players.
-            with suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self.claimed.wait(), 0.4)
+            if not self.audio_muted:
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self.claimed.wait(), 0.4)
             if self.lease:
                 with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(self.ready.wait(), speech.REQUEST_TIMEOUT + 10)
@@ -969,9 +1041,13 @@ class Server:
                     raise CommsError("Could not save message history; message was not accepted.") from None
                 self.queue.put_nowait(message)
                 await write_frame(writer, {"ok": True, "protocol_version": VERSION})
+            elif request.get("command") == "audio":
+                status = self.set_audio(request.get("action"), request.get("seconds"))
+                await write_frame(writer, {"ok": True, "protocol_version": VERSION, "audio": status})
             elif request.get("command") == "claim-speech":
                 claimed = bool(self.current and request.get("uid") == self.current["uid"]
-                               and self.current.get("phase") == "preparing" and self.lease is None)
+                               and self.current.get("phase") == "preparing" and self.lease is None
+                               and not self.audio_muted and not self.ready.is_set())
                 if claimed:
                     self.lease = secrets.token_hex(16)
                     self.claimed.set()
@@ -1027,6 +1103,7 @@ class Server:
             processor = None
             try:
                 atomic_json(discovery, {"protocol_version": VERSION, "prefix_policy": PREFIX_POLICY, "spatial_prefix": True,
+                                        "audio_control": True,
                                         "port": listener.sockets[0].getsockname()[1], "token": self.token})
                 with TerminalDisplay(self.quiet) as self.display, stop_signals(self.stop):
                     self.publish(None)
@@ -1042,6 +1119,8 @@ class Server:
                         await asyncio.gather(stopped, return_exceptions=True)
             finally:
                 listener.close()
+                if self.audio_timer:
+                    self.audio_timer.cancel()
                 if processor:
                     processor.cancel()
                     await asyncio.gather(processor, return_exceptions=True)
@@ -1088,6 +1167,9 @@ def parser():
     attention.add_argument("--flash", dest="flash", action="store_true", help="Flash briefly for new messages (default)")
     attention.add_argument("--no-flash", dest="flash", action="store_false", help="Disable the brief attention flash for new messages")
     watcher.set_defaults(flash=True)
+    audio = subs.add_parser("audio", help="Control voice live across all watchers; captions stay enabled")
+    audio.add_argument("action", choices=("status", "toggle", "mute", "unmute"))
+    audio.add_argument("--seconds", type=float, help="Automatically unmute after this many seconds (mute only)")
     history = subs.add_parser("history", help="Print previous accepted messages, even when the listener is offline")
     history.add_argument("--limit", type=int, default=message_history.MAX_ENTRIES)
     history.add_argument("--id", help="Filter by identity ID")
@@ -1098,7 +1180,7 @@ def parser():
     history.add_argument("--no-color", action="store_true", help="Disable history heading colors")
     instructions = subs.add_parser("instructions", help="Print shared communication instructions without allocating identity")
     instructions.add_argument("--format", choices=("json", "text"), default="json")
-    for sub in (identity, review, serve_parser, send_parser, watcher, instructions, history):
+    for sub in (identity, review, serve_parser, send_parser, watcher, instructions, history, audio):
         common(sub, defaults=False)
     return result
 
@@ -1127,7 +1209,14 @@ def main(argv=None):
     args = parser().parse_args(argv)
     try:
         paths = Paths.resolve(args)
-        if args.command == "history":
+        if args.command == "audio":
+            if args.seconds is not None and (args.action != "mute" or not math.isfinite(args.seconds) or not 0 < args.seconds <= 86400):
+                raise CommsError("--seconds must be greater than 0 and at most 86400, for mute only.")
+            if endpoint(paths).get("audio_control") is not True:
+                raise CommsError("Listener predates live audio controls; restart 'agent-comms serve' and existing watchers once.")
+            response = asyncio.run(rpc(paths, "audio", action=args.action, seconds=args.seconds))
+            print(json.dumps(response["audio"]))
+        elif args.command == "history":
             if not 1 <= args.limit <= message_history.MAX_ENTRIES:
                 raise CommsError("--limit must be between 1 and 10.")
             messages = message_history.read(paths.state, args.limit, args.id, args.session)

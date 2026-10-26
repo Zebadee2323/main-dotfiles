@@ -86,7 +86,9 @@ def context(name, run=subprocess.run, env=None, strict=False):
                          if window.get("workspace") == workspace and window.get("window_id") != pane)
         session_name = info.get("session_name") or session
         source = {"session_name": session_name, "pane_id": pane, "workspace": workspace,
-                  "introduce": not sole_agent and (not visible or not focused)}
+                   "introduce": not sole_agent and (not visible or not focused)}
+        if isinstance(own.get("display_name"), str):
+            source["pane_title"] = own["display_name"]
         if source["introduce"] and visible and not focused and focused_pane is not None and focused_pane.get("workspace") == workspace:
             position = relative_position(own, focused_pane)
             if position:

@@ -213,6 +213,53 @@ invalid bag contents are replaced with a fresh shuffled cycle. Invalid JSON
 also produces a warning on stderr. The separate lock file is never replaced or
 deleted while updating bag contents atomically.
 
+## Live voice controls
+
+```sh
+agent-comms audio toggle
+agent-comms audio mute --seconds 60
+agent-comms audio mute           # until explicitly unmuted
+agent-comms audio unmute
+agent-comms audio status         # JSON; no identity/config needed
+```
+
+These commands control the shared listener, so every connected watcher honors
+the same mute. Captions and history continue; current playback is stopped and
+speech generation is skipped while muted. An already-started HTTP synthesis
+request cannot be interrupted, but its late audio is cleaned up and never played.
+Unmuting does not replay skipped speech. `watch --mute` remains a permanent local
+override, unaffected by shared unmute commands.
+
+`--seconds` accepts a positive duration up to 86400 (one day), for `mute` only.
+Repeating timed mute resets the countdown from now; toggle/unmute cancels it.
+The dock shows `[Muted 43s]` or `[Muted]` ahead of the normal captions. Mute state
+is in memory: restarting the listener resets it to unmuted.
+
+The checked-in tuios config binds **Ctrl+A, Alt+M** to toggle and
+**Ctrl+A, Alt+Q** to mute for 15 seconds. Edit `--seconds 15` in its
+`[[keybindings.command]]` entry to change that shortcut's duration. Commands run
+in a temporary popup and never type into the focused agent or shell.
+
+After installing this update, restart the existing listener and watchers once
+to load the code. Later mute changes need no restarts. For the dock watcher,
+run `tuios refresh-dock agent-comms` in each attached session.
+
+## Pane name prefixes
+
+`agent-comms context` also names its own pane `[NAME] Original title`. It keeps
+the exact prefix it applied in the daemon/pane-scoped `pane-identities.json`
+binding. Subsequent calls remove only that exact leading prefix before adding
+the current name; they never guess from a list of names or strip arbitrary
+brackets. An externally edited suffix is preserved. If the old prefix is gone,
+the whole current title becomes the new suffix. Identity reassignment retains
+prefix ownership so the former name can be replaced safely.
+
+Names are custom tuios pane names, not terminal escape titles: the suffix is
+the title at naming time, not a continuously updated shell title. Clear the
+custom name with `tuios set-window -w PANE --name ''` to return to the shell's
+title (the next context call prefixes it again). Naming errors warn on stderr
+without breaking context's three-field JSON or retrying denied requests.
+
 ## Delivery effects
 
 Colored watchers animate at 10 frames per second while a message is active:

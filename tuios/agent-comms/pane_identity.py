@@ -102,8 +102,52 @@ def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, al
                     break
             else:
                 raise error("Could not allocate a free pane identity.")
+            title_prefix = saved.get("title_prefix") if saved else None
             saved = {"daemon": daemon, "pane_id": pane, "id": selected}
+            if isinstance(title_prefix, str):
+                saved["title_prefix"] = title_prefix
             state["bindings"][key] = saved
         saved.pop("missing_since", None)
         atomic_json(filename, state)
         return saved["id"]
+
+
+def prefixed_title(title, prefix, previous=None):
+    """Strip only the exact prefix we own, never a guessed human-name pattern."""
+    if previous and title.startswith(previous):
+        title = title[len(previous):]
+    return prefix + title
+
+
+def update_title(paths, name, source, *, private_dir, lock, atomic_json, run=None):
+    """Best-effort custom name, with ownership stored alongside the pane binding."""
+    identity = owner()
+    if identity is None or "pane_title" not in source:
+        return
+    run = subprocess.run if run is None else run
+    key, _, pane = identity
+    directory = private_dir(paths.state)
+    filename = directory / "pane-identities.json"
+    try:
+        with lock(directory / "pane-identities.lock"):
+            state = json.loads(filename.read_text(encoding="utf-8"))
+            saved = state["bindings"][key]
+            # Re-read under the lock so concurrent context calls cannot stack prefixes.
+            result = run(["tuios", "get-window", pane, "-s", os.environ["TUIOS_SESSION"], "--json"],
+                         capture_output=True, encoding="utf-8", timeout=2, check=True)
+            window = json.loads(result.stdout)
+            if window.get("success") is not True or window.get("id") != pane:
+                raise ValueError("Cannot verify the caller pane's current name.")
+            title = window.get("display_name")
+            if not isinstance(title, str):
+                raise ValueError("Pane has no readable display name.")
+            prefix = f"[{name}] "
+            previous = saved.get("title_prefix")
+            updated = prefixed_title(title, prefix, previous if isinstance(previous, str) else None)
+            if updated != title:
+                run(["tuios", "set-window", "-s", os.environ["TUIOS_SESSION"], "-w", pane, "--name", updated],
+                    capture_output=True, encoding="utf-8", timeout=2, check=True)
+            saved["title_prefix"] = prefix
+            atomic_json(filename, state)
+    except subprocess.SubprocessError:
+        raise ValueError("Pane naming failed or was not permitted; no retry attempted.") from None

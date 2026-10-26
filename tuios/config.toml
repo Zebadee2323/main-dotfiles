@@ -213,6 +213,18 @@ last_workspace = ["alt+l"]
 prefix_next_window = ["alt+o"]
 prefix_workspace_switcher = ["alt+w"]
 
+[[keybindings.command]]
+key = "prefix+alt+m"
+type = "popup"
+command = 'exec "$HOME/.local/bin/agent-comms" audio toggle'
+description = "Toggle agent voice"
+
+[[keybindings.command]]
+key = "prefix+alt+q"
+type = "popup"
+command = 'exec "$HOME/.local/bin/agent-comms" audio mute --seconds 15'
+description = "Mute agent voice for 15 seconds"
+
 [appearance]
 theme = "ashen"
 border_style = "ascii"

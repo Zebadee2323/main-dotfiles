@@ -13,7 +13,9 @@ Later extensions are implemented and documented in README.md: durable `history`,
 separate `send --tts` speech text, watcher-side ElevenLabs speech using the
 Naia-default `eleven_turbo_v2_5`, synchronized caption chunks and attention flashes,
 explicit checked spatial prefixes returned by `context`, pane-stable identity ownership,
-and delivery VFX. Personalities and the separate `prefix` command have been removed.
+delivery VFX, listener-wide live `audio` toggle/timed mute, and exact-owned
+`[NAME] ` pane-name prefixes applied by `context`. Personalities and the separate
+`prefix` command have been removed.
 Those extensions supersede the original v1
 voice/history exclusions below. The current wire protocol is version 2.
 `context` now returns the caller's ID, name, and exact introduction or empty
