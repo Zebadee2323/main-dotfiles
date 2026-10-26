@@ -1,6 +1,6 @@
 local M = {}
-local actions = require("features.naia_ui.actions")
-local approval = require("features.naia_ui.approval")
+local actions = require("naia.ui.actions")
+local approval = require("naia.ui.approval")
 local policies = { companion = "allow", quickfix = "allow", navigation = "allow", card = "allow" }
 -- User-owned startup defaults; session changes through :NaiaUIPolicy stay local.
 local configured_policies = vim.g.naia_ui_policies

@@ -269,14 +269,13 @@ local function register_naia_tools()
     notify_naia_tool_registration_error(naia_tool_names.execute_neovim_command, command_err)
   end
 
-  require("features.naia_ui.tools").register(naia)
+  require("naia.ui.tools").register(naia)
 end
 
 function M.setup()
   if initialized then return end
   initialized = true
   register_naia_tools()
-  vim.schedule(register_naia_tools)
 end
 
 return M

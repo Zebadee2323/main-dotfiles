@@ -9,7 +9,7 @@
 - `lua/config/` contains the larger setup modules, loaded only by the owning
   spec's `config` callback. Small setups can use `opts` directly in the spec.
 - `lua/features/` contains custom functionality, grouped by feature rather than
-  scattered among runtime scripts. `voice/`, `naia_ui/`, and `file_change_fx/`
+  scattered among runtime scripts. `voice/` and `file_change_fx/`
   own their related modules; small utilities stay as single modules.
 - `after/plugin/features.lua` is the sole custom-feature runtime hook. It calls
   `features.setup()` after plugin loading, preserving the existing startup phase
@@ -26,11 +26,42 @@ their implementation intact; splitting providers, rendering, or watching into
 smaller modules can happen separately without mixing behaviour changes into moves.
 Small standalone helpers register commands on their first `require`.
 
-Naia-dependent setup belongs to `config/naia.lua`, called by Naia's Lazy spec:
-custom MCP tools live in `features/naia_tools.lua`, UI modules in
-`features/naia_ui/`, and the walkthrough is provided by the external Naia plugin.
-The `naia` module namespace remains reserved for that plugin. UI commands and
-cleanup hooks are registered when the UI module is first required.
+Naia is a first-party subsystem in `lua/naia/`, not a local Lazy plugin. The
+MCP dependency's setup callback loads `config/naia.lua` after configuring the
+shared bridge; Sidekick and CodeCompanion depend on that same MCP plugin.
+There is no runtime dependency on `~/Development/nvim-naia`.
+
+- `naia/init.lua`, `backend.lua`, `state.lua`, `config.lua`: provider API,
+  registration ownership and connection information (not transport lifecycle).
+- `naia/commands.lua`: explicit, idempotent setup for `:Naia*` commands.
+- `naia/tools.lua`: voice notifications and permission-gated Ex commands.
+- `naia/ui/`: companion, cards, approval policy, actions, styling and MCP tools.
+- `naia/walkthrough/`: playback, tool/edit interface, portable files, layout and
+  confirmation prompts. Legacy chat/YAML response parsing is isolated in
+  `response.lua`. `require('naia.walkthrough').setup()` is unchanged.
+- `bin/sidekick-naia-cli` and its instruction files: launch-scoped harness setup.
+- `opencode/naia/`: the Sidekick-only OpenCode instruction plugin.
+
+Voice playback remains in `features/voice/`; the shared MCP safety guard stays
+independent in `features/mcp_tools_runtime.lua`. UI commands and cleanup hooks
+are registered when the UI module is first required. Tools register once during
+setup, not again on a scheduled retry. Existing MCP names, walkthrough revision
+guards, approval policy and public `require('naia')` API are preserved.
+
+Run `make check` from this directory for configuration specs plus the imported
+provider, launcher, instruction-plugin and walkthrough regressions. Imported tests
+live in `tests/naia/`, without the standalone project's historical phase folders.
+The config specs using the real bridge registry require the installed MCP plugin.
+`make test-integration` exercises live HTTP transport; `make
+test-opencode-integration` exercises an installed OpenCode against a fake model.
+Both integration suites are opt-in. See [walkthrough reference](docs/walkthrough.md)
+and [bridge notes](docs/mcp-tools.md) for details.
+
+The launcher requires Python 3.9+; the bridge requires Bun or Node.js 18.19+
+with its npm dependencies installed. Walkthroughs require Neovim 0.11+.
+After this migration, restart Neovim and relaunch Sidekick rather than hot-reloading
+the existing bridge/session. The old standalone repository is not modified or
+deleted, but is no longer loaded by this configuration.
 
 Assets have not moved: voice models remain in `after/ai_voices/`, and the effect
 sound remains at `after/plugin/change-fx.mp3`. Their paths are independent of the
@@ -78,8 +109,9 @@ the script entry point remains a normal filesystem path.
   ordinary text/JSON; all MCP tool names have upstream's `nvim_` prefix.
   Walkthrough tools are `nvim_walkthrough_*` (no `ai_`). Register before connecting;
   reconnect after adding/removing tools. Existing walkthrough edits need no reconnect.
-- Instructions are attached by the launcher, not the MCP server. Launch new Naia
-  sessions through Sidekick rather than assuming new in-TUI sessions inherit them.
+- Instructions are supplied through Sidekick, not the MCP server. Its private
+  OpenCode server injects them into every session, including new in-TUI sessions.
+  Claude and Codex still receive them at launch time.
 - Run `nvim --headless -u NONE -l tests/naia_native_tools_spec.lua` to verify your
   configured tools against the upstream registry without starting a bridge.
 

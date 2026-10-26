@@ -1,5 +1,5 @@
 local M = {}
-local style = require("features.naia_ui.style")
+local style = require("naia.ui.style")
 local companion_history, companion_index, companion_sequence = {}, 0, 0
 local card_buffer, card_window
 local card_history, card_index = {}, 0

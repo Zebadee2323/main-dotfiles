@@ -11,13 +11,13 @@ package.loaded.naia = {
     return true
   end,
 }
-package.loaded['features.naia_ui.tools'] = { register = function() end }
+package.loaded['naia.ui.tools'] = { register = function() end }
 
 local spoken = {}
 vim.api.nvim_create_user_command('AIVoice', function(args)
   spoken[#spoken + 1] = args.args
 end, { nargs = '+' })
-require('features.naia_tools').setup()
+require('naia.tools').setup()
 vim.wait(20, function() return false end)
 
 local estimate = require('features.voice.captions').estimate_talk_seconds

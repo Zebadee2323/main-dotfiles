@@ -3,7 +3,7 @@ local file = debug.getinfo(1, 'S').source:sub(2)
 vim.opt.rtp:prepend(vim.fn.fnamemodify(file, ':p:h:h'))
 assert(vim.g.naia_ui_policies == nil, 'Default-policy test must not configure overrides')
 vim.g.naia_ui_card_flash = false
-local ui = require('features.naia_ui')
+local ui = require('naia.ui')
 local target = vim.fn.tempname() .. '.txt'
 vim.fn.writefile({ 'target line' }, target)
 local requests = {
