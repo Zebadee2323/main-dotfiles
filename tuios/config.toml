@@ -116,6 +116,12 @@
 # `tuios list-dock-components` says which and why.
 # ============================================================================
 
+[dock]
+left = ["mode", "session", "workspaces", "trail", "tape"]
+
+[dock.session]
+format = "{session}"
+
 [startup]
 tiled = true
 daemon = true
@@ -204,9 +210,17 @@ prefix_workspace_switcher = ["alt+w"]
 [appearance]
 theme = "ashen"
 border_style = "ascii"
+hide_window_buttons = true
+dockbar_position = "bottom"
+show_cpu = true
+show_ram = true
 
 [appearance.sidebar]
 position = "left"
+enabled = false
 
 [spotlight]
+enabled = false
+
+[screensaver]
 enabled = false

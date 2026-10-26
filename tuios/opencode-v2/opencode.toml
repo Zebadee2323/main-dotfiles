@@ -1,0 +1,29 @@
+# Companion manifest for opencode-tuios-v2. Replaces the bundled manifest.
+schema_version = 1
+id = "opencode"
+display_name = "OpenCode V2"
+priority = 50
+
+[detect]
+comm = ["opencode"]
+argv0 = ["opencode"]
+argv_path = ["opencode-ai", "/opencode/"]
+
+[transcript]
+# Local snapshots written by the CLI; no service.json/password/export process.
+reader = "gemini-chat"
+dir = "{state}/tuios/opencode-v2"
+glob = "*.jsonl"
+# Exact --transcript-path reports join a pane; never guess by cwd or recency.
+verify = ["session_id"]
+
+[input]
+submit = "cr"
+bracketed_paste = true
+source = "OpenCode terminal input; inherited from TUIOS's bundled opencode manifest"
+images = "path_paste"
+images_source = "TUIOS bundled opencode manifest"
+
+[resume]
+argv = ["opencode", "--session", "{session_id}"]
+source = "OpenCode V2 CLI --session"
