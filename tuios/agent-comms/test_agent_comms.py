@@ -15,7 +15,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import agent_comms as app
 
@@ -38,7 +38,10 @@ class Fixture(unittest.TestCase):
             encoding="utf-8",
         )
         self.env = {
-            **os.environ,
+            # Test sends must not inspect the user's live tuios focus or inherit
+            # a paid speech credential. Context/speech tests supply their own.
+            **{key: value for key, value in os.environ.items()
+               if not key.startswith(("TUIOS_", "ELEVENLABS_"))},
             "AGENT_COMMS_CONFIG": str(self.paths.config),
             "AGENT_COMMS_STATE_DIR": str(self.paths.state),
             "AGENT_COMMS_RUNTIME_DIR": str(self.paths.runtime),
@@ -78,7 +81,7 @@ class Fixture(unittest.TestCase):
                 info = app.endpoint(self.paths)
                 # A stale file may still exist after a crashed previous server.
                 with socket.create_connection(("127.0.0.1", info["port"]), timeout=0.1) as conn:
-                    conn.sendall(json.dumps({"command": "watch", "protocol_version": 1, "token": info["token"]}).encode() + b"\n")
+                    conn.sendall(json.dumps({"command": "watch", "protocol_version": app.VERSION, "token": info["token"]}).encode() + b"\n")
                     with conn.makefile("rb") as stream:
                         self.assertTrue(json.loads(stream.readline())["ok"])
                 return process, info
@@ -92,7 +95,7 @@ class Fixture(unittest.TestCase):
         stream = connection.makefile("rwb")
         self.addCleanup(stream.close)
         self.addCleanup(connection.close)
-        stream.write(json.dumps({"protocol_version": 1, "token": info["token"],
+        stream.write(json.dumps({"protocol_version": app.VERSION, "token": info["token"],
                                  "command": command, **kwargs}).encode() + b"\n")
         stream.flush()
         return connection, stream
@@ -103,7 +106,10 @@ class Fixture(unittest.TestCase):
         return stream
 
     def message(self, stream):
-        return json.loads(stream.readline())["message"]
+        while True:
+            message = json.loads(stream.readline())["message"]
+            if message is None or message.get("phase") == "displaying":
+                return message
 
 
 class BagTests(Fixture):
@@ -173,7 +179,8 @@ class ServerTests(Fixture):
         self.assertTrue(json.loads(sender.readline())["ok"])
         start = time.monotonic()
         active = self.message(stream)
-        self.assertEqual(active, {"id": "a", "name": "Alice", "msg": "hello\nworld!"})
+        self.assertEqual({key: active[key] for key in ("id", "name", "msg")},
+                         {"id": "a", "name": "Alice", "msg": "hello\nworld!"})
         self.assertIsNone(self.message(stream))
         elapsed = time.monotonic() - start
         self.assertGreater(elapsed, 0.12)
@@ -324,14 +331,26 @@ class RenderingTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             paths = app.Paths.resolve(args)
         self.assertEqual(paths.config, ROOT / "config.toml")
-        self.assertIn("naia", app.load_config(paths.config)["identities"])
+        self.assertTrue(app.load_config(paths.config)["identities"], "the default roster is user-editable")
         self.assertFalse((ROOT / "config.lock").exists())
 
 
 class QueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_permission_denied_is_not_reported_as_listener_offline(self):
+        paths = app.Paths(Path("unused"), Path("unused"), Path("unused"))
+        with patch.object(app, "endpoint", return_value={"port": 12345, "token": "0" * 64}):
+            with patch.object(app.asyncio, "open_connection", new=AsyncMock(side_effect=PermissionError(1, "Operation not permitted"))):
+                with self.assertRaises(app.CommsError) as error:
+                    await app.connect(paths, "send")
+        self.assertIn("blocked by permissions or a sandbox", str(error.exception))
+        self.assertNotIn("offline", str(error.exception))
+
     async def test_full_queue_rejects_without_dropping_accepted_message(self):
         config = {"identities": {"a": {"name": "Alice"}}}
-        server = app.Server(None, config, quiet=True)
+        temp = tempfile.TemporaryDirectory(prefix="agent-comms-queue-test-")
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        server = app.Server(app.Paths(root / "config.toml", root / "state", root / "run"), config, quiet=True)
         server.queue = asyncio.Queue(maxsize=1)
         listener = await asyncio.start_server(server.handle, "127.0.0.1", 0)
         port = listener.sockets[0].getsockname()[1]
@@ -339,7 +358,7 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         async def send(text):
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
             try:
-                await app.write_frame(writer, {"protocol_version": 1, "token": server.token,
+                await app.write_frame(writer, {"protocol_version": app.VERSION, "token": server.token,
                                                "command": "send", "id": "a", "msg": text})
                 return await app.read_frame(reader)
             finally:

@@ -17,8 +17,10 @@ In another terminal:
 
 ```sh
 ID=$(./agent-comms id)
-./agent-comms send --id "$ID" --msg "Hello from the agent dock!"
+PREFIX=$(./agent-comms prefix --id "$ID") || exit 1
+./agent-comms send --id "$ID" --msg "${PREFIX:+$PREFIX }Hello from the agent dock!" --tts "${PREFIX:+$PREFIX }Hello from the agent dock!"
 ./agent-comms watch
+./agent-comms history
 ```
 
 For a command available everywhere, put this directory on PATH or symlink the
@@ -37,7 +39,10 @@ colors.
 
 ```powershell
 $id = .\agent-comms.cmd id
-.\agent-comms.cmd send --id $id --msg "Hello from Windows!"
+$prefix = .\agent-comms.cmd prefix --id $id
+if ($LASTEXITCODE -ne 0) { throw "Could not check prefix" }
+$message = if ($prefix) { "$prefix Hello from Windows!" } else { "Hello from Windows!" }
+.\agent-comms.cmd send --id $id --msg $message --tts $message
 ```
 
 ## Commands
@@ -48,9 +53,15 @@ $id = .\agent-comms.cmd id
 | `id --refill` | Replace remaining entries with a new shuffled bag; no draw/output. |
 | `serve` | Own the singleton listener, timed FIFO queue, and terminal display. |
 | `serve --quiet` | Same listener without terminal display. |
-| `send --id ID --msg TEXT` | Return success after queue acceptance, not display completion. |
-| `watch` | Stay connected and print flushed, ANSI-colored replacement lines. |
+| `prefix --id ID` | Print the exact required introduction, or an empty line if none is needed. |
+| `prefix --id ID --json` | Print the prefix, requirement flag, and checked tuios context. |
+| `send --id ID --msg TEXT --tts SPEECH` | Save and queue clean display text plus separate speech text; acknowledge acceptance, not completion. |
+| `history` | Print the rolling history of at most 10 accepted messages, even offline. |
+| `history --limit 5 --id nova --json` | Filter/limit retained history and optionally include complete metadata and speech text. |
+| `history --session work` | Filter by the sender's tuios session name. |
+| `watch` | Show flashing, timed caption chunks and optionally generate/play speech. |
 | `watch --no-color --width 80` | Plain-text output, at most 80 display cells. |
+| `watch --mute --no-flash` | Disable speech generation/playback and the attention flash. |
 | `session --harness opencode --session-id ID` | Resolve/persist a session identity and print JSON metadata plus messaging instructions. |
 
 `session --format text` prints just the instruction block. Plugins use this
@@ -68,10 +79,16 @@ Edit [config.toml](config.toml) in this directory. It is the default on all
 platforms, resolved relative to the program rather than your working directory
 (including when launched through a symlink). Restart the server after changing it.
 An explicitly selected missing config is an error; it is not silently generated.
-`watch` does not need a local copy of the identity configuration.
+Watchers receive voice IDs from the listener's message metadata and read optional
+speech model/speed settings from this file; restart watchers after changing those
+settings. Missing local config falls back to the Naia speech defaults.
 
 ```toml
 display_seconds = 5
+
+[speech]
+model = "eleven_turbo_v2_5"
+speed = 1.0
 
 [identities.naia]
 name = "Naia"
@@ -79,8 +96,11 @@ eleven_labs_voice_id = ""
 personality = "Friendly, clear, and practical."
 ```
 
-The starter roster is Naia, Nova, Atlas, and Echo. Voice IDs are intentionally
-empty; voice/personality are metadata only. IDs are not exclusive reservations.
+The starter roster is Naia, Nova, Atlas, and Echo. Fill each
+`eleven_labs_voice_id` with a voice available to your ElevenLabs account to enable
+that identity's speech. Blank voice IDs deliberately remain text-only. Plugins
+must use personality metadata for agent-comms messages only, **never for normal
+assistant responses**. IDs are not exclusive reservations.
 
 Default locations:
 
@@ -124,13 +144,21 @@ connecting. There is no manual port assignment, remote listener, or native
 Windows/WSL discovery bridge.
 
 The transport is newline-delimited JSON. Initial requests contain
-`protocol_version`, `token`, and `command` (`send` or `watch`). Send requests also
-contain `id` and `msg`. Successful replies include `ok: true` and the protocol
-version. Watch replies have `event: "state"` and `message`, either null for idle
-or an object containing `id`, `name`, and `msg`. Every subscription receives an
-immediate snapshot. There are no polling heartbeats while connected and idle.
+`protocol_version`, `token`, and `command`. **Protocol version 2** adds distinct
+`tts`, unique message IDs, persisted acceptance, sender context, and speech leases.
+Restart old listeners/watchers when upgrading. `send` carries `id`, `msg`, optional
+`tts` (defaults to `msg` for compatibility), and optional sender context.
+Discovery also advertises `prefix_policy: "explicit"`. The CLI refuses to send
+to a pre-update auto-prefixing listener; restart that listener first. Watcher wire
+format is unchanged, so current watchers reconnect without a protocol upgrade.
+Successful replies include `ok: true` and the protocol version. Watch replies
+have `event: "state"` and `message`, either null for idle or a message with
+`uid`, `id`, `name`, `msg`, `tts`, `voice_id`, and presentation phase. Every
+subscription receives an immediate snapshot. There are no polling heartbeats
+while connected and idle.
 
-Limits: 8 KiB UTF-8 per message, 64 KiB per wire frame, 256 pending messages in
+Limits: 8 KiB UTF-8 each for display and speech text (including introductions),
+64 KiB per wire frame, 256 pending messages in
 addition to the active one, and 128 concurrent connections. Initial requests,
 connects, and writes have five-second deadlines. A slow watcher cannot block the
 queue; overflowing its 16-update buffer disconnects it so it can resubscribe.
@@ -139,14 +167,135 @@ the renderer generates ANSI styling.
 
 Clean shutdown removes discovery data while still holding the singleton lock.
 A crash releases the lock; the next server replaces stale discovery data and
-watchers reconnect. The active message and queue are **not durable**. Do not
+watchers reconnect. Accepted-message history is durable; the active presentation
+and pending delivery queue are **not durable**. Do not
 automatically retry a failed send: a lost acknowledgement can leave acceptance
-uncertain, and v1 has no delivery deduplication.
+uncertain, and sends have no delivery deduplication.
+
+## Message history
+
+`agent-comms history` works from any working directory and does not require a
+running listener or identity config. Default output is the newest 10 messages,
+printed oldest-to-newest with UTC acceptance timestamps and identity names.
+`--limit` accepts 1–10; `--id`, `--session`, and `--json` are optional. Filters apply
+within those ten retained messages, not a separate per-identity/session history.
+
+Private `state/history.jsonl` contains **at most ten entries**. Each acceptance
+atomically replaces it with the newest ten messages, flushing before acknowledging
+the send. A full queue or failed history write rejects the send. An OS-backed
+lock coordinates writers; readers skip incomplete/corrupt rows. History
+records acceptance, **not proof of display or playback**; a server crash can leave
+accepted but undelivered messages in history. Full records include TTS text and
+sender metadata. No API key, authentication token, or speech lease is saved.
+Older entries are dropped automatically; treat retained history as private data.
+Messages sent before history support was installed cannot be recovered.
+
+## ElevenLabs speech and timed captions
+
+Watchers use **only** their `ELEVENLABS_API_KEY` environment variable for the API
+key. No key is read from config, sent to the listener, written to history, or
+included in diagnostics. Providing the key enables external ElevenLabs requests
+for identities with a configured voice ID and an available local audio player.
+The TTS text is sent to ElevenLabs; keep sensitive content out of announcements.
+
+`eleven_turbo_v2_5` matches `nvim/lua/features/voice/runtime.lua`'s Naia default.
+Use `--tts` for speech-friendly spelling, punctuation, and supported markup such
+as `<break time="0.3s" />`. Turbo does **not** support v3-only `[warm]`/`[excited]`
+audio tags. Keep `--msg` plain, readable, and equivalent in meaning:
+
+```sh
+prefix=$(agent-comms prefix --id "$ID") || exit 1
+agent-comms send --id "$ID" --msg "${prefix:+$prefix }Build finished. Tests passed." \
+  --tts "${prefix:+$prefix }Build finished. <break time=\"0.3s\" /> Tests passed."
+```
+
+The API returns 24 kHz mono PCM; the watcher wraps it in a temporary private WAV,
+measures its exact sample duration, and deletes it after playback/cancellation.
+Playback uses `afplay` on macOS, `ffplay` or `aplay` on Linux, or standard-library
+`winsound` on Windows. No Python audio dependencies are needed. Speech settings
+accept a model name and speed 0.7–1.2. The request timeout is 25 seconds and audio
+is bounded to ten minutes. API/player failures fall back to text captions without
+logging sensitive request details or automatically retrying paid synthesis.
+
+The listener grants a single watcher a per-message speech lease. Other watchers
+still display the same message, but do not generate duplicate audio or charges.
+The listener allows 0.4 seconds for a claim and at most 35 seconds for preparation.
+`speech-ready` reports the measured duration or a failure; only that message's
+current lease is accepted. Reconnecting/joining watchers do not replay speech that
+has already started. If the speaker exits mid-message, text continues; that
+message's speech is not reassigned/replayed. `--mute` prevents a watcher from
+claiming speech at all. Detaching a speaker stops its local playback.
+
+Caption wrapping and weighting port Naia's `features/voice/captions.lua`: roughly
+180 words/minute, estimated as **15 non-whitespace characters per second**. Wrap
+at word boundaries, split oversized paths by Unicode characters without detaching
+combining marks, and assign each page a cumulative character weight. Dock pages
+are one row rather than Naia's three rows. All pages replace one another rather
+than permanently truncating the message. Long identity names are shortened to
+leave caption space.
+
+Without speech, the display lasts at least `display_seconds` (default 5) or the
+estimated speaking duration, whichever is longer. With speech, caption progress
+is distributed across measured audio duration. All watchers share the listener's
+monotonic local-clock start/duration, including a 200 ms preparation-to-playback
+delay. This is estimated caption alignment, not ElevenLabs word timestamps.
+
+New messages briefly flash using inverse/bold ANSI SGR (0.6 seconds total).
+The flash occurs once per new message ID, not on every caption/state update.
+`--no-flash`, `--no-color`, or `NO_COLOR` disables the visual flash. Idle watchers
+do not tick/redraw; only active messages animate caption/attention frames.
+
+## tuios session introductions
+
+`prefix --id ID` looks for `TUIOS_ENV=1`, `TUIOS_PANE_ID`/`TUIOS_WINDOW_ID`, and
+`TUIOS_SESSION`, then uses read-only `tuios session-info` and `tuios list-windows`
+commands to verify the sender pane, current workspace, attachment, focus, and
+other agent panes on the same workspace. A two-second timeout bounds each query.
+
+The command returns the exact prefix to put in both display and speech text when the sender's workspace is
+not visible (the session is detached or another workspace is selected), **or**
+the pane is unfocused and that workspace has multiple agent panes:
+
+```text
+Nova here, of the work session. ...
+```
+
+An unfocused sole agent does not need the extra introduction. Shell/editor-only
+panes are not counted as agents. The sender itself counts even if detection is
+still catching up. Outside tuios, the command returns an empty line. If tuios
+environment is present but incomplete, the pane is unrecognized, or a query
+fails/is forbidden, the command returns an error instead of guessing an empty
+prefix. No pane focus or user permissions are changed; forbidden calls are not
+retried through another route.
+
+**Nothing is automatically inserted.** Before every message, agents must query
+`prefix`, then put its exact result once at the start of both `--msg` and `--tts`
+(before any speech markup), followed by a space and their message. An empty result
+means no introduction. The prefix wording is fixed, not personality-styled; the
+message that follows still uses the identity's personality.
+The prefix already identifies the agent and session: do not repeat a
+self-introduction in the body, even on the first message. Always introduce yourself
+on the first message of a session: use the prefix if nonempty; otherwise introduce
+yourself in your own words in both display and speech text. On later messages, an
+empty prefix does not call for another introduction.
+
+`send` queries current context again and checks both strings. Missing, stale,
+wrong, or duplicated introductions return a nonzero error naming the offending
+field and current expected prefix. No message is queued, recorded, displayed, or
+synthesized. The listener also validates the strings against the submitted context
+snapshot before acceptance; it never prepends or rewrites them. This is a workflow
+check, not proof against an authenticated client falsifying its own context.
+
+Focus can change between lookup and send. On mismatch, query again and recompose
+once rather than blindly retrying the previous strings. If context cannot be
+checked, do not submit the message. Prefix lookup itself needs no live listener
+or new identity draw and works from any directory.
 
 ## tuios bottom dock
 
 The listener and dock watcher are intentionally separate. Each tuios client runs
-its own watcher; only the listener owns the queue and its display timing.
+its own watcher; only the listener owns the queue, presentation timing, and
+exclusive speech lease.
 
 This dotfiles configuration adds the component alongside the existing center
 components:
@@ -156,7 +305,7 @@ components:
 center = ["custom/agent-comms", "windows"]
 
 [dock.custom.agent-comms]
-command = 'exec "$HOME/.local/bin/agent-comms" watch --width 80'
+command = 'exec "$HOME/.local/bin/agent-comms" watch --width 80 --flash'
 refresh = "push"
 max-width = 80
 ```
@@ -268,6 +417,11 @@ cards before the closing message, and prohibits duplicate `nvim_inform_user`
 announcements. It also covers safe quoting, secrets, existing permissions, and
 continuing without retry spam when the listener is offline.
 
+Both adapters explicitly require the configured personality in **only** the
+`--msg` and `--tts` communications text. Agents **must not** adopt it in standard
+responses, explanations, code, or other tool interactions. Speech examples and
+the injected current model name reflect the Naia-default Turbo model.
+
 The old voice directives were removed from `nvim/bin/agent-instructions.md` and
 `nvim/bin/agent-reminder.md`; Neovim display/navigation instructions remain.
 Existing conversations can retain older instructions until reloaded/resumed.
@@ -283,3 +437,16 @@ AGENT_COMMS_TEST_OPENCODE=1 python3 -m unittest discover -s agent-comms -p test_
 
 The opt-in OpenCode test dispatches through the installed V2 binary to a local
 fake LLM with isolated HOME/config/state; it makes no external model calls.
+
+### Codex localhost sandbox restrictions
+
+Codex shell commands with `workspace-write` and `network_access = false` cannot
+connect to the listener's localhost TCP port, even when the listener is healthy.
+The CLI reports this as a permissions/sandbox block, not an offline listener.
+Restarting the listener does not fix that restriction. SessionStart hooks can
+still allocate an identity because allocation only needs local files.
+
+Use Codex's normal approval flow for any additional access. Do not automatically
+enable general networking, bypass the sandbox, auto-approve commands, or silently
+switch transports. A separately authorized narrow messaging tool is another
+possible integration, but is not installed by this version.

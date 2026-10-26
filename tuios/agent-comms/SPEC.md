@@ -9,6 +9,17 @@ messages presented sequentially in a terminal or the tuios dock.
 The program lives in `tuios/agent-comms/` in this dotfiles repository. This
 specification captures the agreed design before implementation.
 
+Later extensions are implemented and documented in README.md: durable `history`,
+separate `send --tts` speech text, watcher-side ElevenLabs speech using the
+Naia-default `eleven_turbo_v2_5`, synchronized caption chunks and attention flashes,
+explicit checked tuios session prefixes (`prefix --id ID`), and personalities restricted to agent-comms
+messages (never standard responses). Those extensions supersede the original v1
+voice/history exclusions below. The current wire protocol is version 2.
+Prefix lookup returns an exact introduction or empty string; agents must insert
+it themselves in both display and TTS text. `send` rechecks context and rejects
+mismatches without queueing or rewriting the message. This supersedes the earlier
+automatic-introduction behavior.
+
 ## Technology and platforms
 
 - Python 3.11 or newer, standard library only; no pip dependencies.

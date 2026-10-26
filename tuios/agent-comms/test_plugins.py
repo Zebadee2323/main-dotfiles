@@ -29,7 +29,13 @@ class SessionTests(Fixture):
         self.assertIn("Always close every turn", first["instructions"])
         self.assertIn("immediately BEFORE", first["instructions"])
         self.assertIn("voice mode", first["instructions"])
-        self.assertIn("Claude Code", first["instructions"])
+        self.assertIn("MUST shape wording, tone, and delivery", first["instructions"])
+        self.assertIn("ONLY; use your ordinary style in standard responses", first["instructions"])
+        self.assertIn("eleven_turbo_v2_5", first["instructions"])
+        self.assertIn("--tts", first["instructions"])
+        self.assertIn("agent-comms prefix --id", first["instructions"])
+        self.assertIn("Before EVERY message", first["instructions"])
+        self.assertIn("never inserts or rewrites the prefix", first["instructions"])
 
     def test_concurrent_same_session_draws_once(self):
         self.cli("id", "--refill")
@@ -39,6 +45,23 @@ class SessionTests(Fixture):
         self.assertEqual(len({json.loads(r.stdout)["id"] for r in results}), 1)
         remaining = json.loads((self.paths.state / "bag.json").read_text())["remaining"]
         self.assertEqual(len(remaining), 2)
+
+    def test_first_message_introduces_with_prefix_or_own_words_for_both_harnesses(self):
+        for harness in ("opencode", "codex"):
+            with self.subTest(harness=harness):
+                assigned = self.assign(harness=harness)
+                instructions = assigned["instructions"]
+                self.assertIn("separate shell-tool call", instructions)
+                self.assertIn("Read the tool result into your context BEFORE composing", instructions)
+                self.assertIn("combine query and send in one tool call", instructions)
+                self.assertNotIn("prefix=$(agent-comms prefix", instructions)
+                self.assertIn("It already identifies you and your session", instructions)
+                self.assertIn("even on the first message", instructions)
+                self.assertIn("On your first session message, introduce yourself", instructions)
+                self.assertIn("never\n  add another introduction", instructions)
+                self.assertIn("in your own words in BOTH arguments", instructions)
+                self.assertIn("afterward, no introduction is needed", instructions)
+                self.assertIn(f'"I\'m {assigned["name"]}, your AI coding assistant.', instructions)
 
     def test_new_sessions_and_harnesses_use_distinct_bag_entries(self):
         results = [self.assign("one"), self.assign("two"), self.assign("one", "codex")]
@@ -100,6 +123,7 @@ class CodexHookTests(Fixture):
         self.assertTrue(all(output == outputs[0] for output in outputs))
         self.assertEqual(outputs[0]["hookEventName"], "SessionStart")
         self.assertIn("agent-comms send", outputs[0]["additionalContext"])
+        self.assertIn("ONLY; use your ordinary style in standard responses", outputs[0]["additionalContext"])
         records = list((self.paths.state / "sessions").glob("*.json"))
         self.assertEqual(len(records), 1)
         self.assertEqual(json.loads(records[0].read_text())["harness"], "codex")
