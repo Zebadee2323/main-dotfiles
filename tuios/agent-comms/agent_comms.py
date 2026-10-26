@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 import hashlib
 import hmac
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import math
 import os
 from pathlib import Path
@@ -29,6 +31,7 @@ import uuid
 import message_history
 import pane_identity
 import speech
+import service_manager
 import tuios_context
 
 VERSION = 2
@@ -38,6 +41,7 @@ MAX_MESSAGE = 8192
 QUEUE_LIMIT = 256
 CLIENT_LIMIT = 128
 IO_TIMEOUT = 5
+LOG = logging.getLogger("agent-comms")
 
 
 class CommsError(Exception):
@@ -73,8 +77,8 @@ def atomic_json(path: Path, value: dict) -> None:
 class FileLock:
     """Lock byte zero on Windows; flock on POSIX. Lock files are never removed."""
 
-    def __init__(self, path: Path, *, wait: bool = True):
-        self.path, self.wait, self.stream = path, wait, None
+    def __init__(self, path: Path, *, wait: bool = True, timeout: float = IO_TIMEOUT):
+        self.path, self.wait, self.timeout, self.stream = path, wait, timeout, None
 
     def __enter__(self):
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
@@ -82,7 +86,7 @@ class FileLock:
         # Windows requires a real byte to lock. All writers write the same byte.
         if not self.path.stat().st_size:
             self.stream.write(b"\0")
-        deadline = time.monotonic() + IO_TIMEOUT
+        deadline = time.monotonic() + self.timeout
         try:
             while True:
                 try:
@@ -440,34 +444,62 @@ def communication_instructions(config):
     return re.sub(r"\{(speech_model)\}", lambda m: values[m[1]], template)
 
 
-def pane_binding(paths, config, *, allocate=True):
+def pane_binding(paths, config, *, allocate=True, env=None):
     try:
         return pane_identity.resolve(paths, config, private_dir=private_dir, lock=FileLock,
-                                     atomic_json=atomic_json, draw_id=draw_id, error=CommsError, allocate=allocate)
+                                     atomic_json=atomic_json, draw_id=draw_id, error=CommsError, allocate=allocate, env=env)
     except ValueError as exc:
         raise CommsError(str(exc)) from None
 
 
-def checked_context():
+def checked_context(env=None):
     try:
-        return tuios_context.context("", strict=True)
+        return tuios_context.context("", strict=True, **({"env": env} if env is not None else {}))
     except tuios_context.ContextError as exc:
         raise CommsError(str(exc)) from None
 
 
-def identify(paths, config):
+def identify(paths, config, env=None):
     # Verify pane presence/focus before persisting any allocation.
-    source = checked_context()
-    identity = pane_binding(paths, config)
+    source = checked_context(env) if env is not None else checked_context()
+    identity = pane_binding(paths, config, **({"env": env} if env is not None else {}))
     if identity is None:
         raise CommsError("Cannot resolve identity outside a tuios pane. No caller-selected identity or session fallback is allowed.")
     prefix = expected_prefix(config, identity, source)
     name = clean_text(config["identities"][identity]["name"])
     try:
-        pane_identity.update_title(paths, name, source, private_dir=private_dir, lock=FileLock, atomic_json=atomic_json)
+        pane_identity.update_title(paths, name, source, private_dir=private_dir, lock=FileLock, atomic_json=atomic_json, env=env)
     except (OSError, ValueError, CommsError) as exc:
         print(f"agent-comms: pane name unchanged: {exc}", file=sys.stderr)
     return {"id": identity, "name": name, "prefix": prefix}
+
+
+PANE_ENV_KEYS = frozenset(("TUIOS_ENV", "TUIOS_PANE_ID", "TUIOS_WINDOW_ID", "TUIOS_SESSION",
+                           "TUIOS_HOST", "TUIOS_SOCKET", "TUIOS_SERVER"))
+
+
+def request_pane_env(value):
+    """Forward pane addressing only, never arbitrary process variables or credentials."""
+    if (not isinstance(value, dict) or set(value) - PANE_ENV_KEYS
+            or any(not isinstance(v, str) or not v or len(v) > 4096 or "\0" in v for v in value.values())):
+        raise CommsError("Invalid pane environment.")
+    if (value.get("TUIOS_ENV") != "1" or not (value.get("TUIOS_PANE_ID") or value.get("TUIOS_WINDOW_ID"))
+            or not value.get("TUIOS_SESSION")):
+        raise CommsError("Cannot resolve identity outside a tuios pane. No caller-selected identity or session fallback is allowed.")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("TUIOS_")}
+    return {**env, **value}
+
+
+async def listener_context(paths):
+    env = {k: os.environ[k] for k in PANE_ENV_KEYS if k in os.environ}
+    request_pane_env(env)  # Fail locally when the caller has no pane; never guess.
+    try:
+        checked_context()  # Respect local context-query denials before contacting the listener.
+    except CommsError as exc:
+        raise CommsError(f"Client pane check failed: {exc}") from None
+    if endpoint(paths).get("pane_identity") is not True:
+        raise CommsError("Listener predates sandbox-compatible identity lookup; restart 'agent-comms serve'.")
+    return (await rpc(paths, "context", pane_env=env))["identity"]
 
 
 def expected_prefix(config, identity, source):
@@ -914,8 +946,11 @@ class TerminalDisplay:
 def stop_signals(event):
     """signal.signal works on the main thread on Windows as well as POSIX."""
     loop, old = asyncio.get_running_loop(), {}
+    def received(sig, _):
+        LOG.info("Shutdown requested: %s", signal.Signals(sig).name)
+        loop.call_soon_threadsafe(event.set)
     for sig in (signal.SIGINT, signal.SIGTERM):
-        old[sig] = signal.signal(sig, lambda *_: loop.call_soon_threadsafe(event.set))
+        old[sig] = signal.signal(sig, received)
     try:
         yield
     finally:
@@ -1028,7 +1063,18 @@ class Server:
                 raise CommsError("Authentication failed.")
             if type(request.get("protocol_version")) is not int or request["protocol_version"] != VERSION:
                 raise CommsError("Unsupported request protocol version.")
-            if request.get("command") == "send":
+            if request.get("command") == "ping":
+                await write_frame(writer, {"ok": True, "protocol_version": VERSION, "pid": os.getpid(),
+                                           "service_id": os.environ.get("AGENT_COMMS_SERVICE_ID")})
+            elif request.get("command") == "context":
+                env = request_pane_env(request.get("pane_env"))
+                # File locks and tuios queries must not stall speech/watch clients.
+                try:
+                    identity = await asyncio.to_thread(identify, self.paths, self.config, env)
+                except (CommsError, OSError) as exc:
+                    raise CommsError(f"Listener identity lookup failed: {exc}") from None
+                await write_frame(writer, {"ok": True, "protocol_version": VERSION, "identity": identity})
+            elif request.get("command") == "send":
                 message = validate_message(self.config, request.get("id"), request.get("msg"), request.get("tts"), request.get("source"))
                 if self.queue.full():
                     raise CommsError("Message queue is full; try again later.") from None
@@ -1103,10 +1149,11 @@ class Server:
             processor = None
             try:
                 atomic_json(discovery, {"protocol_version": VERSION, "prefix_policy": PREFIX_POLICY, "spatial_prefix": True,
-                                        "audio_control": True,
+                                        "audio_control": True, "pane_identity": True,
                                         "port": listener.sockets[0].getsockname()[1], "token": self.token})
                 with TerminalDisplay(self.quiet) as self.display, stop_signals(self.stop):
                     self.publish(None)
+                    LOG.info("Listener ready: pid=%s", os.getpid())
                     processor = asyncio.create_task(self.process())
                     # Surface unexpected worker failures instead of leaving a dead queue.
                     stopped = asyncio.create_task(self.stop.wait())
@@ -1133,6 +1180,7 @@ class Server:
                 # Still holding the singleton lock: no replacement can publish yet.
                 with suppress(FileNotFoundError):
                     discovery.unlink()
+                LOG.info("Listener stopped: pid=%s", os.getpid())
 
 
 def parser():
@@ -1151,6 +1199,16 @@ def parser():
     review = subs.add_parser("voice-review", help="Audition non-approved voices and save approval decisions")
     serve_parser = subs.add_parser("serve", help="Run the single per-user listener")
     serve_parser.add_argument("--quiet", action="store_true", help="Disable the standalone terminal display")
+    service = subs.add_parser("service", help="Manage the per-user OS service (macOS launchd / Windows Task Scheduler)")
+    actions = service.add_subparsers(dest="action", required=True)
+    for action in ("install", "start", "stop", "restart", "status", "logs", "uninstall"):
+        target = actions.add_parser(action)
+        common(target, defaults=False)
+        if action == "start":
+            target.add_argument("--if-installed", action="store_true", help="Skip if not installed; never install implicitly")
+        if action == "logs":
+            target.add_argument("--lines", type=int, default=100)
+            target.add_argument("--follow", action="store_true")
     send_parser = subs.add_parser("send", help="Queue a named message")
     send_parser.add_argument("--id", required=True, help="Expected pane identity ID returned by context")
     send_parser.add_argument("--msg", required=True)
@@ -1180,7 +1238,7 @@ def parser():
     history.add_argument("--no-color", action="store_true", help="Disable history heading colors")
     instructions = subs.add_parser("instructions", help="Print shared communication instructions without allocating identity")
     instructions.add_argument("--format", choices=("json", "text"), default="json")
-    for sub in (identity, review, serve_parser, send_parser, watcher, instructions, history, audio):
+    for sub in (identity, review, serve_parser, service, send_parser, watcher, instructions, history, audio):
         common(sub, defaults=False)
     return result
 
@@ -1209,7 +1267,31 @@ def main(argv=None):
     args = parser().parse_args(argv)
     try:
         paths = Paths.resolve(args)
-        if args.command == "audio":
+        if args.command == "service":
+            if args.action == "logs" and not 1 <= args.lines <= 10000:
+                raise CommsError("--lines must be between 1 and 10000.")
+            def busy():
+                if not paths.runtime.exists():
+                    return False
+                try:
+                    with FileLock(paths.runtime / "server.lock", wait=False):
+                        return False
+                except CommsError:
+                    return True
+            def probe():
+                async def ping():
+                    return await asyncio.wait_for(rpc(paths, "ping"), 0.5)
+                try:
+                    return asyncio.run(ping())
+                except (CommsError, OSError, asyncio.TimeoutError):
+                    return None
+            def health():
+                return (probe() or {}).get("pid")
+            result = service_manager.manage(args, paths, private_dir=private_dir, lock=FileLock,
+                                            busy=busy, health=health, probe=probe)
+            if result:
+                print(json.dumps(result) if isinstance(result, dict) else result)
+        elif args.command == "audio":
             if args.seconds is not None and (args.action != "mute" or not math.isfinite(args.seconds) or not 0 < args.seconds <= 86400):
                 raise CommsError("--seconds must be greater than 0 and at most 86400, for mute only.")
             if endpoint(paths).get("audio_control") is not True:
@@ -1243,7 +1325,7 @@ def main(argv=None):
                 if args.refill:
                     draw_id(paths, config, refill=True)
                 else:
-                    print(json.dumps(identify(paths, config), ensure_ascii=True, separators=(",", ":")))
+                    print(json.dumps(asyncio.run(listener_context(paths)), ensure_ascii=True, separators=(",", ":")))
             elif args.command == "voice-review":
                 voice_review(paths, config)
             elif args.command == "send":
@@ -1260,7 +1342,21 @@ def main(argv=None):
                 validate_message(config, identity, args.msg, args.tts, source)
                 asyncio.run(send(paths, identity, args.msg, args.tts, source))
             elif args.command == "serve":
-                asyncio.run(Server(paths, config, quiet=args.quiet).run())
+                private_dir(paths.state / "logs")
+                handler = RotatingFileHandler(paths.state / "logs/server.log", maxBytes=2_000_000,
+                                              backupCount=3, encoding="utf-8")
+                handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+                LOG.addHandler(handler)
+                LOG.setLevel(logging.INFO)
+                try:
+                    LOG.info("Listener starting: pid=%s", os.getpid())
+                    asyncio.run(Server(paths, config, quiet=args.quiet).run())
+                except Exception:
+                    LOG.exception("Listener failed")
+                    raise
+                finally:
+                    LOG.removeHandler(handler)
+                    handler.close()
             elif args.command == "instructions":
                 assignment = {"instructions": communication_instructions(config)}
                 print(assignment["instructions"] if args.format == "text" else json.dumps(assignment, ensure_ascii=True))
@@ -1270,7 +1366,7 @@ def main(argv=None):
         with suppress(OSError):
             sys.stdout = open(os.devnull, "w")
         return 0
-    except (CommsError, OSError, asyncio.TimeoutError) as exc:
+    except (CommsError, service_manager.ServiceError, OSError, asyncio.TimeoutError) as exc:
         print(f"agent-comms: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

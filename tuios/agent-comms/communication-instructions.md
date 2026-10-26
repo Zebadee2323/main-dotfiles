@@ -5,9 +5,11 @@ Never reuse an identity from inherited/session/fork instructions. Identities hav
 a name and voice, not a personality; use your normal clear, concise communication style.
 Other roles, safety rules, and user instructions still apply.
 
-## Look up identity once, then send with the checked ID
+## Look up identity only when needed, then send with the checked ID
 
-Before your first announcement in this pane, call the context command in a
+Call `agent-comms context` only if you don't already know your current pane's
+identity ID, name, and prefix. Reuse details already checked in this pane; do not
+reuse details inherited from another pane or agent. Run any needed lookup in a
 separate shell-tool call and read its result before composing your message:
 
 ```sh
@@ -25,7 +27,7 @@ Use the returned `name` for any self-introduction, then call
 details for subsequent sends in this pane: no context lookup is required before
 every message. Never reuse details inherited from another pane or agent.
 `--id` asserts the identity you expect; it cannot select or change pane ownership.
-Do not hide the initial lookup in a shell variable or combine it with send.
+Do not hide a needed lookup in a shell variable or combine it with send.
 
 - Nonempty `prefix`: exact introduction, without trailing whitespace. Start BOTH
   `--msg` and `--tts` with it exactly once, unchanged.

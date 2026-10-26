@@ -18,14 +18,17 @@ class PrefixTests(Fixture):
 
     def invoke(self, args, source=None):
         output, errors = io.StringIO(), io.StringIO()
+        async def context(paths):
+            return app.identify(paths, self.config())
         with patch.object(app, "prepare_output"), patch.object(app.Paths, "resolve", return_value=self.paths), \
+             patch.object(app, "listener_context", new=context), \
              patch.object(app, "pane_binding", return_value="a"), \
              patch.object(tuios_context, "context", return_value=self.source if source is None else source), \
              patch("sys.stdout", output), patch("sys.stderr", errors):
             code = app.main(args)
         return code, output.getvalue(), errors.getvalue()
 
-    def test_id_returns_name_and_prefix_without_listener(self):
+    def test_context_returns_listener_identity_and_prefix(self):
         code, text, error = self.invoke(["context"])
         self.assertEqual(code, 0, error)
         self.assertEqual(json.loads(text)["prefix"], self.prefix)

@@ -51,6 +51,14 @@ and `prefix`. Agents call this initially in a separate tool call, then reuse
 these details in the same pane until a send reports an identity/prefix mismatch.
 Never inherit identity details from another pane or conversation.
 
+The CLI performs a live local pane check, then requests identity allocation via
+the running listener's authenticated `context` RPC. It forwards only allowlisted
+tuios addressing variables. The listener verifies the pane with that environment,
+persists the binding, and updates the pane title. Routine `context` and `send`
+commands perform no client-side state writes. Send verification reads an atomic
+binding snapshot without a write lock. An older listener requires a restart;
+there is no fallback to writing application state from inside the agent sandbox.
+
 Allocation uses the original Tetris-style bag internally, but repeated lookup
 does not draw a new identity. The following describes the internal allocator:
 
@@ -91,6 +99,37 @@ Run the single global listener and own the timed message queue.
   messages; durable delivery is not part of v1.
 - The server lifecycle is independent of dock watchers. Closing a tuios client
   must not terminate the global listener merely because its watcher exits.
+
+### `agent-comms service ACTION` (macOS / experimental Windows)
+
+- Provide `install`, `start`, `stop`, `restart`, `status`, `logs`, and `uninstall`
+  through a per-user launchd LaunchAgent, never an agent-owned background process.
+- Install is explicit. `start --if-installed` skips an absent installation and is
+  suitable for tuios's client-side `after-attach` hook. Repeated starts do not
+  interrupt a running listener. Serialize mutations and preserve the server lock.
+- Wait for an authenticated `ping` response whose PID matches launchd before
+  reporting readiness. Do not silently terminate unmanaged listeners.
+- Start at login, restart on exit with throttling, and unload on explicit stop.
+  Uninstall preserves state and logs. No root privileges or credential copying.
+- Pin executable/config/state/runtime paths. Refuse to manage an installation
+  with different paths or overwrite unrelated definitions.
+- Persist rotating lifecycle logs with signals and unexpected failures, excluding
+  message contents and authentication tokens. Capture early failures separately.
+- On Windows, use a SID-scoped Task Scheduler task with an interactive-token,
+  least-privilege logon trigger. No admin service or stored password. Ignore new
+  instances, disable the execution time limit and battery restrictions, and retry
+  failed exits at the scheduler's minimum one-minute interval up to 255 times.
+- Run the listener in the action PID via a small Python runner, capture early
+  stderr, and remove caller identity/credential variables. Validate readiness
+  with an authenticated per-installation ID, not a Task Scheduler engine PID.
+- Windows stop disables the task before terminating its instances, waits for
+  them to end, and does not promise POSIX signal cleanup. Start re-enables logon
+  startup. Never use process-name kills or silently overwrite unrelated tasks.
+- Transfer all task data as JSON to fixed PowerShell COM code, use locale-neutral
+  status, XML escaping and Windows argv quoting, and preserve state on uninstall.
+  Keep Windows support marked unvalidated until native smoke tests pass.
+- Other platforms retain foreground `serve`; unsupported service commands explain
+  the limitation (`start --if-installed` safely skips).
 
 ### `agent-comms send --id ID --msg MESSAGE`
 

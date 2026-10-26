@@ -16,6 +16,10 @@ claude
 
 Or invoke `./bin/opencode`, `./bin/codex`, or `./bin/claude` directly.
 All arguments are forwarded.
+The Codex shim adds `--no-daemon` so its tools inherit the launching terminal's
+environment, including tuios pane identity, whether or not an editor is found.
+Explicit remote-server launches and `codex agents` are incompatible with this
+shim; invoke the real Codex executable for those commands.
 No shell configuration is changed automatically. Keep the scripts together in
 `bin`; use PATH rather than copying or symlinking individual scripts.
 
@@ -38,7 +42,8 @@ Existing harness permissions remain in force. No global/project config is writte
 OpenCode administrative commands are handled by the upstream launcher without
 Naia config; explicit `--server` conversation launches are rejected upstream.
 
-Outside tuios these shims launch the real CLI unchanged. Inside tuios, inherited
+Outside tuios these shims launch the real CLI directly; the Codex shim still adds
+`--no-daemon`. Inside tuios, inherited
 `NVIM`, `NVIM_LISTEN_ADDRESS`, and `NAIA_MCP_TOKEN` are cleared before discovery.
 No ready editor means a warning and an ordinary launch. Discovery errors and
 ambiguous editor matches cancel the launch instead of guessing.

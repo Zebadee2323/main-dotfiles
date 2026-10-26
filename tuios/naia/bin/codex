@@ -1,2 +1,2 @@
 #!/bin/sh
-exec python3 "$(dirname "$0")/tuios-naia" codex "$@"
+exec python3 "$(dirname "$0")/tuios-naia" codex --no-daemon "$@"

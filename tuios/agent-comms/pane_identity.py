@@ -6,6 +6,8 @@ import os
 import subprocess
 import time
 
+import tuios_context
+
 GRACE_SECONDS = 7 * 24 * 3600
 SCAN_INTERVAL = 3600
 
@@ -24,11 +26,11 @@ def owner(env=None):
     return key, daemon_key, pane
 
 
-def inventory(run=subprocess.run):
+def inventory(run=subprocess.run, env=None):
     """Only a complete successful listing is evidence that a pane is gone."""
     try:
-        result = run(["tuios", "list-windows", "--all", "--json"], capture_output=True,
-                     encoding="utf-8", timeout=2, check=True)
+        result = run([tuios_context.executable(env), "list-windows", "--all", "--json"], capture_output=True,
+                     encoding="utf-8", timeout=2, check=True, **({"env": env} if env is not None else {}))
         data = json.loads(result.stdout)
         panes = data["panes"]
         if (data.get("success") is not True or data.get("errors") or not isinstance(panes, list)
@@ -63,9 +65,11 @@ def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, al
     if identity is None:
         return None
     key, daemon, pane = identity
-    directory = private_dir(paths.state)
+    # Atomic replacement makes a lock-free read safe. Sending must never mkdir,
+    # chmod, or open a lock file in the listener's private state directory.
+    directory = private_dir(paths.state) if allocate else paths.state
     filename = directory / "pane-identities.json"
-    with lock(directory / "pane-identities.lock"):
+    def read_state():
         try:
             state = json.loads(filename.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -80,14 +84,20 @@ def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, al
                        or ("missing_since" in r and not timestamp(r["missing_since"]))
                        for k, r in state["bindings"].items())):
             raise error(f"Invalid pane identity mapping: {filename}.")
+        return state
+
+    if not allocate:
+        saved = read_state()["bindings"].get(key)
+        if saved is None or saved["id"] not in config["identities"]:
+            raise error("Pane has no current identity. Run 'agent-comms context' before sending.")
+        return saved["id"]
+
+    with lock(directory / "pane-identities.lock"):
+        state = read_state()
         saved = state["bindings"].get(key)
-        if not allocate:
-            if saved is None or saved["id"] not in config["identities"]:
-                raise error("Pane has no current identity. Run 'agent-comms context' before sending.")
-            return saved["id"]
         now = time.time()
         if now - state["scanned"].get(daemon, 0) >= SCAN_INTERVAL:
-            live = inventory()
+            live = inventory(env=env) if env is not None else inventory()
             prune(state, daemon, pane, live, now)
             # Throttle failures too; never retry a forbidden query via another route.
             state["scanned"][daemon] = now
@@ -119,9 +129,10 @@ def prefixed_title(title, prefix, previous=None):
     return prefix + title
 
 
-def update_title(paths, name, source, *, private_dir, lock, atomic_json, run=None):
+def update_title(paths, name, source, *, private_dir, lock, atomic_json, run=None, env=None):
     """Best-effort custom name, with ownership stored alongside the pane binding."""
-    identity = owner()
+    env = os.environ if env is None else env
+    identity = owner(env)
     if identity is None or "pane_title" not in source:
         return
     run = subprocess.run if run is None else run
@@ -133,8 +144,8 @@ def update_title(paths, name, source, *, private_dir, lock, atomic_json, run=Non
             state = json.loads(filename.read_text(encoding="utf-8"))
             saved = state["bindings"][key]
             # Re-read under the lock so concurrent context calls cannot stack prefixes.
-            result = run(["tuios", "get-window", pane, "-s", os.environ["TUIOS_SESSION"], "--json"],
-                         capture_output=True, encoding="utf-8", timeout=2, check=True)
+            result = run([tuios_context.executable(env), "get-window", pane, "-s", env["TUIOS_SESSION"], "--json"],
+                         capture_output=True, encoding="utf-8", timeout=2, check=True, env=env)
             window = json.loads(result.stdout)
             if window.get("success") is not True or window.get("id") != pane:
                 raise ValueError("Cannot verify the caller pane's current name.")
@@ -145,8 +156,8 @@ def update_title(paths, name, source, *, private_dir, lock, atomic_json, run=Non
             previous = saved.get("title_prefix")
             updated = prefixed_title(title, prefix, previous if isinstance(previous, str) else None)
             if updated != title:
-                run(["tuios", "set-window", "-s", os.environ["TUIOS_SESSION"], "-w", pane, "--name", updated],
-                    capture_output=True, encoding="utf-8", timeout=2, check=True)
+                run([tuios_context.executable(env), "set-window", "-s", env["TUIOS_SESSION"], "-w", pane, "--name", updated],
+                    capture_output=True, encoding="utf-8", timeout=2, check=True, env=env)
             saved["title_prefix"] = prefix
             atomic_json(filename, state)
     except subprocess.SubprocessError:

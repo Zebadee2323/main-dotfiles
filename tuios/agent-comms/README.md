@@ -13,6 +13,10 @@ chmod +x agent-comms
 ./agent-comms serve
 ```
 
+For a persistent macOS listener, prefer the per-user launchd service below.
+`serve` is a foreground/debugging command; do not use an agent's background
+shell tool to host a global listener.
+
 In another tuios pane:
 
 ```sh
@@ -55,6 +59,7 @@ $message = if ($prefix) { "$prefix Hello from Windows!" } else { "Hello from Win
 | `voice-review` | Audition each non-approved voice, then save a yes/no approval in the config. |
 | `serve` | Own the singleton listener, timed FIFO queue, and terminal display. |
 | `serve --quiet` | Same listener without terminal display. |
+| `service install/start/stop/restart/status/logs/uninstall` | Manage the per-user macOS LaunchAgent or experimental Windows scheduled task; see below. |
 | `send --id ID --msg TEXT --tts SPEECH` | Verify the expected ID against the pane binding, save and queue text; acknowledge acceptance, not completion. |
 | `history` | Show readable, wrapped history with timestamps and sender/session headings, even offline. Colors appear only in a terminal (respecting `NO_COLOR` / `--no-color`). |
 | `history --raw` | Print unstyled, one-line timestamp/name/message records. |
@@ -415,6 +420,26 @@ introduction is required. Context stays internal. Lookup uses read-only
 Incomplete environment, an unknown pane, or failed/forbidden context queries
 produce an error, not a guessed empty prefix. No pane is focused or manipulated.
 
+Identity allocation is performed by the running listener through its existing
+authenticated localhost API. The CLI checks its own live pane context first and
+forwards only tuios pane/session/host/socket addressing, never arbitrary environment
+variables or credentials. The listener verifies that pane again before allocating
+or updating its title. Neither `context` nor `send` writes the client's state files:
+`send` reads the atomically replaced binding without creating directories, changing
+permissions, or opening lock files. This supports Codex's workspace-write sandbox
+without adding the application state directory to its writable roots. Localhost
+access must still be permitted, and the caller must retain its `TUIOS_*` environment.
+
+After upgrading, restart the agent-comms listener once. Older listeners produce
+an explicit restart message; there is no fallback to client-side state writes.
+On macOS, tuios discovery checks the normal Homebrew executable directories when
+launchd's minimal PATH cannot locate it. A found executable is never retried via
+another path after a permission or query failure. Errors distinguish client pane
+checks from listener identity lookup and report missing executables separately
+from access denials.
+`context --refill` and `voice-review` remain explicit local maintenance commands
+and still require write access to their state/configuration.
+
 **Nothing is automatically inserted.** Put nonempty `prefix` once at the start
 of both `--msg` and `--tts`, before markup. Do not add a second introduction.
 With an empty prefix, introduce yourself using the returned name on your first
@@ -452,13 +477,129 @@ and tuios may truncate it further. This tuios version caps custom components at
 80 cells, so the integration requests 80 even though standalone `watch` defaults
 to 96. The quiet idle display is `[o_o] comms: idle`.
 
-The initial setup runs `serve` in its own detached tuios session named
-`agent-comms`. Detaching other tuios clients does not stop it. Inspect it with
-`tuios attach agent-comms`. A tuios **daemon restart** ends its running process;
-restart `serve` manually in that session after restoration. No OS login service,
-startup hook, or automatic supervisor is installed in v1. Alternatively run
-`agent-comms serve` in an independent terminal; the singleton lock prevents
-accidental duplicate listeners.
+### Persistent macOS service
+
+```sh
+agent-comms service install      # Write a per-user LaunchAgent; no sudo
+agent-comms service start        # Load it, then wait for authenticated readiness
+agent-comms service status       # JSON: installed, loaded, PID, readiness, paths
+agent-comms service logs         # Last 100 lines of lifecycle/startup logs
+agent-comms service logs --follow
+agent-comms service restart      # Discards the in-memory queue
+agent-comms service stop         # Unload, so KeepAlive cannot undo the stop
+agent-comms service uninstall    # Stop and remove only the LaunchAgent
+```
+
+launchd owns the server, starts it at login, and restarts it on exit with a
+10-second throttle. Neither closing an agent nor restarting tuios stops it.
+`start` is idempotent: it does not kill/restart an already-running service.
+Mutating service commands serialize across callers. Install is explicit;
+starting a missing service reports how to install it. Commands never kill an
+unmanaged foreground listener: stop that listener before migrating to the service.
+
+The definition is `~/Library/LaunchAgents/com.agent-comms.server.plist`. It pins
+the current Python interpreter, source script, and resolved config/state/runtime
+paths, using an argument array rather than shell quoting. Keep the checkout and
+Python installation in place. After moving/upgrading them, stop, install, and
+start again. No API keys or pane environment are copied into the job; speech
+still runs in the credential-bearing dock watcher, not the global listener.
+Commands using different config/state/runtime overrides refuse to manage an
+existing job for other paths. Linux still uses foreground `serve`; Windows has
+the experimental Task Scheduler backend described below.
+
+Lifecycle logs live in `STATE/logs/server.log` (2 MB, three rotated backups).
+They record startup, readiness, shutdown signals, and failures, not messages or
+transport tokens. launchd stdout/stderr files in the same directory capture
+early startup failures; these are not rotated automatically. Uninstall preserves
+logs, history, and identity bindings.
+
+This configuration also requests an idempotent start whenever a tuios client
+attaches (including opening tuios):
+
+```toml
+[hooks]
+after-attach = ['"$HOME/.local/bin/agent-comms" service start --if-installed']
+```
+
+The hook only asks the OS supervisor to start an **already installed** service.
+It never installs anything or hosts the listener as a child process. Multiple
+clients are safe. A deliberate `service stop` lasts until the next login or
+tuios attach; uninstall to disable both automatic starts. New clients read the
+hook from configuration; no tuios daemon restart is required for this client-side
+hook. Use service status/logs to diagnose startup failures. Existing dock watchers
+reconnect automatically.
+
+### Experimental Windows service
+
+**Implemented but not execution-tested on Windows.** Run these from PowerShell
+in the `agent-comms` directory, with Python 3.11+ installed:
+
+```powershell
+.\agent-comms.cmd service install
+.\agent-comms.cmd service start
+.\agent-comms.cmd service status
+.\agent-comms.cmd service logs --follow
+.\agent-comms.cmd service restart
+.\agent-comms.cmd service stop
+.\agent-comms.cmd service uninstall
+# Equivalent without the .cmd launcher:
+py -3 .\agent_comms.py service status
+```
+
+This registers `agent-comms-<your Windows SID>` in Task Scheduler's root folder.
+It runs **only while you are signed in**, as your current user with least
+privilege, using your interactive token. No password is requested/stored, no
+elevation is attempted, and no machine-wide Windows service is installed.
+Organization policy may disallow registration; errors are reported rather than
+bypassing policy. Windows PowerShell 5.1 and the Task Scheduler service are
+required. WSL uses Linux, not this backend.
+
+The task starts at sign-in, ignores duplicate starts, has no execution-time
+limit, and runs on battery power. On nonzero exit, Task Scheduler retries after
+**one minute**, up to **255 retries**; this is bounded recovery, not launchd's
+indefinite keep-alive. Once retries are exhausted, use `service restart` and
+inspect the logs/Task Scheduler history. The normal status command distinguishes
+task state from authenticated listener readiness, checking a per-installation
+ID as well as the listener PID.
+
+The task pins the Python interpreter (preferring its adjacent `pythonw.exe`),
+checkout, and explicit config/state/runtime paths. The action runs the listener
+**in its own PID**, not as an untracked child. Paths with spaces/Unicode are XML-
+escaped and Windows-argv-quoted independently. Task Scheduler operations use its
+COM API through fixed PowerShell source with JSON input, not localized `schtasks`
+tables or dynamically interpolated commands. Caller pane variables, agent-comms
+overrides, and speech credentials are removed from the runner environment.
+
+`service stop` **disables the task before terminating it**, preventing automatic
+recovery from undoing your stop. Unlike macOS, sign-in startup stays disabled
+until `service start` (or the tuios attach hook) re-enables it. Termination may be
+forced: do not expect Python signal handlers, discovery-file cleanup, or a
+graceful shutdown log entry. The next listener replaces stale discovery under
+the existing singleton lock. Stops/restarts discard the in-memory queue.
+No process-name or machine-wide process-tree kills are used.
+
+Logs default to `%LOCALAPPDATA%/agent-comms/state/logs`: rotating `server.log`
+plus `windows.stderr.log` for early errors (not automatically rotated). Log
+following is implemented in Python; it does not require Unix `tail`, and releases
+file handles between reads so Windows can rotate logs. Uninstall preserves logs,
+history, and identities. Stop/install/start again after moving Python or the
+checkout. As on macOS, installation never silently replaces an unmanaged listener
+or a task with unrelated ownership/path metadata.
+
+For tuios, the same `service start --if-installed` command is available. **Do not
+copy the macOS `$HOME/.local/bin` hook onto Windows.** A Windows-oriented snippet
+(adjust the checkout path) is:
+
+```toml
+[hooks]
+after-attach = ['py -3 "C:/path/to/agent-comms/agent_comms.py" service start --if-installed']
+```
+
+This does not remove tuios's current dependency on `sh` for shell commands:
+native Windows still needs an available compatible shell or the upstream
+platform-aware command-runner work in [WINDOWS-SUPPORT.md](WINDOWS-SUPPORT.md).
+The scheduled task itself does not need `sh` or tuios, so sign-in startup and
+service commands can be used independently of that integration.
 
 On Windows, use a local command such as `py -3 C:/path/to/agent_comms.py watch` in
 the dock table rather than copying the POSIX `exec` command above.
@@ -595,8 +736,9 @@ fake LLM with isolated HOME/config/state; it makes no external model calls.
 Codex shell commands with `workspace-write` and `network_access = false` cannot
 connect to the listener's localhost TCP port, even when the listener is healthy.
 The CLI reports this as a permissions/sandbox block, not an offline listener.
-Restarting the listener does not fix that restriction. SessionStart hooks can
-still allocate an identity because allocation only needs local files.
+Restarting the listener does not fix that restriction. Both normal identity
+lookup and sending require localhost access; the SessionStart hook only supplies
+instructions and does not allocate identities.
 
 Use Codex's normal approval flow for any additional access. Do not automatically
 enable general networking, bypass the sandbox, auto-approve commands, or silently

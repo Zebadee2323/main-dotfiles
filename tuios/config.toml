@@ -242,3 +242,7 @@ enabled = false
 
 [screensaver]
 enabled = false
+
+[hooks]
+# Ask the OS supervisor to start its installed job; never own the listener here.
+after-attach = ['"$HOME/.local/bin/agent-comms" service start --if-installed']

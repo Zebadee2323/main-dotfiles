@@ -85,7 +85,7 @@ class HistoryTests(Fixture):
 
     def test_history_failure_rejects_instead_of_accepting_an_unrecorded_message(self):
         self.start_server()
-        self.paths.state.mkdir()
+        self.paths.state.mkdir(exist_ok=True)  # Lifecycle logging creates state at startup.
         (self.paths.state / "history.jsonl").mkdir()
         _, stream = self.request("send", id="a", msg="must not disappear")
         result = json.loads(stream.readline())

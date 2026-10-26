@@ -1,11 +1,22 @@
 """Read-only, best-effort sender attribution. Never focus or manipulate panes."""
 import json
 import os
+import shutil
 import subprocess
+import sys
 
 
 class ContextError(Exception):
     """The sender appears to be in tuios, but its context could not be verified."""
+
+
+def executable(env=None):
+    """launchd omits Homebrew from PATH; resolve before running, never retry a denial."""
+    env = os.environ if env is None else env
+    found = shutil.which("tuios", path=env.get("PATH", os.defpath))
+    if found is None and sys.platform == "darwin":
+        found = shutil.which("tuios", path="/opt/homebrew/bin:/usr/local/bin")
+    return found or "tuios"
 
 
 def bounds(window):
@@ -50,6 +61,7 @@ def workspace_position(own, windows):
 
 
 def context(name, run=subprocess.run, env=None, strict=False):
+    explicit_env = env is not None
     env = os.environ if env is None else env
     pane = env.get("TUIOS_PANE_ID") or env.get("TUIOS_WINDOW_ID")
     session = env.get("TUIOS_SESSION")
@@ -60,9 +72,13 @@ def context(name, run=subprocess.run, env=None, strict=False):
             raise ContextError("Cannot check tuios prefix: pane/session environment is incomplete.")
         return {}
 
-    def query(command):
-        result = run(["tuios", command, "-s", session, "--json"], capture_output=True,
-                     encoding="utf-8", timeout=2, check=True)
+    command = "session-info"
+
+    def query(name):
+        nonlocal command
+        command = name
+        result = run([executable(env), command, "-s", session, "--json"], capture_output=True,
+                     encoding="utf-8", timeout=2, check=True, **({"env": env} if explicit_env else {}))
         return json.loads(result.stdout)
 
     try:
@@ -98,9 +114,19 @@ def context(name, run=subprocess.run, env=None, strict=False):
             if position:
                 source.update(position=position, position_reference="workspace")
         return source
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         # Do not retry forbidden queries through another route. Strict senders
         # must not mistake unavailable context for a verified empty prefix.
         if strict:
-            raise ContextError("Cannot check tuios prefix: context query failed or was not permitted.") from None
+            if isinstance(exc, FileNotFoundError):
+                detail = "tuios executable was not found"
+            elif isinstance(exc, PermissionError):
+                detail = "access denied by permissions or a sandbox"
+            elif isinstance(exc, subprocess.CalledProcessError):
+                detail = f"tuios exited with status {exc.returncode}"
+            elif isinstance(exc, subprocess.TimeoutExpired):
+                detail = "tuios query timed out"
+            else:
+                detail = "tuios query failed or returned invalid data"
+            raise ContextError(f"Cannot check tuios prefix ({command}): {detail}.") from None
         return {}
