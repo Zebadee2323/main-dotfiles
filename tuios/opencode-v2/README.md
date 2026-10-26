@@ -122,6 +122,9 @@ environment variable; outside TUIOS it is a no-op.
 Permission/form cache refreshes do not gate transcript startup. A failed history
 refresh falls back to cached messages and live events rather than permanently
 disabling the mirror. Canceled requests and failures from an old tab are ignored.
+New-session `SessionNotFoundError` refresh failures retry after 100, 250, 500 and
+1000 ms before warning, allowing session creation to finish. Retries stop on a
+tab switch or plugin unload; other errors warn immediately.
 Warnings identify the failing operation and an error code/status instead of
 calling every failure a filesystem problem.
 

@@ -146,6 +146,73 @@ test("an optional sync which hangs doesn't gate the initial transcript", async (
   await f.bridge.close(); gate.resolve(); await tick(); assert.equal(f.warnings.length, 0);
 });
 
+test("new-session not-found refreshes retry and hydrate without warnings", async () => {
+  const counts = new Map();
+  const refresh = (stage) => async () => {
+    const count = (counts.get(stage) ?? 0) + 1; counts.set(stage, count);
+    if (count < 3) throw { _tag: "SessionNotFoundError" };
+  };
+  const f = fixture({ dependencies: { retryDelays: [1, 1] }, sessions: {
+    sync: refresh("session"),
+    message: { sync: refresh("history"), list: () => [assistant] },
+    permission: { sync: refresh("permission"), list: () => [] },
+    form: { sync: refresh("form"), list: () => [{ id: "f1", title: "Which branch?" }] },
+  } });
+  f.bridge.select("ses_A"); await wait(30); await f.settle();
+  assert.deepEqual([...counts.values()], [3, 3, 3, 3]);
+  assert.equal(f.files[0].records()[0].content[0].text, "Hello");
+  assert.equal(f.states().at(-1), "needs_input");
+  assert.equal(f.warnings.length, 0); assert.equal(f.diagnostics.length, 0);
+  await f.bridge.close();
+});
+
+test("persistent not-found warns after a bounded retry budget without blocking startup", async () => {
+  let attempts = 0;
+  const f = fixture({ dependencies: { retryDelays: [1, 1] }, sessions: { form: {
+    sync: async () => { attempts++; throw Object.assign(new Error(), { name: "SessionNotFoundError" }); },
+    list: () => [],
+  } } });
+  f.bridge.select("ses_A"); await f.settle();
+  assert.ok(f.bridge.current.ready);
+  await wait(30); await f.settle();
+  assert.equal(attempts, 3); assert.equal(f.warnings.length, 1);
+  assert.match(f.warnings[0].message, /form-sync unavailable \(SessionNotFoundError\)/);
+  assert.equal(f.diagnostics[0].stage, "form-sync");
+  await f.bridge.close();
+});
+
+test("switching sessions or closing cancels pending not-found retries", async () => {
+  const attempts = [];
+  const f = fixture({ dependencies: { retryDelays: [1000] }, sessions: {
+    sync: async (id) => { attempts.push(id); throw { _tag: "SessionNotFoundError" }; },
+  } });
+  f.bridge.select("ses_A"); await tick();
+  const first = f.bridge.current;
+  assert.equal(first.retryWaiters.size, 1);
+  f.bridge.select("ses_B"); await tick();
+  assert.equal(first.retryWaiters.size, 0);
+  const second = f.bridge.current;
+  assert.equal(second.retryWaiters.size, 1);
+  await f.bridge.close(); await tick();
+  assert.equal(second.retryWaiters.size, 0);
+  assert.deepEqual(attempts, ["ses_A", "ses_B"]);
+  assert.equal(f.warnings.length, 0); assert.equal(f.files[0].writes.length, 0);
+});
+
+test("live blocker replies win over delayed not-found retry hydration", async () => {
+  let attempts = 0;
+  const f = fixture({ dependencies: { retryDelays: [1] }, sessions: { form: {
+    sync: async () => { if (++attempts === 1) throw { _tag: "SessionNotFoundError" }; },
+    list: () => [{ id: "f1", title: "Stale question" }],
+  } } });
+  f.bridge.select("ses_A"); await tick();
+  f.event("form.replied", { id: "f1" });
+  await wait(20); await f.settle();
+  assert.equal(attempts, 2); assert.equal(f.bridge.current.forms.size, 0);
+  assert.equal(f.states().at(-1), "idle"); assert.equal(f.warnings.length, 0);
+  await f.bridge.close();
+});
+
 test("a failed history refresh keeps cached data and live events usable", async () => {
   const messages = [structuredClone(assistant)];
   const f = fixture({ messages, sessions: { message: {

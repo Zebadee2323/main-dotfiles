@@ -29,12 +29,13 @@ export function commandRunner(env = process.env) {
 }
 
 export class Bridge {
-  constructor(ctx, { env = process.env, run = commandRunner(env), journal = (path, id) => new Journal(path, id), interval = 750, diagnose = writeDiagnostic } = {}) {
+  constructor(ctx, { env = process.env, run = commandRunner(env), journal = (path, id) => new Journal(path, id), interval = 750, diagnose = writeDiagnostic, retryDelays = [100, 250, 500, 1000] } = {}) {
     this.ctx = ctx;
     this.env = env;
     this.run = run;
     this.journal = journal;
     this.interval = interval;
+    this.retryDelays = retryDelays;
     this.generation = 0;
     this.selected = undefined;
     this.current = undefined;
@@ -67,6 +68,7 @@ export class Bridge {
   retire(current) {
     if (!current) return;
     clearTimeout(current.timer);
+    for (const cancel of current.retryWaiters) cancel();
     const closing = Promise.resolve(current.task).then(() => current.journal.close()).catch((error) => this.warn(error, "close", current));
     this.retiring.add(closing);
     void closing.finally(() => this.retiring.delete(closing));
@@ -85,10 +87,10 @@ export class Bridge {
     const current = this.current = {
       sessionID, generation, state: "idle", revision: 0, permissions: new Map(), forms: new Map(),
       path, journal: this.journal(path, sessionID), dirty: new Set(), touched: new Set(),
-      permissionTouched: new Set(), formTouched: new Set(), ready: false, scan: true,
+      permissionTouched: new Set(), formTouched: new Set(), ready: false, scan: true, retryWaiters: new Set(),
       retired: Promise.all([...this.retiring]),
     };
-    const sync = (stage, fn) => Promise.resolve().then(fn).catch((error) => this.warn(error, stage, current));
+    const sync = (stage, fn) => this.sync(current, stage, fn);
     // Optional permission/form hydration must not gate transcript startup.
     // Late failures from a previous tab (or expected cancellation) are ignored.
     void sync("permission-sync", () => this.ctx.data.session.permission.sync(sessionID)).then(() => {
@@ -129,6 +131,34 @@ export class Bridge {
   }
 
   active(current) { return !this.closed && this.current === current; }
+
+  async sync(current, stage, fn) {
+    // Keep cache reads outside the route-selection reactive effect.
+    await Promise.resolve();
+    // A new route can appear before its session is persisted. Retry only that
+    // typed not-found error, with a finite budget; other failures still warn.
+    for (let attempt = 0; this.active(current); attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        if (!this.active(current)) return;
+        const missing = error?._tag === "SessionNotFoundError" || error?.name === "SessionNotFoundError";
+        if (!missing || attempt >= this.retryDelays.length) {
+          this.warn(error, stage, current);
+          return;
+        }
+        await new Promise((resolve) => {
+          const finish = () => {
+            clearTimeout(timer);
+            current.retryWaiters.delete(finish);
+            resolve();
+          };
+          const timer = setTimeout(finish, this.retryDelays[attempt]);
+          current.retryWaiters.add(finish);
+        });
+      }
+    }
+  }
 
   event(event) {
     const current = this.current;
