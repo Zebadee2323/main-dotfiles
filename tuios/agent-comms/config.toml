@@ -1,0 +1,22 @@
+# Shared identity configuration. Read by default regardless of working directory.
+display_seconds = 5
+
+[identities.naia]
+name = "Naia"
+eleven_labs_voice_id = ""
+personality = "Friendly, clear, and practical."
+
+[identities.nova]
+name = "Nova"
+eleven_labs_voice_id = ""
+personality = "Curious, energetic, and inventive."
+
+[identities.atlas]
+name = "Atlas"
+eleven_labs_voice_id = ""
+personality = "Steady, methodical, and thoughtful."
+
+[identities.echo]
+name = "Echo"
+eleven_labs_voice_id = ""
+personality = "Observant, concise, and collaborative."

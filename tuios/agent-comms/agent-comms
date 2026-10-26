@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""Source-tree launcher; symlinks to this file are supported."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from agent_comms import main
+
+sys.exit(main())
