@@ -18,7 +18,7 @@ export function createPlugin(run = execute) {
       async function instructions(sessionID) {
         if (ready.has(sessionID)) return ready.get(sessionID)
         // Cache only session-specific lookup instructions, never an identity or
-        // spatial prefix. Agents call context for their actual pane before EVERY send.
+        // spatial prefix. Agents look up their pane, then send with its checked ID.
         if (!pending.has(sessionID)) {
           const operation = (async () => {
             const configured = ctx.options?.python || process.env.AGENT_COMMS_PYTHON

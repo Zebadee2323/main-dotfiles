@@ -148,6 +148,49 @@ class Paths:
         )
 
 
+class AudioWorkspace:
+    """Private OS-temp audio, with locked workspaces and opportunistic orphan cleanup."""
+
+    STALE_SECONDS = 24 * 60 * 60
+
+    @staticmethod
+    def root():
+        user = hashlib.sha256(str(Path.home()).encode()).hexdigest()[:16]
+        base = private_dir(Path(tempfile.gettempdir()) / f"agent-comms-{user}")
+        return private_dir(base / "audio")
+
+    @classmethod
+    def prune(cls, root):
+        # Caller holds cleanup.lock, excluding workspace creation/removal. An
+        # old workspace may still be active (e.g. after sleep); age alone is not
+        # sufficient. OS locks are released even on SIGKILL or process crashes.
+        cutoff = time.time() - cls.STALE_SECONDS
+        for path in root.glob("speech-*"):
+            with suppress(OSError, CommsError):
+                if path.is_symlink() or not path.is_dir() or path.stat().st_mtime >= cutoff:
+                    continue
+                with FileLock(path / "active.lock", wait=False):
+                    pass
+                shutil.rmtree(path)
+
+    def __init__(self):
+        self.root_dir = self.root()
+        with FileLock(self.root_dir / "cleanup.lock"):
+            self.prune(self.root_dir)
+            self.path = Path(tempfile.mkdtemp(prefix="speech-", dir=self.root_dir))
+            self.lock = FileLock(self.path / "active.lock")
+            try:
+                self.lock.__enter__()
+            except BaseException:
+                shutil.rmtree(self.path)
+                raise
+
+    def close(self):
+        with FileLock(self.root_dir / "cleanup.lock"):
+            self.lock.__exit__()
+            shutil.rmtree(self.path)
+
+
 def clean_text(value: str, *, multiline: bool = False) -> str:
     # Strip escape sequences before controls, so their printable tails cannot leak.
     value = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)", "", value)
@@ -155,6 +198,32 @@ def clean_text(value: str, *, multiline: bool = False) -> str:
     value = re.sub(r"\x1b.", "", value)
     value = "".join(c for c in value if not unicodedata.category(c).startswith("C") or c in "\n\t")
     return value.strip() if multiline else " ".join(value.split())
+
+
+def format_history(messages, *, width=88, color=False):
+    """Readable history; JSON and raw output deliberately bypass this renderer."""
+    if not messages:
+        return "No messages in history."
+    width = max(24, min(width, 100))
+    lines = [f"Agent communications · {len(messages)} message{'s' if len(messages) != 1 else ''}", "─" * width]
+    for message in messages:
+        timestamp = clean_text(message["created_at"])
+        with suppress(ValueError, OverflowError, OSError):
+            timestamp = datetime.fromisoformat(timestamp).astimezone().strftime("%b %d %H:%M:%S")
+        name = clean_text(message["name"])
+        metadata = []
+        if isinstance(message.get("session_name"), str):
+            metadata.append(clean_text(message["session_name"]))
+        if type(message.get("workspace")) is int:
+            metadata.append(f"workspace {message['workspace']}")
+        heading = truncate(f"{timestamp}  {name}" + (" · " + " / ".join(metadata) if metadata else ""), width - 2)
+        lines.extend(["", "  " + (f"\x1b[1;36m{heading}\x1b[0m" if color else heading)])
+        for paragraph in clean_text(message["msg"], multiline=True).splitlines():
+            wrapped = speech.pages(paragraph, width - 4)
+            lines.extend("    " + text for text, _ in wrapped)
+            if not wrapped:
+                lines.append("")
+    return "\n".join(lines)
 
 
 def load_config(path: Path) -> dict:
@@ -393,7 +462,7 @@ def identify(paths, config):
     if identity is None:
         raise CommsError("Cannot resolve identity outside a tuios pane. No caller-selected identity or session fallback is allowed.")
     prefix = expected_prefix(config, identity, source)
-    return {"name": clean_text(config["identities"][identity]["name"]), "prefix": prefix}
+    return {"id": identity, "name": clean_text(config["identities"][identity]["name"]), "prefix": prefix}
 
 
 def expected_prefix(config, identity, source):
@@ -443,7 +512,7 @@ def check_prefix(identity, prefix, message, tts):
             wanted = json.dumps(prefix, ensure_ascii=True) if prefix else '"" (no introduction)'
             raise CommsError(
                 f"Prefix mismatch in {field}. Expected prefix: {wanted}. "
-                "Run 'agent-comms context' immediately before sending; "
+                "Run 'agent-comms context' to refresh your ID, name, and prefix; "
                 "use that prefix exactly once at the start of both --msg and --tts. "
                 "Focus or workspace may have changed. Message was not queued."
             )
@@ -635,13 +704,14 @@ async def watcher_speech(paths, state, settings, muted):
     executable = speech.player()
     if muted or not key or not message.get("voice_id") or not executable or message.get("phase") != "preparing":
         return
-    audio, lease = None, None
+    audio, lease, workspace, generation = None, None, None, None
     try:
         claim = await rpc(paths, "claim-speech", uid=message["uid"])
         if not claim.get("claimed"):
             return
         lease = claim["lease"]
-        directory = private_dir(paths.state / "audio")
+        workspace = AudioWorkspace()
+        directory = workspace.path
         cancelled, result = threading.Event(), {}
 
         def generate():
@@ -697,6 +767,16 @@ async def watcher_speech(paths, state, settings, muted):
     finally:
         if audio:
             audio.remove()
+        if workspace:
+            # A cancelled HTTP request keeps running in its worker thread. Keep
+            # its workspace locked until the late result has been cleaned up.
+            def close_workspace(_=None):
+                with suppress(OSError, CommsError):
+                    workspace.close()
+            if generation is not None and not generation.done():
+                generation.add_done_callback(close_workspace)
+            else:
+                close_workspace()
 
 
 async def present_message(paths, state, settings, emit, width, muted, flash, vfx=True):
@@ -987,12 +1067,13 @@ def parser():
         target.add_argument("--runtime-dir", default=default, help="Discovery/lock directory (AGENT_COMMS_RUNTIME_DIR)")
     common(result)
     subs = result.add_subparsers(dest="command", required=True)
-    identity = subs.add_parser("context", help="Return caller name and required message prefix as JSON")
+    identity = subs.add_parser("context", help="Return caller ID, name, and required message prefix as JSON")
     identity.add_argument("--refill", action="store_true", help="Reshuffle without drawing")
     review = subs.add_parser("voice-review", help="Audition non-approved voices and save approval decisions")
     serve_parser = subs.add_parser("serve", help="Run the single per-user listener")
     serve_parser.add_argument("--quiet", action="store_true", help="Disable the standalone terminal display")
     send_parser = subs.add_parser("send", help="Queue a named message")
+    send_parser.add_argument("--id", required=True, help="Expected pane identity ID returned by context")
     send_parser.add_argument("--msg", required=True)
     send_parser.add_argument("--tts", help="Speech text including optional ElevenLabs tags; defaults to --msg")
     watcher = subs.add_parser("watch", help="Stream current messages as tuios push lines")
@@ -1011,7 +1092,10 @@ def parser():
     history.add_argument("--limit", type=int, default=message_history.MAX_ENTRIES)
     history.add_argument("--id", help="Filter by identity ID")
     history.add_argument("--session", help="Filter by tuios session name")
-    history.add_argument("--json", action="store_true", help="Print full message records including speech text")
+    history_format = history.add_mutually_exclusive_group()
+    history_format.add_argument("--json", action="store_true", help="Print machine-readable full records including speech text")
+    history_format.add_argument("--raw", action="store_true", help="Print unstyled timestamp/name/message lines")
+    history.add_argument("--no-color", action="store_true", help="Disable history heading colors")
     instructions = subs.add_parser("instructions", help="Print shared communication instructions without allocating identity")
     instructions.add_argument("--format", choices=("json", "text"), default="json")
     for sub in (identity, review, serve_parser, send_parser, watcher, instructions, history):
@@ -1049,9 +1133,12 @@ def main(argv=None):
             messages = message_history.read(paths.state, args.limit, args.id, args.session)
             if args.json:
                 print(json.dumps(messages, ensure_ascii=True))
-            else:
+            elif args.raw:
                 for message in messages:
                     print(f"{clean_text(message['created_at'])} {clean_text(message['name'])}: {clean_text(message['msg'])}")
+            else:
+                print(format_history(messages, width=shutil.get_terminal_size((88, 24)).columns,
+                                     color=sys.stdout.isatty() and not args.no_color and "NO_COLOR" not in os.environ))
         elif args.command == "watch":
             if not 16 <= args.width <= 1000:
                 raise CommsError("--width must be between 16 and 1000.")
@@ -1075,6 +1162,12 @@ def main(argv=None):
                 identity = pane_binding(paths, config, allocate=False)
                 if identity is None:
                     raise CommsError("Cannot resolve sender outside a tuios pane. Run 'agent-comms context' in the caller pane before sending.")
+                if args.id != identity:
+                    raise CommsError(
+                        "Identity mismatch: --id does not match the caller pane's current identity. "
+                        "Run 'agent-comms context' to get an up-to-date ID, name, and prefix, "
+                        "then compose the message again and send with --id. Message was not queued."
+                    )
                 validate_message(config, identity, args.msg, args.tts, source)
                 asyncio.run(send(paths, identity, args.msg, args.tts, source))
             elif args.command == "serve":

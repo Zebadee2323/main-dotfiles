@@ -16,7 +16,7 @@ test("appends context without replacing existing instructions or duplicating its
   const calls = []
   const hook = await harness(async (python, args, options) => {
     calls.push({ python, args, options })
-    return { stdout: "You MUST call agent-comms context before EVERY send.\nAlways close every turn with agent-comms send." }
+    return { stdout: "Look up agent-comms context once; send with --id RETURNED_ID.\nAlways close every turn with agent-comms send." }
   })
   const original = { type: "text", text: "Existing system instructions" }
   const event = { sessionID: "ses_test", system: [original] }
@@ -24,7 +24,7 @@ test("appends context without replacing existing instructions or duplicating its
   await hook(event)
   assert.equal(event.system.length, 2)
   assert.equal(event.system[0], original)
-  assert.match(event.system[1].text, /context before EVERY send/)
+  assert.match(event.system[1].text, /send with --id RETURNED_ID/)
   assert.equal(calls.length, 1, "cache instructions only, not a pane identity or prefix")
   assert.ok(calls[0].args.includes("instructions"))
   assert.ok(!calls[0].args.includes("--session-id"))

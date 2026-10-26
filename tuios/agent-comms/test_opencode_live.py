@@ -69,7 +69,7 @@ class OpenCodeIntegrationTests(Fixture):
                            for message in body.get("messages", []) if message["role"] in ("system", "developer"))
         self.assertIn("<agent-comms-session>", system)
         self.assertIn("Always close every turn", system)
-        self.assertIn("You MUST call the context command before EVERY message", system)
+        self.assertIn("--id RETURNED_ID", system)
         self.assertNotIn("Personality:", system)
         self.assertIn("eleven_turbo_v2_5", system)
         self.assertIn("# Showing things in Neovim", system)

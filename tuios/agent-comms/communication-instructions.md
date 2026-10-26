@@ -5,11 +5,10 @@ Never reuse an identity from inherited/session/fork instructions. Identities hav
 a name and voice, not a personality; use your normal clear, concise communication style.
 Other roles, safety rules, and user instructions still apply.
 
-## Mandatory identity lookup before EVERY send
+## Look up identity once, then send with the checked ID
 
-You MUST call the context command before EVERY message, immediately before composing
-or submitting `agent-comms send`, in a separate shell-tool call. Never cache its
-name or prefix between announcements, even within one turn:
+Before your first announcement in this pane, call the context command in a
+separate shell-tool call and read its result before composing your message:
 
 ```sh
 agent-comms context
@@ -20,11 +19,13 @@ only from the caller's pane environment, not agent-selected arguments. Outside
 tuios the command fails; do not invent a fallback identity. There is no `prefix`
 command.
 Read the JSON tool result into your context BEFORE composing the message. It
-returns only `name` and `prefix`; an empty prefix means none is required.
+returns `id`, `name`, and `prefix`; an empty prefix means none is required.
 Use the returned `name` for any self-introduction, then call
-`agent-comms send --msg ... --tts ...`. Never pass `--id`: `send` resolves the
-pane's identity internally. Do not hide the lookup in a shell variable or
-combine lookup and send in one tool call. Never use cached identity details.
+`agent-comms send --id RETURNED_ID --msg ... --tts ...`. You may reuse these
+details for subsequent sends in this pane: no context lookup is required before
+every message. Never reuse details inherited from another pane or agent.
+`--id` asserts the identity you expect; it cannot select or change pane ownership.
+Do not hide the initial lookup in a shell variable or combine it with send.
 
 - Nonempty `prefix`: exact introduction, without trailing whitespace. Start BOTH
   `--msg` and `--tts` with it exactly once, unchanged.
@@ -36,10 +37,11 @@ combine lookup and send in one tool call. Never use cached identity details.
   is needed unless the resolved identity changes.
 - Put introductions before speech markup so they are spoken and displayed.
   The program never inserts or rewrites the prefix.
-- `send` verifies the pane identity and rechecks live context: missing, wrong,
-  stale, or duplicated introductions in either argument cause an error without
-  queueing. If focus changes between
-  lookup and send, call `context` again and revise once; never blindly retry old strings.
+- `send` verifies `--id` against the pane identity and rechecks live context.
+  An ID mismatch or missing, wrong, stale, or duplicated introduction causes an
+  error without queueing. On an identity/prefix mismatch, call `context` again
+  for an up-to-date ID, name, and prefix, then revise and retry once. Never
+  blindly retry old strings.
   If the query fails, do not send until context can be checked.
 
 ## Cadence and delivery

@@ -51,12 +51,14 @@ class GeometryTests(unittest.TestCase):
 
 
 class SpatialContextTests(unittest.TestCase):
-    def inspect(self, *, current=1, focused="other", attached=True, geometry=True):
-        own = pane("own", 40, 0)
+    def inspect(self, *, current=1, focused="other", attached=True, geometry=True,
+                other_state="idle", other_workspace=1):
+        own = pane("own", 40, 0, agent_state="working")
         if not geometry:
             own.pop("x")
         listing = {"current_workspace": current, "focused_window_id": focused,
-                   "windows": [own, pane("other", 0, 20), pane("third", 0, 0)]}
+                   "windows": [own, pane("other", 0, 20, agent_state=other_state, workspace=other_workspace),
+                               pane("third", 0, 0, agent_state="none")]}
         run = Mock(side_effect=[subprocess.CompletedProcess([], 0, json.dumps({"tui_attached": attached})),
                                 subprocess.CompletedProcess([], 0, json.dumps(listing))])
         return context.context("Alice", run=run, env={"TUIOS_ENV": "1", "TUIOS_SESSION": "work", "TUIOS_PANE_ID": "own"}, strict=True)
@@ -78,6 +80,33 @@ class SpatialContextTests(unittest.TestCase):
             self.assertTrue(source["introduce"])
             self.assertNotIn("position", source)
 
+    def test_sole_agent_needs_no_prefix_regardless_of_focus_visibility_or_geometry(self):
+        for options in ({}, {"current": 2}, {"attached": False}, {"geometry": False},
+                        {"focused": "missing"}):
+            with self.subTest(options=options):
+                source = self.inspect(other_state="none", **options)
+                self.assertFalse(source["introduce"])
+                self.assertNotIn("position", source)
+                self.assertNotIn("position_reference", source)
+                self.assertEqual(app.expected_prefix({"identities": {"a": {"name": "Alice"}}}, "a", source), "")
+
+    def test_agents_on_other_workspaces_do_not_require_a_prefix(self):
+        self.assertFalse(self.inspect(other_workspace=2)["introduce"])
+
+    def test_idle_working_and_unknown_peer_states_preserve_attribution(self):
+        for state in ("idle", "working", "waiting", "unknown", None, ""):
+            with self.subTest(state=state):
+                self.assertTrue(self.inspect(other_state=state)["introduce"])
+
+    def test_no_other_panes_and_missing_own_marker_still_counts_caller_as_agent(self):
+        listing = {"current_workspace": 2, "focused_window_id": "missing",
+                   "windows": [pane("own", 0, 0)]}
+        run = Mock(side_effect=[subprocess.CompletedProcess([], 0, json.dumps({"tui_attached": False})),
+                                subprocess.CompletedProcess([], 0, json.dumps(listing))])
+        source = context.context("Alice", run=run,
+                                 env={"TUIOS_ENV": "1", "TUIOS_SESSION": "work", "TUIOS_PANE_ID": "own"}, strict=True)
+        self.assertFalse(source["introduce"])
+
 
 class SpatialPrefixTests(Fixture):
     source = {"session_name": "work", "pane_id": "own", "workspace": 2, "introduce": True,
@@ -96,7 +125,20 @@ class SpatialPrefixTests(Fixture):
 
     def test_invalid_position_falls_back_without_injecting_text(self):
         self.assertEqual(app.expected_prefix(self.config(), "a", {**self.source, "position": "bad\ntext"}),
-                         "Alice here, of the work session.")
+                          "Alice here, of the work session.")
+
+    def test_lone_agent_context_and_send_use_the_same_empty_prefix(self):
+        source = SpatialContextTests().inspect(other_state="none")
+        with patch.object(app, "checked_context", return_value=source), \
+             patch.object(app, "pane_binding", return_value="a"), \
+             patch.object(app.Paths, "resolve", return_value=self.paths), \
+             patch.object(app, "send", new=AsyncMock()) as send:
+            identity = app.identify(self.paths, self.config())
+            self.assertEqual(identity, {"id": "a", "name": "Alice", "prefix": ""})
+            self.assertEqual(app.main(["send", "--id", "a", "--msg", "Ready."]), 0)
+            send.assert_awaited_once_with(self.paths, "a", "Ready.", None, source)
+        with self.assertRaisesRegex(app.CommsError, "Prefix mismatch"):
+            app.validate_message(self.config(), "a", "Alice here, to your top-right. Ready.", source=source)
 
     def test_duplicate_stale_and_markup_prefixed_introductions_are_rejected(self):
         expected = "Alice here, to your top-right."

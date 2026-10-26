@@ -16,7 +16,7 @@ explicit checked spatial prefixes returned by `context`, pane-stable identity ow
 and delivery VFX. Personalities and the separate `prefix` command have been removed.
 Those extensions supersede the original v1
 voice/history exclusions below. The current wire protocol is version 2.
-`context` now returns only the caller's name and exact introduction or empty
+`context` now returns the caller's ID, name, and exact introduction or empty
 prefix, resolving ownership from the tuios environment only (no harness/session
 identity-selection flags). Outside tuios, lookup fails clearly. Agents must insert
 it themselves in both display and TTS text. `send` rechecks context and rejects
@@ -44,9 +44,10 @@ automatic-introduction behavior.
 
 ### `agent-comms context`
 
-Resolve the caller pane's stable identity and return JSON with only `name`
-and `prefix`. Agents MUST call this in
-a separate tool call immediately before every send; never cache or inherit it.
+Resolve the caller pane's stable identity and return JSON with `id`, `name`,
+and `prefix`. Agents call this initially in a separate tool call, then reuse
+these details in the same pane until a send reports an identity/prefix mismatch.
+Never inherit identity details from another pane or conversation.
 
 Allocation uses the original Tetris-style bag internally, but repeated lookup
 does not draw a new identity. The following describes the internal allocator:
@@ -89,12 +90,14 @@ Run the single global listener and own the timed message queue.
 - The server lifecycle is independent of dock watchers. Closing a tuios client
   must not terminate the global listener merely because its watcher exits.
 
-### `agent-comms send --msg MESSAGE`
+### `agent-comms send --id ID --msg MESSAGE`
 
 Submit a text message using the caller pane's internally resolved identity.
 
-- Resolve the pane binding and validate the message. Unbound panes fail clearly;
-  agents cannot select an identity or pass `--id`.
+- Resolve the pane binding and validate the message. Unbound panes fail clearly.
+  Required `--id` asserts the expected identity, never selects it. A mismatch
+  rejects the message before networking and instructs the agent to run
+  `agent-comms context` for an up-to-date ID, name, and prefix.
 - Connect to the global listener using discovery and authentication below.
 - Return success only when the listener acknowledges queue acceptance. Success
   does not mean the message has already appeared on screen.

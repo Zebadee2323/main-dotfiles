@@ -18,10 +18,11 @@ class InstructionTests(Fixture):
                 instructions = json.loads(result.stdout)["instructions"]
                 self.assertIn("separate shell-tool call", instructions)
                 self.assertIn("Read the JSON tool result into your context BEFORE composing", instructions)
-                self.assertIn("combine lookup and send in one tool call", instructions)
+                self.assertIn("combine it with send", instructions)
                 self.assertIn("It already identifies you and your location", instructions)
-                self.assertIn("You MUST call the context command before EVERY message", instructions)
-                self.assertIn("Never cache", instructions)
+                self.assertIn("no context lookup is required before", instructions)
+                self.assertIn("--id RETURNED_ID", instructions)
+                self.assertIn("Never reuse details inherited from another pane or agent", instructions)
                 self.assertIn("\nagent-comms context\n", instructions)
                 self.assertNotIn("--harness", instructions)
                 self.assertNotIn("--session-id", instructions)
@@ -67,7 +68,7 @@ class CodexHookTests(Fixture):
         self.assertTrue(all(output == outputs[0] for output in outputs))
         self.assertEqual(outputs[0]["hookEventName"], "SessionStart")
         self.assertIn("agent-comms send", outputs[0]["additionalContext"])
-        self.assertIn("You MUST call the context command before EVERY message", outputs[0]["additionalContext"])
+        self.assertIn("--id RETURNED_ID", outputs[0]["additionalContext"])
         self.assertFalse(self.paths.state.exists(), "instruction hooks must not allocate identities")
 
     def test_bad_input_and_missing_launcher_are_advisory(self):

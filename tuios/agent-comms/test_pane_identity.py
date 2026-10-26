@@ -30,8 +30,9 @@ class PaneIdentityTests(Fixture):
             first = app.identify(self.paths, self.config)
             second = app.identify(self.paths, self.config)
             self.assertEqual(first, second)
-            self.assertEqual(set(first), {"name", "prefix"})
+            self.assertEqual(set(first), {"id", "name", "prefix"})
             bound = app.pane_binding(self.paths, self.config, allocate=False)
+            self.assertEqual(first["id"], bound)
             self.assertFalse((self.paths.state / "sessions").exists())
             before = (self.paths.state / "bag.json").read_text()
             with patch.dict(os.environ, {"TUIOS_SESSION": "renamed"}):
@@ -69,17 +70,42 @@ class PaneIdentityTests(Fixture):
             self.bind()
         self.assertEqual((self.paths.state / "bag.json").read_text(), before)
 
-    def test_send_resolves_pane_identity_internally_and_rejects_unresolved_panes(self):
+    def test_send_checks_expected_identity_and_rejects_unresolved_panes(self):
         with patch.dict(os.environ, self.pane_env), patch.object(tuios_context, "context", return_value=self.source), \
              patch.object(app, "Paths") as paths, patch.object(app, "send", new=AsyncMock()) as send, \
              patch("sys.stderr", new_callable=io.StringIO) as errors:
             paths.resolve.return_value = self.paths
-            self.assertEqual(app.main(["send", "--msg", "Ready."]), 1)
+            self.assertEqual(app.main(["send", "--id", "a", "--msg", "Ready."]), 1)
             self.assertIn("Run 'agent-comms context'", errors.getvalue())
             bound = self.bind()
             send.assert_not_called()
-            self.assertEqual(app.main(["send", "--msg", "Ready."]), 0)
+            self.assertEqual(app.main(["send", "--id", bound, "--msg", "Ready."]), 0)
             send.assert_awaited_once_with(self.paths, bound, "Ready.", None, self.source)
+
+    def test_cached_id_can_be_reused_but_stale_or_other_pane_id_is_rejected(self):
+        bound = self.bind()
+        other = self.bind("other")
+        with patch.dict(os.environ, self.pane_env), patch.object(tuios_context, "context", return_value=self.source), \
+             patch.object(app.Paths, "resolve", return_value=self.paths), \
+             patch.object(app, "send", new=AsyncMock()) as send, \
+             patch.object(app, "identify") as identify, patch("sys.stderr", new_callable=io.StringIO) as errors:
+            for _ in range(2):
+                self.assertEqual(app.main(["send", "--id", bound, "--msg", "Ready."]), 0)
+            self.assertEqual(send.await_count, 2)
+            identify.assert_not_called()
+            send.reset_mock()
+            for bad in (other, "stale-or-unknown"):
+                self.assertEqual(app.main(["send", "--id", bad, "--msg", "Ready."]), 1)
+            send.assert_not_called()
+            self.assertIn("Identity mismatch", errors.getvalue())
+            self.assertIn("Run 'agent-comms context'", errors.getvalue())
+            self.assertIn("up-to-date ID, name, and prefix", errors.getvalue())
+            self.assertIn("Message was not queued", errors.getvalue())
+
+    def test_send_requires_expected_id(self):
+        result = self.cli("send", "--msg", "Ready.")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--id", result.stderr)
 
     def test_context_failure_does_not_allocate(self):
         with patch.dict(os.environ, self.pane_env), \

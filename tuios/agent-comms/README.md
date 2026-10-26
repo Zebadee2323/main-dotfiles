@@ -16,10 +16,10 @@ chmod +x agent-comms
 In another tuios pane:
 
 ```sh
-# Inspect the JSON first, then use its exact name/prefix in a separate call.
+# Inspect the JSON first, then use its ID and exact name/prefix in a separate call.
 ./agent-comms context
 # Replace the prefix placeholders below (omit an empty prefix).
-./agent-comms send --msg "RETURNED_PREFIX Hello from the agent dock!" --tts "RETURNED_PREFIX Hello from the agent dock!"
+./agent-comms send --id RETURNED_ID --msg "RETURNED_PREFIX Hello from the agent dock!" --tts "RETURNED_PREFIX Hello from the agent dock!"
 ./agent-comms watch
 ./agent-comms history
 ```
@@ -43,20 +43,22 @@ $lookup = .\agent-comms.cmd context | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw "Could not resolve identity" }
 $prefix = $lookup.prefix
 $message = if ($prefix) { "$prefix Hello from Windows!" } else { "Hello from Windows!" }
-.\agent-comms.cmd send --msg $message --tts $message
+.\agent-comms.cmd send --id $lookup.id --msg $message --tts $message
 ```
 
 ## Commands
 
 | Command | Behavior |
 | --- | --- |
-| `context` | Resolve pane identity; print only `name` and `prefix` as JSON. Call before every send. |
+| `context` | Resolve pane identity; print `id`, `name`, and `prefix` as JSON. Reuse until a send reports a mismatch. |
 | `context --refill` | Replace remaining entries with a new shuffled bag; no draw/output. |
 | `voice-review` | Audition each non-approved voice, then save a yes/no approval in the config. |
 | `serve` | Own the singleton listener, timed FIFO queue, and terminal display. |
 | `serve --quiet` | Same listener without terminal display. |
-| `send --msg TEXT --tts SPEECH` | Resolve the pane's identity internally, save and queue display/speech text; acknowledge acceptance, not completion. |
-| `history` | Print the rolling history of at most 10 accepted messages, even offline. |
+| `send --id ID --msg TEXT --tts SPEECH` | Verify the expected ID against the pane binding, save and queue text; acknowledge acceptance, not completion. |
+| `history` | Show readable, wrapped history with timestamps and sender/session headings, even offline. Colors appear only in a terminal (respecting `NO_COLOR` / `--no-color`). |
+| `history --raw` | Print unstyled, one-line timestamp/name/message records. |
+| `history --json` | Print full machine-readable records, including speech text. Mutually exclusive with `--raw`. |
 | `history --limit 5 --id nova --json` | Filter/limit retained history and optionally include complete metadata and speech text. |
 | `history --session work` | Filter by the sender's tuios session name. |
 | `watch` | Show animated, timed caption chunks and optionally generate/play speech. |
@@ -66,7 +68,7 @@ $message = if ($prefix) { "$prefix Hello from Windows!" } else { "Hello from Win
 | `instructions --format text` | Render shared messaging instructions only; never allocate an identity. |
 
 `instructions --format text` prints just the instruction block. Both plugins use this
-helper to require a fresh, argument-free `context` call before **every** announcement. Instructions
+helper to require an initial, argument-free `context` call and checked `--id` on sends. Instructions
 contain no assigned name or ID; those come from the caller's tool environment.
 The old `id`, `prefix`, and session-allocation commands have been removed.
 
@@ -80,6 +82,10 @@ handles SIGTERM for clean shutdown where the OS delivers it.
 
 `context` checks the current tuios focus and pane geometry on every call:
 
+- Caller is the only agent pane in its workspace: no required prefix, even when
+  another terminal is focused, another workspace is current, or the session is
+  detached. Agents in other workspaces do not count. Idle agents still count;
+  unknown peer state conservatively preserves attribution.
 - Caller is focused: no required prefix.
 - Another pane is focused in the same workspace: `Alice here, to your top-right.`
   Directions are relative to the focused pane, including non-agent panes. Panes
@@ -101,8 +107,10 @@ to older listeners fail with a restart instruction. Watchers need no protocol
 change for spatial prefixes.
 
 Identity allocation inside tuios is pane-scoped, independent of the harness or
-conversation. `send` resolves the pane's persisted binding internally and rejects
-`--id`; the agent never sees or selects the internal ID. See ownership and cleanup below.
+conversation. `send` resolves the pane's persisted binding internally and requires
+`--id` to match it. This is an assertion, not an identity selector. A mismatch
+rejects the send and directs the agent to refresh its ID, name, and prefix through
+`context`. See ownership and cleanup below.
 
 ## Configuration and locations
 
@@ -291,12 +299,20 @@ audio tags. Keep `--msg` plain, readable, and equivalent in meaning:
 ```sh
 agent-comms context
 # Inspect the returned JSON. Use its exact prefix in the next tool call:
-agent-comms send --msg "RETURNED_PREFIX Build finished. Tests passed." \
+agent-comms send --id RETURNED_ID --msg "RETURNED_PREFIX Build finished. Tests passed." \
   --tts "RETURNED_PREFIX Build finished. <break time=\"0.3s\" /> Tests passed."
 ```
 
 The API returns 24 kHz mono PCM; the watcher wraps it in a temporary private WAV,
 measures its exact sample duration, and deletes it after playback/cancellation.
+Audio lives under the OS temporary directory (`tempfile.gettempdir()`), in
+`agent-comms-<user-hash>/audio/speech-<random>/`, not persistent application state.
+Each workspace holds an OS-backed lock through synthesis, filtering, and playback,
+including a late synthesis result after cancellation. On the next speech preparation,
+workspaces older than 24 hours are removed only if their lock is no longer held.
+This recovers orphans after crashes/hard kills without deleting another active
+watcher's audio. Cleanup is opportunistic, not a background retention guarantee.
+Existing WAVs in the old state `audio/` directory are not migrated or removed.
 Playback uses `afplay` on macOS, `ffplay` or `aplay` on Linux, or standard-library
 `winsound` on Windows. No Python audio dependencies are needed. Speech settings
 accept a model name and speed 0.7–1.2. The request timeout is 25 seconds and audio
@@ -331,21 +347,22 @@ The flash occurs once per new message ID, not on every caption/state update.
 `--no-flash`, `--no-color`, or `NO_COLOR` disables the visual flash. Idle watchers
 do not tick/redraw; only active messages animate caption/attention frames.
 
-## Mandatory lookup before sending
+## Checked identity on sends
 
-Agents must call `agent-comms context` in a **separate tool call before every send**,
+Agents must initially call `agent-comms context` in a **separate tool call**,
 read the JSON result, then compose both arguments using its returned name and
-exact prefix. Never cache the result across announcements, inherit an ID from
-another conversation, or combine the lookup and send in a shell variable/one
-tool call. Never pass `--harness`, `--session-id`, or an identity to `context`: those
+exact prefix and send with `--id RETURNED_ID`. Reuse these details for later sends
+in the same pane, refreshing on an identity/prefix mismatch. Never inherit an ID
+from another pane or conversation or hide the initial lookup in a shell variable.
+Never pass `--harness`, `--session-id`, or an identity to `context`: those
 flags are rejected. Ownership is derived only from the caller's pane environment.
 Outside tuios, lookup fails clearly rather than accepting an agent-selected owner.
 
 ```json
-{"name":"Veda","prefix":"Veda here, to your top-right."}
+{"id":"ag_example","name":"Veda","prefix":"Veda here, to your top-right."}
 ```
 
-Output contains exactly those two fields; `prefix: ""` means no fixed
+Output contains exactly those three fields; `prefix: ""` means no fixed
 introduction is required. Context stays internal. Lookup uses read-only
 `tuios session-info` and `tuios list-windows`, with two-second timeouts.
 Incomplete environment, an unknown pane, or failed/forbidden context queries
@@ -356,7 +373,7 @@ of both `--msg` and `--tts`, before markup. Do not add a second introduction.
 With an empty prefix, introduce yourself using the returned name on your first
 message (or when identity changes); otherwise go straight to the update.
 
-`send` reads the pane identity internally and rechecks spatial context before networking. Missing,
+`send` checks the required `--id` against the pane identity and rechecks spatial context before networking. Missing,
 stale, wrong, or duplicated introductions are rejected without queueing, history,
 or speech. On mismatch, call `context` again and recompose once. Never silently retry.
 The listener checks the submitted snapshot too; this is a workflow check, not

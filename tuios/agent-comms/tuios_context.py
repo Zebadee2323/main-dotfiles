@@ -79,14 +79,19 @@ def context(name, run=subprocess.run, env=None, strict=False):
         focused_pane = next((window for window in windows
                              if window.get("window_id") == listing.get("focused_window_id")), None)
         focused = focused_pane is not None and focused_pane.get("window_id") == pane
+        # The caller is an agent even if its state marker has not caught up.
+        # Only positively identified non-agent peers can establish that it is
+        # alone; missing/unknown state must not suppress attribution by mistake.
+        sole_agent = all(window.get("agent_state") == "none" for window in windows
+                         if window.get("workspace") == workspace and window.get("window_id") != pane)
         session_name = info.get("session_name") or session
         source = {"session_name": session_name, "pane_id": pane, "workspace": workspace,
-                  "introduce": not visible or not focused}
-        if visible and not focused and focused_pane is not None and focused_pane.get("workspace") == workspace:
+                  "introduce": not sole_agent and (not visible or not focused)}
+        if source["introduce"] and visible and not focused and focused_pane is not None and focused_pane.get("workspace") == workspace:
             position = relative_position(own, focused_pane)
             if position:
                 source.update(position=position, position_reference="focused-pane")
-        elif not visible and info["tui_attached"]:
+        elif source["introduce"] and not visible and info["tui_attached"]:
             position = workspace_position(own, windows)
             if position:
                 source.update(position=position, position_reference="workspace")
