@@ -30,8 +30,8 @@ helpers.eq(working_directory(), root .. "/tests", "the tool should read director
 vim.cmd("tcd " .. vim.fn.fnameescape(root .. "/lua"))
 helpers.eq(working_directory(), root .. "/lua", "the tool should respect tab-local directories")
 
-vim.cmd("lcd " .. vim.fn.fnameescape(root .. "/plugin"))
-helpers.eq(working_directory(), root .. "/plugin", "the tool should respect window-local directories")
+vim.cmd("lcd " .. vim.fn.fnameescape(root .. "/after"))
+helpers.eq(working_directory(), root .. "/after", "the tool should respect window-local directories")
 
 vim.cmd("cd " .. vim.fn.fnameescape(root))
 helpers.eq(working_directory(), root, "the tool should follow a return to the global directory")

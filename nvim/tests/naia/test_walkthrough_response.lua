@@ -26,6 +26,14 @@ local json = assert(response.parse('{"steps":[{"path":"json.lua","line":4}]}', n
 assert(json[1].path == 'json.lua' and json[1].line == 4)
 assert(response.json('# ai-walkthrough\n{"version":3,"steps":[]}').version == 3)
 assert(response.json('not json') == nil)
+local normalized = assert(response.normalize({ items = { {
+  filePath = 'example.lua', startLine = 4.9, endLine = 2.5, stepId = 7, parentId = 3,
+  text = '```yaml\n<commentary>\nExplanation , with punctuation .\n</commentary>',
+  highlights = { { path = 'example.lua', line_start = 2, line_end = 3 } },
+} } }, function(path) return path == 'example.lua' and '/source/example.lua' or nil end))[1]
+assert(normalized.id == 7 and normalized.parent_id == 3 and normalized.line_start == 2 and normalized.line_end == 4)
+assert(normalized.description == 'Explanation, with punctuation.' and normalized.highlights[1].line_start == 2)
+assert(response.normalize({ { path = 'missing', line = 1, description = 'Absent' } }, function() end) == nil)
 local missing, err = response.parse('Not a tour', normalize)
 assert(not missing and err:find('tree-sitter is unavailable', 1, true))
 

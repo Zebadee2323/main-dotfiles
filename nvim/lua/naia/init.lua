@@ -85,7 +85,6 @@ end
 function M.status()
   return {
     bridge = backend.status(),
-    child = backend.status(), -- Deprecated read-only alias; Naia owns no child.
     enabled = state.enabled,
     tool_count = vim.tbl_count(state.tools),
     config = config.get(),
@@ -103,14 +102,6 @@ end
 
 function M.server_url()
   return backend.status().endpoint
-end
-
-function M.relay_host()
-  return backend.status().host
-end
-
-function M.relay_port()
-  return backend.status().port
 end
 
 function M.wrapper_path()

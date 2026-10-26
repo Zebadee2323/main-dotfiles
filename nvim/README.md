@@ -36,9 +36,18 @@ There is no runtime dependency on `~/Development/nvim-naia`.
 - `naia/commands.lua`: explicit, idempotent setup for `:Naia*` commands.
 - `naia/tools.lua`: voice notifications and permission-gated Ex commands.
 - `naia/ui/`: companion, cards, approval policy, actions, styling and MCP tools.
-- `naia/walkthrough/`: playback, tool/edit interface, portable files, layout and
-  confirmation prompts. Legacy chat/YAML response parsing is isolated in
-  `response.lua`. `require('naia.walkthrough').setup()` is unchanged.
+- `naia/walkthrough/init.lua`: lazy public facade; requiring it installs nothing.
+  `setup()` initializes one controller and is safe to repeat during an active tour;
+  `stop()` dismisses confirmation, releases the tour UI and restores borrowed state.
+- `naia/walkthrough/runtime.lua`: playback transitions, voice events, timers and
+  integration wiring, with module-local state rather than a setup-sized closure.
+- Walkthrough presentation is in `view.lua` (source windows, highlights and
+  narration) and `browser.lua` (step browser). `commands.lua` wires user actions,
+  `chat.lua` owns optional CodeCompanion instructions/folds, `tree.lua` owns tree
+  queries, and `paths.lua` resolves live source locations.
+- `naia/walkthrough/response.lua` decodes/normalizes legacy chat/YAML responses;
+  `file.lua` retains strict portable-file validation. MCP editing/registration
+  remains in `tools.lua`, placement in `layout.lua`, confirmation in `prompt.lua`.
 - `bin/sidekick-naia-cli` and its instruction files: launch-scoped harness setup.
 - `opencode/naia/`: the Sidekick-only OpenCode instruction plugin.
 
@@ -46,7 +55,17 @@ Voice playback remains in `features/voice/`; the shared MCP safety guard stays
 independent in `features/mcp_tools_runtime.lua`. UI commands and cleanup hooks
 are registered when the UI module is first required. Tools register once during
 setup, not again on a scheduled retry. Existing MCP names, walkthrough revision
-guards, approval policy and public `require('naia')` API are preserved.
+guards, approval policy and normal provider operations are preserved. The unused
+`relay_host()`, `relay_port()` and `status().child` compatibility aliases have been
+removed: use `server_url()` and `status().bridge`. Naia owns no relay or child.
+The legacy walkthrough stop/foldtext globals are gone; stop through
+`require('naia.walkthrough').stop()` and resolve chat folds through `chat.foldtext()`.
+The separate voice runtime's existing integration API remains unchanged.
+
+Lifecycle regressions cover repeated setup without interrupting active tours,
+confirmation cleanup, restored user mappings, stale scheduled callbacks, browser
+navigation/deletion, CodeCompanion folds, and path lookup outside Git. Timers are
+invalidated on stop and cleaned up on editor shutdown.
 
 Run `make check` from this directory for configuration specs plus the imported
 provider, launcher, instruction-plugin and walkthrough regressions. Imported tests

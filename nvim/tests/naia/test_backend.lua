@@ -28,6 +28,8 @@ assert(not pcall(mcp.list_tools().choice.execute, function() end, { mode = "inva
 assert(not naia.connection_info(), "An absent bridge must not be started implicitly")
 running, port, token = true, 43210, "existing-upstream-token"
 assert(naia.is_ready() and naia.status().bridge.owned == false)
+assert(naia.status().child == nil and naia.relay_host == nil and naia.relay_port == nil,
+  "The first-party provider must not advertise a child process or relay")
 local info = assert(naia.connection_info())
 assert(info.url == "http://127.0.0.1:43210/" and info.token == token)
 assert(info.connection_file == nil and not vim.inspect(naia.status()):find(token, 1, true))
