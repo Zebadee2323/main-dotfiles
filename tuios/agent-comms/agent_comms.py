@@ -962,13 +962,15 @@ class Server:
                         await asyncio.gather(stopped, return_exceptions=True)
             finally:
                 listener.close()
-                await listener.wait_closed()
                 if processor:
                     processor.cancel()
                     await asyncio.gather(processor, return_exceptions=True)
                 for task in list(self.tasks):
                     task.cancel()
                 await asyncio.gather(*list(self.tasks), return_exceptions=True)
+                # wait_closed() also waits for connected clients. Cancel their
+                # handlers first so persistent watchers cannot block shutdown.
+                await listener.wait_closed()
                 # Still holding the singleton lock: no replacement can publish yet.
                 with suppress(FileNotFoundError):
                     discovery.unlink()

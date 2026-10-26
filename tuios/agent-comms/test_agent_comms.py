@@ -232,6 +232,20 @@ class ServerTests(Fixture):
             self.assertEqual(server.wait(timeout=5), 0)
             self.assertFalse((self.paths.runtime / "server.json").exists())
 
+    @unittest.skipIf(os.name == "nt", "Requires POSIX termination signals")
+    def test_shutdown_disconnects_watchers_and_releases_singleton(self):
+        server, _ = self.start_server()
+        watchers = [self.subscribe(), self.subscribe()]
+        server.terminate()
+        self.assertEqual(server.wait(timeout=5), 0)
+        for stream in watchers:
+            self.assertEqual(stream.readline(), b"")
+        self.assertFalse((self.paths.runtime / "server.json").exists())
+        # A clean shutdown must also release the lock for the next listener.
+        replacement, _ = self.start_server()
+        replacement.terminate()
+        self.assertEqual(replacement.wait(timeout=5), 0)
+
     def test_fifo_multiple_watchers_and_initial_snapshot(self):
         self.start_server()
         first, second = self.subscribe(), self.subscribe()
