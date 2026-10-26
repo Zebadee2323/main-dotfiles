@@ -158,11 +158,15 @@ local function build_ai_message(opts)
   return body, body
 end
 
-local function send_raw_message_to_sidekick(msg)
+local function send_raw_ai_message(msg)
   local trimmed = vim.trim(msg or "")
   if trimmed == "" then
     vim.notify("AIMessage requires a message", vim.log.levels.ERROR)
     return false
+  end
+
+  if require("config.ai_tuios").send(msg) then
+    return true
   end
 
   pcall(require("sidekick.cli").send, {
@@ -174,10 +178,10 @@ local function send_raw_message_to_sidekick(msg)
 end
 
 vim.api.nvim_create_user_command("AIMessage", function(opts)
-  send_raw_message_to_sidekick(opts.args or "")
+  send_raw_ai_message(opts.args or "")
 end, {
   nargs = "+",
-  desc = "Send a raw message to Sidekick",
+  desc = "Send raw text to a tuios workspace agent, or submit to Sidekick",
 })
 
 -- Send metadata: file + line or line range (line info after a space)
@@ -186,16 +190,18 @@ vim.api.nvim_create_user_command("AISend", function(opts)
     separator = ":",
   }))
 
-  require("sidekick.cli").send({
-    msg = msg,
-    submit = false,
-  })
+  if not require("config.ai_tuios").send(msg) then
+    require("sidekick.cli").send({
+      msg = msg,
+      submit = false,
+    })
+  end
 
   maybe_restore_visual(opts)
 end, {
   nargs = "*",
   range = true,
-  desc = "Insert file line or file start-end into the Sidekick prompt",
+  desc = "Send file/line context to a tuios workspace agent, or insert into Sidekick",
 })
 
 vim.api.nvim_create_user_command("AICommit", function()
