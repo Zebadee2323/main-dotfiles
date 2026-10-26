@@ -80,8 +80,8 @@ class PrivateServerIntegrationTests(unittest.TestCase):
                 self.assertTrue(actual, "expected a request to the local fake model")
                 system = "\n".join(str(message.get("content", "")) for request in actual
                                    for message in request.get("messages", []) if message["role"] in ("system", "developer"))
-                self.assertEqual("Always close every turn" in system, use_naia, system[:500])
-                self.assertEqual("nvim_inform_user" in system, use_naia)
+                self.assertEqual("# Showing things in Neovim" in system, use_naia, system[:500])
+                self.assertNotIn("nvim_inform_user", system)
 
 
 if __name__ == "__main__":

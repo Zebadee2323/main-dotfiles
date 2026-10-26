@@ -202,6 +202,40 @@ def draw_id(paths: Paths, config: dict, refill: bool = False) -> str | None:
         return identity
 
 
+def session_identity(paths: Paths, config: dict, harness: str, session_id: str) -> dict:
+    """Coordinate both adapters through durable, per-session allocation locks."""
+    if harness not in ("opencode", "codex") or not session_id or len(session_id) > 512:
+        raise CommsError("A valid harness and nonempty session ID (at most 512 characters) are required.")
+    key = hashlib.sha256(json.dumps([harness, session_id]).encode()).hexdigest()
+    directory = private_dir(paths.state / "sessions")
+    record = directory / f"{key}.json"
+    with FileLock(directory / f"{key}.lock"):
+        try:
+            saved = json.loads(record.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            saved = None
+        except (ValueError, UnicodeError):
+            raise CommsError(f"Corrupt session assignment: {record}. Repair or remove it explicitly.") from None
+        if saved is not None and (
+            not isinstance(saved, dict) or saved.get("harness") != harness
+            or saved.get("session_id") != session_id or not isinstance(saved.get("id"), str)
+        ):
+            raise CommsError(f"Invalid session assignment: {record}.")
+        if saved is None or saved["id"] not in config["identities"]:
+            saved = {"harness": harness, "session_id": session_id, "id": draw_id(paths, config)}
+            atomic_json(record, saved)
+    metadata = config["identities"][saved["id"]]
+    template = Path(__file__).with_name("communication-instructions.md").read_text(encoding="utf-8")
+    # Single-pass replacement: metadata cannot introduce more template variables.
+    values = {
+        "identity_name": clean_text(metadata["name"]),
+        "identity_id": saved["id"],
+        "personality": json.dumps(clean_text(metadata.get("personality", "")), ensure_ascii=False),
+    }
+    instructions = re.sub(r"\{(identity_name|identity_id|personality)\}", lambda m: values[m[1]], template)
+    return {**metadata, **saved, "instructions": instructions}
+
+
 def validate_message(config: dict, identity, message) -> dict:
     if not isinstance(identity, str) or identity not in config["identities"]:
         raise CommsError("Unknown identity; use an ID from the identity configuration.")
@@ -538,7 +572,11 @@ def parser():
     watcher = subs.add_parser("watch", help="Stream current messages as tuios push lines")
     watcher.add_argument("--no-color", action="store_true")
     watcher.add_argument("--width", type=int, default=96, help="Maximum display cells (default: 96)")
-    for sub in (identity, serve_parser, send_parser, watcher):
+    session = subs.add_parser("session", help="Resolve a stable session identity and communication instructions")
+    session.add_argument("--harness", required=True, choices=("opencode", "codex"))
+    session.add_argument("--session-id", required=True)
+    session.add_argument("--format", choices=("json", "text"), default="json")
+    for sub in (identity, serve_parser, send_parser, watcher, session):
         common(sub, defaults=False)
     return result
 
@@ -582,6 +620,9 @@ def main(argv=None):
                 asyncio.run(send(paths, args.id, args.msg))
             elif args.command == "serve":
                 asyncio.run(Server(paths, config, quiet=args.quiet).run())
+            elif args.command == "session":
+                assignment = session_identity(paths, config, args.harness, args.session_id)
+                print(assignment["instructions"] if args.format == "text" else json.dumps(assignment, ensure_ascii=True))
         return 0
     except BrokenPipeError:
         # A dock client may close its pipe while the watcher is printing.

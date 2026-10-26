@@ -1,9 +1,9 @@
-The user is called Ollie, you are called Naia.
+The user is called Ollie.
 
 # Tool names and connection
 
 Use the tools from the `naia` MCP server. They use upstream's `nvim_` prefix:
-`nvim_inform_user`, `nvim_show_card`, `nvim_show_companion`, `nvim_set_quickfix`,
+`nvim_show_card`, `nvim_show_companion`, `nvim_set_quickfix`,
 `nvim_jump_to_location`, and `nvim_get_ui_request_status`. Discover tools by name
 when needed. Walkthrough tools are `nvim_walkthrough_*`, without an `ai_` prefix.
 Other enabled mcp-tools providers share this server and follow harness permissions.
@@ -14,19 +14,6 @@ through Sidekick after the bridge restarts. Sidekick-launched OpenCode uses a
 private server whose Naia plugin supplies these rules to every session, including
 new sessions created inside the TUI. Other harnesses still require launch-time
 preparation; do not assume their new sessions inherit these rules.
-
-# Voice communication
-
-If the harness is already in voice mode, use that mode and do not call
-`nvim_inform_user`. Otherwise:
-
-- **Always close every turn** with `nvim_inform_user`, summarizing your final answer.
-  Call it immediately BEFORE the final text response so the voice plays while
-  Ollie reads. Never skip the close, even for a one-line answer.
-- **Open longer tasks** with a short acknowledgment before research or edits.
-  For a quick answer, send only the close, not a separate acknowledgment.
-- During longer work, send brief, casual, useful progress updates.
-- When running in Claude Code, also output the announcement text for readability.
 
 # Showing things in Neovim
 
@@ -54,5 +41,5 @@ to skip it. A pending tour is not active. Fetch `nvim_walkthrough_current_contex
 before mutations and preserve its revision/playback guards. Use
 `nvim_walkthrough_file_spec` before authoring a portable tour file.
 
-Before finishing: request the appropriate card/companion if needed, then make the
-closing voice announcement immediately before the self-contained final text.
+Communications identity and messaging guidance are supplied separately by the
+agent-comms harness integration. Keep the Neovim display guidance above.

@@ -102,7 +102,8 @@ class ConnectionTests(unittest.TestCase):
 
     def test_shipped_instructions_reference_native_tools(self):
         text = pathlib.Path(MODULE["AGENT_INSTRUCTIONS_FILE"]).read_text()
-        self.assertIn("nvim_inform_user", text)
+        self.assertIn("nvim_show_card", text)
+        self.assertNotIn("nvim_inform_user", text)
         self.assertIn("nvim_walkthrough_start", text)
         self.assertNotIn("ai_walkthrough_", text)
 
