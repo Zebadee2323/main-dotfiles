@@ -1,0 +1,36 @@
+{
+  "id": "ashen",
+  "display_name": "Ashen",
+  "dark": true,
+  "fg": "#b4b4b4",
+  "bg": "#121212",
+  "selection_bg": "#323232",
+  "cursor": "#ff7d17",
+  "black": "#121212",
+  "red": "#B14242",
+  "green": "#D87C4A",
+  "yellow": "#E49A44",
+  "blue": "#4A8B8B",
+  "purple": "#a7a7a7",
+  "cyan": "#b4b4b4",
+  "white": "#d5d5d5",
+  "bright_black": "#949494",
+  "bright_red": "#B14242",
+  "bright_green": "#D87C4A",
+  "bright_yellow": "#E49A44",
+  "bright_blue": "#4A8B8B",
+  "bright_purple": "#a7a7a7",
+  "bright_cyan": "#b4b4b4",
+  "bright_white": "#d5d5d5",
+  "chrome": {
+    "accent": "#D87C4A",
+    "accent_bright": "#E49A44",
+    "success": "#629C7D",
+    "warning": "#E5A72A",
+    "error": "#C53030",
+    "info": "#4A8B8B",
+    "border": {
+      "unfocused": "#535353"
+    }
+  }
+}
