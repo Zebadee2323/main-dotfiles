@@ -96,6 +96,20 @@ sys.exit(app.main(sys.argv[2:]))
 
 
 class ContextClientTests(Fixture):
+    def test_context_uses_client_prefix_policy_with_stale_listener(self):
+        import asyncio
+        env = {'TUIOS_ENV': '1', 'TUIOS_PANE_ID': 'caller', 'TUIOS_SESSION': 'work'}
+        source = {'session_name': 'work', 'workspace': 1, 'introduce': True,
+                  'position': 'bottom-right', 'position_reference': 'workspace'}
+        identity = {'id': 'a', 'name': 'Alice', 'prefix': 'Alice here, of the work session.'}
+        with patch.dict(os.environ, env), patch.object(app, 'checked_context', return_value=source), \
+             patch.object(app, 'endpoint', return_value={'pane_identity': True}), \
+             patch.object(app, 'rpc', new_callable=AsyncMock, return_value={'identity': identity}):
+            result = asyncio.run(app.listener_context(self.paths))
+        self.assertEqual(result, {**identity, 'prefix':
+                         'Alice here, in the work session, workspace 1, in the bottom-right.'})
+        app.validate_message(app.load_config(self.paths.config), 'a', result['prefix'] + ' Ready.', source=source)
+
     def test_launchd_path_discovers_homebrew_tuios_before_running_queries(self):
         import shutil
         minimal = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'TUIOS_ENV': '1',

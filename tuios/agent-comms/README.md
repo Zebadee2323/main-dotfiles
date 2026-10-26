@@ -96,16 +96,19 @@ handles SIGTERM for clean shutdown where the OS delivers it.
   Directions are relative to the focused pane, including non-agent panes. Panes
   with overlapping vertical/horizontal spans share that row/column; overlapping
   floating panes use their centers.
-- Another workspace is current: `Alice here, in the top-left of workspace 2,
-  in the work session.` Single-axis positions use `at the bottom`, `at the top`,
+- Another workspace is current, or the session is detached: `Alice here, in the work session,
+  workspace 2, in the top-left.` Named workspaces use `the main workspace` instead
+  of `workspace 2`. Single-axis positions use `at the bottom`, `at the top`,
   `on the left`, or `on the right`; a central pane uses `in the center`.
   Positions use the pane center within thirds of its workspace's pane bounds,
   excluding minimized, unplaced, and scratch panes.
-- Detached session or unavailable geometry: fall back to the session-only
+- Unavailable geometry: fall back to the session-only
   introduction rather than guessing. Outside tuios, identity lookup fails.
 
 Copy the exact prefix once at the start of both `--msg` and `--tts`. `send`
-rechecks focus and geometry, rejecting stale or duplicated introductions before
+uses the same client-side prefix policy as `context`; the listener handles
+identity allocation, so an older running listener cannot return a stale prefix.
+`send` rechecks focus and geometry, rejecting stale or duplicated introductions before
 queueing. Run `context` again if the layout changes. Restart an existing listener
 after upgrading: discovery advertises `spatial_prefix: true`, and spatial sends
 to older listeners fail with a restart instruction. Watchers need no protocol

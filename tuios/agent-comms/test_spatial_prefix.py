@@ -52,14 +52,15 @@ class GeometryTests(unittest.TestCase):
 
 class SpatialContextTests(unittest.TestCase):
     def inspect(self, *, current=1, focused="other", attached=True, geometry=True,
-                other_state="idle", other_workspace=1):
+                other_state="idle", other_workspace=1, workspace_names=None):
         own = pane("own", 40, 0, agent_state="working")
         if not geometry:
             own.pop("x")
         listing = {"current_workspace": current, "focused_window_id": focused,
                    "windows": [own, pane("other", 0, 20, agent_state=other_state, workspace=other_workspace),
                                pane("third", 0, 0, agent_state="none")]}
-        run = Mock(side_effect=[subprocess.CompletedProcess([], 0, json.dumps({"tui_attached": attached})),
+        run = Mock(side_effect=[subprocess.CompletedProcess([], 0, json.dumps({"tui_attached": attached,
+                                                                            "workspace_names": workspace_names})),
                                 subprocess.CompletedProcess([], 0, json.dumps(listing))])
         return context.context("Alice", run=run, env={"TUIOS_ENV": "1", "TUIOS_SESSION": "work", "TUIOS_PANE_ID": "own"}, strict=True)
 
@@ -68,14 +69,30 @@ class SpatialContextTests(unittest.TestCase):
         self.assertEqual(source["position"], "top-right")
         self.assertEqual(source["position_reference"], "focused-pane")
 
+    def test_workspace_name_comes_from_sender_workspace(self):
+        source = self.inspect(current=2, workspace_names={"1": "main", "2": "other"})
+        self.assertEqual(source["workspace_name"], "main")
+        for names in (None, [], {"2": "other"}, {"1": " "}, {"1": 5}):
+            with self.subTest(names=names):
+                self.assertNotIn("workspace_name", self.inspect(workspace_names=names))
+
     def test_different_workspace_uses_absolute_position(self):
         source = self.inspect(current=2)
         self.assertEqual(source["position"], "top-right")
         self.assertEqual(source["position_reference"], "workspace")
 
+    def test_detached_session_uses_absolute_position_and_full_prefix(self):
+        for current in (1, 2):
+            with self.subTest(current=current):
+                source = self.inspect(current=current, attached=False)
+                self.assertEqual(source["position"], "top-right")
+                self.assertEqual(source["position_reference"], "workspace")
+                self.assertEqual(app.expected_prefix({"identities": {"a": {"name": "Alice"}}}, "a", source),
+                                 "Alice here, in the work session, workspace 1, in the top-right.")
+
     def test_focused_has_no_introduction_and_unavailable_geometry_falls_back(self):
         self.assertFalse(self.inspect(focused="own")["introduce"])
-        for options in ({"attached": False}, {"geometry": False}, {"focused": "missing"}):
+        for options in ({"attached": False, "geometry": False}, {"geometry": False}, {"focused": "missing"}):
             source = self.inspect(**options)
             self.assertTrue(source["introduce"])
             self.assertNotIn("position", source)
@@ -121,7 +138,17 @@ class SpatialPrefixTests(Fixture):
                                  ("right", "on the right"), ("center", "in the center")):
             source = {**self.source, "position": position, "position_reference": "workspace"}
             self.assertEqual(app.expected_prefix(self.config(), "a", source),
-                             f"Alice here, {phrase} of workspace 2, in the work session.")
+                             f"Alice here, in the work session, workspace 2, {phrase}.")
+
+    def test_named_workspace_and_duplicate_introduction(self):
+        source = {**self.source, "position_reference": "workspace", "workspace_name": "main"}
+        prefix = "Alice here, in the work session, the main workspace, in the top-right."
+        self.assertEqual(app.expected_prefix(self.config(), "a", source), prefix)
+        app.validate_message(self.config(), "a", prefix + " Ready.", source=source)
+        for expected in (prefix, ""):
+            with self.assertRaises(app.CommsError):
+                app.check_prefix("a", expected, (expected + " " if expected else "") + prefix + " Ready.",
+                                 prefix + " Ready.")
 
     def test_invalid_position_falls_back_without_injecting_text(self):
         self.assertEqual(app.expected_prefix(self.config(), "a", {**self.source, "position": "bad\ntext"}),

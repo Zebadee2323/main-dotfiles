@@ -103,13 +103,20 @@ def context(name, run=subprocess.run, env=None, strict=False):
         session_name = info.get("session_name") or session
         source = {"session_name": session_name, "pane_id": pane, "workspace": workspace,
                    "introduce": not sole_agent and (not visible or not focused)}
+        workspace_names = info.get("workspace_names")
+        if isinstance(workspace_names, dict):
+            workspace_name = workspace_names.get(str(workspace))
+            if isinstance(workspace_name, str) and workspace_name.strip():
+                source["workspace_name"] = workspace_name
         if isinstance(own.get("display_name"), str):
             source["pane_title"] = own["display_name"]
         if source["introduce"] and visible and not focused and focused_pane is not None and focused_pane.get("workspace") == workspace:
             position = relative_position(own, focused_pane)
             if position:
                 source.update(position=position, position_reference="focused-pane")
-        elif source["introduce"] and not visible and info["tui_attached"]:
+        elif source["introduce"] and not visible:
+            # Detached sessions retain their layout. Describe that workspace,
+            # never a direction relative to a pane the user cannot see.
             position = workspace_position(own, windows)
             if position:
                 source.update(position=position, position_reference="workspace")

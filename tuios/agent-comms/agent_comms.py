@@ -494,12 +494,17 @@ async def listener_context(paths):
     env = {k: os.environ[k] for k in PANE_ENV_KEYS if k in os.environ}
     request_pane_env(env)  # Fail locally when the caller has no pane; never guess.
     try:
-        checked_context()  # Respect local context-query denials before contacting the listener.
+        source = checked_context()  # Respect local context-query denials before contacting the listener.
     except CommsError as exc:
         raise CommsError(f"Client pane check failed: {exc}") from None
     if endpoint(paths).get("pane_identity") is not True:
         raise CommsError("Listener predates sandbox-compatible identity lookup; restart 'agent-comms serve'.")
-    return (await rpc(paths, "context", pane_env=env))["identity"]
+    identity = (await rpc(paths, "context", pane_env=env))["identity"]
+    # The listener owns persistent identity allocation, but may still have an
+    # older prefix implementation loaded after an update. Use the same local
+    # context and policy as send validation, not the listener's cached code.
+    prefix = expected_prefix(load_config(paths.config), identity["id"], source)
+    return {**identity, "prefix": prefix}
 
 
 def expected_prefix(config, identity, source):
@@ -516,8 +521,10 @@ def expected_prefix(config, identity, source):
                     return f"{name} here, to your {position}."
                 if source.get("position_reference") == "workspace" and type(source.get("workspace")) is int:
                     preposition = "at" if position in ("top", "bottom") else "on" if position in ("left", "right") else "in"
-                    return (f"{name} here, {preposition} the {position} of workspace {source['workspace']}, "
-                            f"in the {session} session.")
+                    workspace_name = source.get("workspace_name")
+                    workspace_name = clean_text(workspace_name)[:128] if isinstance(workspace_name, str) else ""
+                    workspace = f"the {workspace_name} workspace" if workspace_name else f"workspace {source['workspace']}"
+                    return f"{name} here, in the {session} session, {workspace}, {preposition} the {position}."
             return f"{name} here, of the {session} session."
     return ""
 
@@ -533,7 +540,8 @@ def check_prefix(identity, prefix, message, tts):
     direction = r"(?:top-left|top-right|bottom-left|bottom-right|top|bottom|left|right|center)"
     introduction = re.compile(
         rf"^[^\n]{{1,128}} here, (?:of the [^\n]{{1,128}} session\.|to your {direction}\."
-        rf"|(?:in|at|on) the {direction} of workspace \d+, in the [^\n]{{1,128}} session\.)")
+        rf"|(?:in|at|on) the {direction} of workspace \d+, in the [^\n]{{1,128}} session\."
+        rf"|in the [^\n]{{1,128}} session, (?:workspace \d+|the [^\n]{{1,128}} workspace), (?:in|at|on) the {direction}\.)")
 
     def after_markup(text):
         return re.sub(r"^(?:(?:<[^>\n]+>|\[[^\]\n]+\])\s*)+", "", text)
