@@ -12,10 +12,13 @@ specification captures the agreed design before implementation.
 Later extensions are implemented and documented in README.md: durable `history`,
 separate `send --tts` speech text, watcher-side ElevenLabs speech using the
 Naia-default `eleven_turbo_v2_5`, synchronized caption chunks and attention flashes,
-explicit checked tuios session prefixes (`prefix --id ID`), and personalities restricted to agent-comms
-messages (never standard responses). Those extensions supersede the original v1
+explicit checked spatial prefixes returned by `context`, pane-stable identity ownership,
+and delivery VFX. Personalities and the separate `prefix` command have been removed.
+Those extensions supersede the original v1
 voice/history exclusions below. The current wire protocol is version 2.
-Prefix lookup returns an exact introduction or empty string; agents must insert
+`context` now returns only the caller's name and exact introduction or empty
+prefix, resolving ownership from the tuios environment only (no harness/session
+identity-selection flags). Outside tuios, lookup fails clearly. Agents must insert
 it themselves in both display and TTS text. `send` rechecks context and rejects
 mismatches without queueing or rewriting the message. This supersedes the earlier
 automatic-introduction behavior.
@@ -39,12 +42,16 @@ automatic-introduction behavior.
 
 ## Commands
 
-### `agent-comms id`
+### `agent-comms context`
 
-Draw and print one stable identity ID from a Tetris-style random bag.
+Resolve the caller pane's stable identity and return JSON with only `name`
+and `prefix`. Agents MUST call this in
+a separate tool call immediately before every send; never cache or inherit it.
 
-- Successful stdout contains only the ID and a trailing newline, suitable for
-  shell capture. Diagnostics belong on stderr.
+Allocation uses the original Tetris-style bag internally, but repeated lookup
+does not draw a new identity. The following describes the internal allocator:
+
+- Diagnostics belong on stderr; successful lookup stdout is JSON.
 - The configuration bag contains every configured identity ID once.
 - The transient bag is a persisted, shuffled copy of those IDs.
 - A draw removes and returns the ID at the front of the transient bag.
@@ -55,7 +62,7 @@ Draw and print one stable identity ID from a Tetris-style random bag.
   operation with a process-safe lock so concurrent callers cannot consume the
   same bag entry.
 
-### `agent-comms id --refill`
+### `agent-comms context --refill`
 
 Force a fresh shuffle of the complete configuration bag, replacing any remaining
 transient entries. **Do not draw or print an ID.** Use the same lock as normal
@@ -82,11 +89,12 @@ Run the single global listener and own the timed message queue.
 - The server lifecycle is independent of dock watchers. Closing a tuios client
   must not terminate the global listener merely because its watcher exits.
 
-### `agent-comms send --id ID --msg MESSAGE`
+### `agent-comms send --msg MESSAGE`
 
-Submit a text message using a configured identity.
+Submit a text message using the caller pane's internally resolved identity.
 
-- Validate the ID and message. Unknown identities fail clearly.
+- Resolve the pane binding and validate the message. Unbound panes fail clearly;
+  agents cannot select an identity or pass `--id`.
 - Connect to the global listener using discovery and authentication below.
 - Return success only when the listener acknowledges queue acceptance. Success
   does not mean the message has already appeared on screen.
@@ -117,7 +125,6 @@ Use TOML keyed by stable identity IDs. Each identity has:
 
 - `name`: the human-readable display name.
 - `eleven_labs_voice_id`: voice metadata.
-- `personality`: personality metadata.
 
 Illustrative structure, not a finalized identity roster:
 
@@ -127,11 +134,10 @@ display_seconds = 5
 [identities.naia]
 name = "Naia"
 eleven_labs_voice_id = ""
-personality = ""
 ```
 
-Voice and personality are stored metadata only in v1. Do not call ElevenLabs,
-generate speech, or alter messages using personality text.
+Names and voices are identity metadata. Personalities have been removed; use
+ordinary communication style. Optional watcher speech is documented in README.md.
 
 The default configuration lives beside the program in `agent-comms/config.toml`
 (updated by request after the initial implementation). Flags/environment can
@@ -139,11 +145,12 @@ override it. Configuration is the authoritative bag of possible IDs; a separate 
 state file stores the remaining shuffled IDs. Runtime state must not be written
 into the checked-in source/configuration example.
 
-**IDs are identities, not exclusive reservations.** Once a cycle refills, another
-agent may draw an identity that an existing agent is still using. There is no
-lease, release, uniqueness-across-active-agents, or authentication-by-identity
-mechanism in v1. `--id` selects attribution; the local connection token provides
-transport authentication.
+Pane bindings reserve IDs, so different retained pane bindings cannot silently
+share an identity. `send` resolves the current pane binding internally. Ownership is
+persisted by stable daemon namespace + pane UUID under a shared OS lock. Confirmed
+missing panes are pruned after a seven-day grace period; failed/incomplete listings
+never prune. See README.md for lifecycle and migration details. This is attribution,
+not authentication; the local connection token provides transport authentication.
 
 ## Server discovery and authentication
 
@@ -300,7 +307,7 @@ Implementation should verify, without requiring Windows execution for now:
 
 The design above is agreed; the following have not yet been finalized:
 
-- Default identity roster and actual voice/personality metadata.
+- Default identity roster and actual voice metadata.
 - Exact configuration/state paths, override flags/environment variables, and
   install/launcher mechanism on each platform.
 - Transport framing, payload limits, queue limits, timeouts, and retry backoff.

@@ -32,9 +32,9 @@ class Fixture(unittest.TestCase):
         self.paths.config.parent.mkdir()
         self.paths.config.write_text(
             'display_seconds = 0.18\n'
-            '[identities.a]\nname = "Alice"\neleven_labs_voice_id = ""\npersonality = ""\n'
-            '[identities.b]\nname = "Bob"\neleven_labs_voice_id = ""\npersonality = ""\n'
-            '[identities.c]\nname = "Cleo"\neleven_labs_voice_id = ""\npersonality = ""\n',
+            '[identities.a]\nname = "Alice"\neleven_labs_voice_id = ""\n'
+            '[identities.b]\nname = "Bob"\neleven_labs_voice_id = ""\n'
+            '[identities.c]\nname = "Cleo"\neleven_labs_voice_id = ""\n',
             encoding="utf-8",
         )
         self.env = {
@@ -51,6 +51,19 @@ class Fixture(unittest.TestCase):
     def cli(self, *args):
         return subprocess.run([sys.executable, str(SCRIPT), *args], env=self.env,
                               capture_output=True, text=True, encoding="utf-8", timeout=10)
+
+    def transport_send(self, identity, message, tts=None):
+        """Exercise transport in isolation; pane attribution has separate CLI tests."""
+        code = ("import asyncio,sys; import agent_comms as a; "
+                "p=a.Paths.resolve(a.parser().parse_args(['serve'])); "
+                "identity,message,tts=sys.argv[1:];\n"
+                "try:\n"
+                " a.validate_message(a.load_config(p.config),identity,message,tts)\n"
+                " asyncio.run(a.send(p,identity,message,tts))\n"
+                "except (a.CommsError,OSError) as e:\n"
+                " print(str(e),file=sys.stderr); sys.exit(1)\n")
+        return subprocess.run([sys.executable, "-c", code, identity, message, message if tts is None else tts],
+                              cwd=ROOT, env=self.env, capture_output=True, text=True, timeout=10)
 
     def process(self, *args):
         process = subprocess.Popen([sys.executable, str(SCRIPT), *args], env=self.env,
@@ -113,61 +126,69 @@ class Fixture(unittest.TestCase):
 
 
 class BagTests(Fixture):
+    def new_identity(self):
+        # Test the internal allocation bag across processes, not pane ownership.
+        code = ("import json; import agent_comms as a; "
+                "p=a.Paths.resolve(a.parser().parse_args(['context'])); "
+                "print(json.dumps({'id':a.draw_id(p,a.load_config(p.config))}))")
+        return subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=self.env,
+                              capture_output=True, text=True, timeout=10)
+
     def test_two_cycles_and_refill_only(self):
         for _ in range(2):
-            draws = [self.cli("id") for _ in range(3)]
+            draws = [self.new_identity() for _ in range(3)]
             self.assertTrue(all(p.returncode == 0 for p in draws))
-            self.assertEqual(sorted(p.stdout.strip() for p in draws), ["a", "b", "c"])
-        self.assertEqual(self.cli("id", "--refill").stdout, "")
+            self.assertEqual(sorted(json.loads(p.stdout)["id"] for p in draws), ["a", "b", "c"])
+        self.assertEqual(self.cli("context", "--refill").stdout, "")
         state = json.loads((self.paths.state / "bag.json").read_text())
         self.assertEqual(len(state["remaining"]), 3)
 
     def test_concurrent_draws_preserve_cycle_accounting(self):
-        self.cli("id", "--refill")
+        self.cli("context", "--refill")
         with ThreadPoolExecutor(max_workers=9) as pool:
-            draws = list(pool.map(lambda _: self.cli("id"), range(30)))
+            draws = list(pool.map(lambda _: self.new_identity(), range(30)))
         self.assertTrue(all(p.returncode == 0 for p in draws), [p.stderr for p in draws])
         for identity in ("a", "b", "c"):
-            self.assertEqual(sum(p.stdout.strip() == identity for p in draws), 10)
+            self.assertEqual(sum(json.loads(p.stdout)["id"] == identity for p in draws), 10)
         self.assertEqual(json.loads((self.paths.state / "bag.json").read_text())["remaining"], [])
 
     def test_front_of_persisted_bag_is_drawn(self):
         self.paths.state.mkdir()
         app.atomic_json(self.paths.state / "bag.json", {"ids": ["a", "b", "c"], "remaining": ["c", "a"]})
-        self.assertEqual(self.cli("id").stdout, "c\n")
-        self.assertEqual(self.cli("id").stdout, "a\n")
+        self.assertEqual(json.loads(self.new_identity().stdout)["id"], "c")
+        self.assertEqual(json.loads(self.new_identity().stdout)["id"], "a")
 
     def test_config_change_and_corrupt_state_start_new_cycle(self):
-        self.cli("id")
+        self.new_identity()
         state = self.paths.state / "bag.json"
         state.write_text("broken json")
-        result = self.cli("id")
+        result = self.new_identity()
         self.assertEqual(result.returncode, 0)
         self.assertIn("corrupt", result.stderr)
         with self.paths.config.open("a") as stream:
             stream.write('[identities.d]\nname = "Delta"\n')
-        self.cli("id")
+        self.new_identity()
         self.assertEqual(json.loads(state.read_text())["ids"], ["a", "b", "c", "d"])
 
     def test_missing_config_is_actionable(self):
         self.paths.config.unlink()
-        result = self.cli("id")
+        result = self.cli("context")
         self.assertEqual(result.returncode, 1)
         self.assertIn("Cannot read identity config", result.stderr)
         self.assertFalse(self.paths.config.exists())
 
     def test_invalid_config_and_global_overrides(self):
-        result = self.cli("--runtime-dir", str(self.paths.runtime), "id", "--state-dir", str(self.paths.state))
+        result = self.cli("--runtime-dir", str(self.paths.runtime), "context", "--refill", "--state-dir", str(self.paths.state))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.paths.config.write_text('display_seconds = nan\n[identities.x]\nname = "X"\n')
-        result = self.cli("id")
+        result = self.cli("context")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("display_seconds", result.stderr)
 
 
 class ServerTests(Fixture):
     def test_offline_send_does_not_start_server(self):
-        result = self.cli("send", "--id", "a", "--msg", "hello")
+        result = self.transport_send("a", "hello")
         self.assertEqual(result.returncode, 1)
         self.assertIn("offline", result.stderr)
         self.assertFalse((self.paths.runtime / "server.json").exists())
@@ -192,7 +213,7 @@ class ServerTests(Fixture):
         for content, expected in (("broken", "Invalid discovery"),
                                   ('{"protocol_version": 99}', "Unsupported discovery")):
             discovery.write_text(content)
-            result = self.cli("send", "--id", "a", "--msg", "hello")
+            result = self.transport_send("a", "hello")
             self.assertEqual(result.returncode, 1)
             self.assertIn(expected, result.stderr)
 
@@ -224,7 +245,7 @@ class ServerTests(Fixture):
         self.assertIsNone(self.message(first))
         self.assertIsNone(self.message(second))
         # A newly attached watcher receives an active message immediately.
-        self.assertEqual(self.cli("send", "--id", "a", "--msg", "current").returncode, 0)
+        self.assertEqual(self.transport_send("a", "current").returncode, 0)
         _, stream = self.request("watch")
         self.assertEqual(json.loads(stream.readline())["message"]["msg"], "current")
 
@@ -241,7 +262,7 @@ class ServerTests(Fixture):
             reply = json.loads(stream.readline())
             self.assertFalse(reply["ok"])
             self.assertIn(error, reply["error"])
-        self.assertEqual(self.cli("send", "--id", "a", "--msg", "healthy").returncode, 0)
+        self.assertEqual(self.transport_send("a", "healthy").returncode, 0)
 
     def test_malformed_and_oversized_frames_do_not_break_server(self):
         _, info = self.start_server()
@@ -250,7 +271,7 @@ class ServerTests(Fixture):
                 connection.sendall(frame)
                 reply = connection.recv(4096)
                 self.assertIn(b'"ok": false', reply)
-        self.assertEqual(self.cli("send", "--id", "a", "--msg", "still alive").returncode, 0)
+        self.assertEqual(self.transport_send("a", "still alive").returncode, 0)
 
     def test_crash_recovery_replaces_stale_discovery(self):
         server, old = self.start_server()
@@ -259,7 +280,7 @@ class ServerTests(Fixture):
         self.assertTrue((self.paths.runtime / "server.json").exists())
         _, new = self.start_server()
         self.assertNotEqual(old["token"], new["token"])
-        self.assertEqual(self.cli("send", "--id", "b", "--msg", "recovered").returncode, 0)
+        self.assertEqual(self.transport_send("b", "recovered").returncode, 0)
 
     def test_watcher_reconnects_across_offline_and_restart(self):
         watcher = self.process("watch", "--no-color")
@@ -284,7 +305,7 @@ class ServerTests(Fixture):
         until("offline")
         server, _ = self.start_server()
         until("idle")
-        self.cli("send", "--id", "a", "--msg", "watch this")
+        self.transport_send("a", "watch this")
         self.assertIn("Alice: watch this", until("watch this"))
         server.kill()
         server.wait(timeout=5)
@@ -315,7 +336,7 @@ class RenderingTests(unittest.TestCase):
         self.assertIn("offline", app.dock_line(None, offline=True))
 
     def test_windows_paths(self):
-        args = app.parser().parse_args(["id"])
+        args = app.parser().parse_args(["context"])
         # Select Windows defaults without changing pathlib's host platform.
         root = Path.home() / "mock-appdata"
         fake_os = SimpleNamespace(name="nt", environ={
@@ -327,7 +348,7 @@ class RenderingTests(unittest.TestCase):
         self.assertEqual(paths.config, ROOT / "config.toml")
 
     def test_default_config_is_relative_to_program_not_cwd(self):
-        args = app.parser().parse_args(["id"])
+        args = app.parser().parse_args(["context"])
         with patch.dict(os.environ, {}, clear=True):
             paths = app.Paths.resolve(args)
         self.assertEqual(paths.config, ROOT / "config.toml")

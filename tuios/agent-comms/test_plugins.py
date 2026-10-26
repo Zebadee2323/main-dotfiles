@@ -1,5 +1,4 @@
 """Identity stability and hook contracts; no real model, listener or trust changes."""
-from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -7,92 +6,37 @@ import subprocess
 import sys
 from unittest.mock import patch
 
-import agent_comms as app
 import install_plugins
 from test_agent_comms import Fixture, ROOT
 
 
-class SessionTests(Fixture):
-    def assign(self, session="session-one", harness="opencode"):
-        result = self.cli("session", "--harness", harness, "--session-id", session)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        return json.loads(result.stdout)
-
-    def test_assignment_survives_repeated_processes_and_refills(self):
-        first = self.assign()
-        self.cli("id", "--refill")
-        before = (self.paths.state / "bag.json").read_text()
-        for _ in range(3):
-            self.assertEqual(self.assign(), first)
-        self.assertEqual((self.paths.state / "bag.json").read_text(), before)
-        self.assertIn(f"--id {first['id']}", first["instructions"])
-        self.assertIn("Always close every turn", first["instructions"])
-        self.assertIn("immediately BEFORE", first["instructions"])
-        self.assertIn("voice mode", first["instructions"])
-        self.assertIn("MUST shape wording, tone, and delivery", first["instructions"])
-        self.assertIn("ONLY; use your ordinary style in standard responses", first["instructions"])
-        self.assertIn("eleven_turbo_v2_5", first["instructions"])
-        self.assertIn("--tts", first["instructions"])
-        self.assertIn("agent-comms prefix --id", first["instructions"])
-        self.assertIn("Before EVERY message", first["instructions"])
-        self.assertIn("never inserts or rewrites the prefix", first["instructions"])
-
-    def test_concurrent_same_session_draws_once(self):
-        self.cli("id", "--refill")
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            results = list(pool.map(lambda _: self.cli("session", "--harness", "codex", "--session-id", "same"), range(16)))
-        self.assertTrue(all(r.returncode == 0 for r in results), [r.stderr for r in results])
-        self.assertEqual(len({json.loads(r.stdout)["id"] for r in results}), 1)
-        remaining = json.loads((self.paths.state / "bag.json").read_text())["remaining"]
-        self.assertEqual(len(remaining), 2)
-
+class InstructionTests(Fixture):
     def test_first_message_introduces_with_prefix_or_own_words_for_both_harnesses(self):
         for harness in ("opencode", "codex"):
             with self.subTest(harness=harness):
-                assigned = self.assign(harness=harness)
-                instructions = assigned["instructions"]
+                result = self.cli("instructions")
+                instructions = json.loads(result.stdout)["instructions"]
                 self.assertIn("separate shell-tool call", instructions)
-                self.assertIn("Read the tool result into your context BEFORE composing", instructions)
-                self.assertIn("combine query and send in one tool call", instructions)
-                self.assertNotIn("prefix=$(agent-comms prefix", instructions)
-                self.assertIn("It already identifies you and your session", instructions)
-                self.assertIn("even on the first message", instructions)
-                self.assertIn("On your first session message, introduce yourself", instructions)
-                self.assertIn("never\n  add another introduction", instructions)
-                self.assertIn("in your own words in BOTH arguments", instructions)
-                self.assertIn("afterward, no introduction is needed", instructions)
-                self.assertIn(f'"I\'m {assigned["name"]}, your AI coding assistant.', instructions)
+                self.assertIn("Read the JSON tool result into your context BEFORE composing", instructions)
+                self.assertIn("combine lookup and send in one tool call", instructions)
+                self.assertIn("It already identifies you and your location", instructions)
+                self.assertIn("You MUST call the context command before EVERY message", instructions)
+                self.assertIn("Never cache", instructions)
+                self.assertIn("\nagent-comms context\n", instructions)
+                self.assertNotIn("--harness", instructions)
+                self.assertNotIn("--session-id", instructions)
+                self.assertIn("Do not pass an identity, harness, or session ID", instructions)
+                self.assertIn("Always close every turn", instructions)
+                self.assertIn("immediately BEFORE", instructions)
+                self.assertIn("eleven_turbo_v2_5", instructions)
+                self.assertNotIn("Personality:", instructions)
+                self.assertNotIn("Session identity:", instructions)
+                self.assertFalse((self.paths.state / "bag.json").exists())
 
-    def test_new_sessions_and_harnesses_use_distinct_bag_entries(self):
-        results = [self.assign("one"), self.assign("two"), self.assign("one", "codex")]
-        self.assertEqual({r["id"] for r in results}, {"a", "b", "c"})
-
-    def test_config_metadata_updates_without_redraw(self):
-        first = self.assign()
-        before = (self.paths.state / "bag.json").read_text()
-        text = self.paths.config.read_text().replace(first["name"], "Renamed")
-        self.paths.config.write_text(text)
-        updated = self.assign()
-        self.assertEqual(updated["id"], first["id"])
-        self.assertEqual(updated["name"], "Renamed")
-        self.assertEqual((self.paths.state / "bag.json").read_text(), before)
-
-    def test_corrupt_assignment_fails_instead_of_consuming_bag(self):
-        self.assign()
-        record = next((self.paths.state / "sessions").glob("*.json"))
-        record.write_text("not json")
-        before = (self.paths.state / "bag.json").read_text()
-        result = self.cli("session", "--harness", "opencode", "--session-id", "session-one")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("Corrupt session assignment", result.stderr)
-        self.assertEqual((self.paths.state / "bag.json").read_text(), before)
-
-    def test_removed_identity_is_reassigned(self):
-        first = self.assign()
-        self.paths.config.write_text('[identities.only]\nname = "Only"\n')
-        second = self.assign()
-        self.assertNotEqual(first["id"], second["id"])
-        self.assertEqual(second["id"], "only")
+    def test_session_rendering_is_identical_and_never_uses_session_to_select_identity(self):
+        outputs = [self.cli("instructions").stdout for _ in range(3)]
+        self.assertTrue(all(output == outputs[0] for output in outputs))
+        self.assertFalse(self.paths.state.exists())
 
 
 class CodexHookTests(Fixture):
@@ -123,10 +67,8 @@ class CodexHookTests(Fixture):
         self.assertTrue(all(output == outputs[0] for output in outputs))
         self.assertEqual(outputs[0]["hookEventName"], "SessionStart")
         self.assertIn("agent-comms send", outputs[0]["additionalContext"])
-        self.assertIn("ONLY; use your ordinary style in standard responses", outputs[0]["additionalContext"])
-        records = list((self.paths.state / "sessions").glob("*.json"))
-        self.assertEqual(len(records), 1)
-        self.assertEqual(json.loads(records[0].read_text())["harness"], "codex")
+        self.assertIn("You MUST call the context command before EVERY message", outputs[0]["additionalContext"])
+        self.assertFalse(self.paths.state.exists(), "instruction hooks must not allocate identities")
 
     def test_bad_input_and_missing_launcher_are_advisory(self):
         result = self.invoke({})

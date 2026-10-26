@@ -25,11 +25,11 @@ def main():
         session_id = event.get("session_id")
         if not isinstance(session_id, str) or not session_id:
             raise ValueError("Missing session ID")
-        command = [sys.executable, str(resolve_helper()), "session", "--harness", "codex",
-                   "--session-id", session_id]
+        command = [sys.executable, str(resolve_helper()), "instructions"]
         result = subprocess.run(command, capture_output=True, encoding="utf-8", timeout=12, check=True)
-        assignment = json.loads(result.stdout)
-        instructions = assignment["instructions"]
+        # This helper renders lookup instructions only; identity is resolved by
+        # the agent in its actual tool process before every announcement.
+        instructions = json.loads(result.stdout)["instructions"]
         if not isinstance(instructions, str) or not instructions.strip():
             raise ValueError("Empty instructions")
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": instructions}}))

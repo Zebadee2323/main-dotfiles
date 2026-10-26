@@ -19,32 +19,35 @@ class PrefixTests(Fixture):
     def invoke(self, args, source=None):
         output, errors = io.StringIO(), io.StringIO()
         with patch.object(app, "prepare_output"), patch.object(app.Paths, "resolve", return_value=self.paths), \
+             patch.object(app, "pane_binding", return_value="a"), \
              patch.object(tuios_context, "context", return_value=self.source if source is None else source), \
              patch("sys.stdout", output), patch("sys.stderr", errors):
             code = app.main(args)
         return code, output.getvalue(), errors.getvalue()
 
-    def test_prefix_command_returns_exact_text_or_empty_line_without_listener(self):
-        code, text, error = self.invoke(["prefix", "--id", "a"])
+    def test_id_returns_name_and_prefix_without_listener(self):
+        code, text, error = self.invoke(["context"])
         self.assertEqual(code, 0, error)
-        self.assertEqual(text, self.prefix + "\n")
-        code, text, error = self.invoke(["prefix", "--id", "a"], source={})
+        self.assertEqual(json.loads(text)["prefix"], self.prefix)
+        self.assertEqual(json.loads(text)["name"], "Alice")
+        code, text, error = self.invoke(["context"], source={})
         self.assertEqual(code, 0, error)
-        self.assertEqual(text, "\n")
+        self.assertEqual(json.loads(text)["prefix"], "")
         self.assertFalse(self.paths.runtime.exists())
         self.assertFalse(self.paths.state.exists())
 
-    def test_prefix_json_includes_the_checked_context(self):
-        code, text, error = self.invoke(["prefix", "--id", "a", "--json"])
+    def test_id_json_contains_only_required_fields(self):
+        code, text, error = self.invoke(["context"])
         self.assertEqual(code, 0, error)
         result = json.loads(text)
-        self.assertEqual(result, {"prefix": self.prefix, "required": True, "context": self.source})
+        self.assertEqual(result, {"name": "Alice", "prefix": self.prefix})
 
-    def test_outside_tuios_prefix_is_empty_and_unknown_identity_is_error(self):
-        self.assertEqual(self.cli("prefix", "--id", "a").stdout, "\n")
-        result = self.cli("prefix", "--id", "missing")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("Unknown identity", result.stderr)
+    def test_prefix_command_removed_and_unknown_identity_is_error(self):
+        self.assertEqual(self.cli("id").returncode, 2)
+        self.assertEqual(self.cli("prefix", "--id", "a").returncode, 2)
+        self.assertEqual(self.cli("send", "--id", "a", "--msg", "Ready.").returncode, 2)
+        with self.assertRaisesRegex(app.CommsError, "Unknown identity"):
+            app.validate_message(self.config(), "missing", "Ready.")
 
     def test_valid_prefix_is_not_inserted_or_rewritten(self):
         message = self.prefix + " Ready."
@@ -66,7 +69,7 @@ class PrefixTests(Fixture):
                     app.validate_message(self.config(), "a", bad if field == "--msg" else good,
                                          bad if field == "--tts" else good, self.source)
                 self.assertIn(field, str(error.exception))
-                self.assertIn("agent-comms prefix --id a", str(error.exception))
+                self.assertIn("agent-comms context", str(error.exception))
                 self.assertIn("Message was not queued", str(error.exception))
 
     def test_no_required_prefix_rejects_stale_introductions(self):
@@ -79,7 +82,7 @@ class PrefixTests(Fixture):
 
     def test_send_rechecks_context_and_rejects_focus_race_before_network(self):
         with patch.object(app, "send", new=AsyncMock()) as send:
-            code, _, error = self.invoke(["send", "--id", "a", "--msg", self.prefix + " Ready."],
+            code, _, error = self.invoke(["send", "--msg", self.prefix + " Ready."],
                                          source={**self.source, "session_name": "changed"})
         self.assertEqual(code, 1)
         self.assertIn("changed session.", error)
@@ -88,7 +91,7 @@ class PrefixTests(Fixture):
     def test_checked_send_passes_both_strings_unchanged(self):
         message = self.prefix + " Ready."
         with patch.object(app, "send", new=AsyncMock()) as send:
-            code, _, error = self.invoke(["send", "--id", "a", "--msg", message, "--tts", message])
+            code, _, error = self.invoke(["send", "--msg", message, "--tts", message])
         self.assertEqual(code, 0, error)
         send.assert_awaited_once_with(self.paths, "a", message, message, self.source)
 
@@ -103,7 +106,7 @@ class PrefixTests(Fixture):
         with patch.object(app, "prepare_output"), patch.object(app.Paths, "resolve", return_value=self.paths), \
              patch.object(tuios_context, "context", side_effect=tuios_context.ContextError("Cannot check prefix")), \
              patch.object(app, "send", new=AsyncMock()) as send, patch("sys.stderr", io.StringIO()):
-            self.assertEqual(app.main(["send", "--id", "a", "--msg", "Ready."]), 1)
+            self.assertEqual(app.main(["send", "--msg", "Ready."]), 1)
             send.assert_not_called()
 
     def test_listener_rejects_missing_prefix_before_history_or_queue(self):

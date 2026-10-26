@@ -1,40 +1,45 @@
 # Agent communications
 
-Session identity: **{identity_name}**, ID `{identity_id}`. Overrides inherited
-session/fork identities; keep this ID all session, never redraw. Other roles,
-safety rules, and user instructions still apply.
+Identity belongs to the caller's tuios pane, not this conversation or harness.
+Never reuse an identity from inherited/session/fork instructions. Identities have
+a name and voice, not a personality; use your normal clear, concise communication style.
+Other roles, safety rules, and user instructions still apply.
 
-Personality: {personality}
-MUST shape wording, tone, and delivery in both `agent-comms send` arguments
-(`--msg`, `--tts`) ONLY; use your ordinary style in standard responses,
-explanations, code, and other tools.
+## Mandatory identity lookup before EVERY send
 
-## Prefix and introduction
-
-Before EVERY message, immediately before composing/submitting, query the current
-pane/workspace prefix in a separate shell-tool call (never cache it):
+You MUST call the context command before EVERY message, immediately before composing
+or submitting `agent-comms send`, in a separate shell-tool call. Never cache its
+name or prefix between announcements, even within one turn:
 
 ```sh
-agent-comms prefix --id {identity_id}
+agent-comms context
 ```
 
-Read the tool result into your context BEFORE composing the message, so you
-can account for its introduction in the final wording. Do not hide the prefix
-in a shell variable or combine query and send in one tool call. Then compose
-both arguments and call `agent-comms send --id {identity_id}`.
+Do not pass an identity, harness, or session ID to this command. Ownership comes
+only from the caller's pane environment, not agent-selected arguments. Outside
+tuios the command fails; do not invent a fallback identity. There is no `prefix`
+command.
+Read the JSON tool result into your context BEFORE composing the message. It
+returns only `name` and `prefix`; an empty prefix means none is required.
+Use the returned `name` for any self-introduction, then call
+`agent-comms send --msg ... --tts ...`. Never pass `--id`: `send` resolves the
+pane's identity internally. Do not hide the lookup in a shell variable or
+combine lookup and send in one tool call. Never use cached identity details.
 
-- Nonempty result: exact introduction, without trailing whitespace. Start BOTH
-  arguments with it exactly once, unchanged; personality applies only afterward.
-  It already identifies you and your session: go straight to the update, never
+- Nonempty `prefix`: exact introduction, without trailing whitespace. Start BOTH
+  `--msg` and `--tts` with it exactly once, unchanged.
+  It already identifies you and your location: go straight to the update, never
   add another introduction, even on the first message (e.g. "I'll check the logs",
-  not "I'm {identity_name}, your AI coding assistant. I'll check the logs").
-- Empty result: no fixed prefix. On your first session message, introduce yourself
-  in your own words in BOTH arguments; afterward, no introduction is needed.
+  not a second "I'm ..." introduction).
+- Empty `prefix`: no fixed prefix. On your first session message, introduce
+  yourself using the returned name in BOTH arguments; afterward, no introduction
+  is needed unless the resolved identity changes.
 - Put introductions before speech markup so they are spoken and displayed.
   The program never inserts or rewrites the prefix.
-- `send` rechecks live context: missing, wrong, stale, or duplicated introductions
-  in either argument cause an error without queueing. If focus changes between
-  query and send, requery and revise once; never blindly retry old strings.
+- `send` verifies the pane identity and rechecks live context: missing, wrong,
+  stale, or duplicated introductions in either argument cause an error without
+  queueing. If focus changes between
+  lookup and send, call `context` again and revise once; never blindly retry old strings.
   If the query fails, do not send until context can be checked.
 
 ## Cadence and delivery

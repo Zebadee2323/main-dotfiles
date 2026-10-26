@@ -27,6 +27,7 @@ import unicodedata
 import uuid
 
 import message_history
+import pane_identity
 import speech
 import tuios_context
 
@@ -173,6 +174,14 @@ def load_config(path: Path) -> dict:
     speed = settings.get("speed", 1.0)
     if type(speed) not in (int, float) or not math.isfinite(speed) or not 0.7 <= speed <= 1.2:
         raise CommsError("speech.speed must be between 0.7 and 1.2.")
+    if type(settings.get("normalize", True)) is not bool:
+        raise CommsError("speech.normalize must be a boolean.")
+    if type(settings.get("robot_mode", False)) is not bool:
+        raise CommsError("speech.robot_mode must be a boolean.")
+    rejected = config.get("rejected_voices", {})
+    if (not isinstance(rejected, dict) or not isinstance(rejected.get("ids", []), list)
+            or any(not isinstance(voice, str) or not voice.strip() for voice in rejected.get("ids", []))):
+        raise CommsError("rejected_voices.ids must be an array of nonempty voice ID strings.")
     identities = config.get("identities")
     if not isinstance(identities, dict) or not identities:
         raise CommsError("Config must contain at least one [identities.ID] table.")
@@ -183,10 +192,148 @@ def load_config(path: Path) -> dict:
             raise CommsError(f"Identity {identity} needs a nonempty name.")
         if len(metadata["name"]) > 128:
             raise CommsError(f"Identity {identity} name is too long (maximum 128 characters).")
-        for key in ("eleven_labs_voice_id", "personality"):
+        metadata.pop("personality", None)  # Ignore obsolete fields in older user configs.
+        for key in ("eleven_labs_voice_id",):
             if not isinstance(metadata.get(key, ""), str):
                 raise CommsError(f"Identity {identity}: {key} must be text.")
+        if type(metadata.get("voice_approved", False)) is not bool:
+            raise CommsError(f"Identity {identity}: voice_approved must be a boolean.")
     return config
+
+
+def record_rejected_voice(source: str, voice_id: str) -> str:
+    """Add to the persistent avoidance list without rewriting unrelated TOML."""
+    expected = tomllib.loads(source)
+    rejected = expected.setdefault("rejected_voices", {})
+    ids = rejected.setdefault("ids", [])
+    if voice_id in ids:
+        return source
+    ids.insert(0, voice_id)
+    encoded = json.dumps(voice_id)
+    # Validate each candidate structurally, so lookalike text inside multiline
+    # personality strings or other tables can never be edited by accident.
+    candidates = [source + f"\n[rejected_voices]\nids = [{encoded}]\n"]
+    candidates += [source[:m.end()] + f"{encoded}, " + source[m.end():]
+                   for m in re.finditer(r"(?m)^[ \t]*ids[ \t]*=[ \t]*\[", source)]
+    candidates += [source[:m.end()] + f"\nids = [{encoded}]" + source[m.end():]
+                   for m in re.finditer(r"(?m)^\[rejected_voices\][ \t]*(?:#[^\n]*)?$", source)]
+    for candidate in candidates:
+        try:
+            if tomllib.loads(candidate) == expected:
+                return candidate
+        except ValueError:
+            pass
+    raise CommsError("Cannot safely edit rejected_voices; use a [rejected_voices] table with an ids array.")
+
+
+def save_voice_approval(paths: Paths, identity: str, voice_id: str, approved: bool) -> None:
+    """Save approval and rejection history together, preserving unrelated config."""
+    private_dir(paths.state)
+    with FileLock(paths.state / "voice-review.lock"):
+        path = paths.config.resolve()  # Keep a symlinked config intact.
+        original = path.read_text(encoding="utf-8")
+        expected = tomllib.loads(original)
+        metadata = expected.get("identities", {}).get(identity)
+        if metadata is None or metadata.get("eleven_labs_voice_id") != voice_id:
+            raise CommsError(f"Identity {identity} changed during review; approval was not saved.")
+        metadata["voice_approved"] = approved
+        value = "true" if approved else "false"
+        # Try surgical edits, accepting one only if TOML parsing proves that it
+        # changes exactly the intended field (not text inside a personality).
+        edits = [(m.start(1), m.end(1), value) for m in re.finditer(
+            r"(?m)^\s*voice_approved\s*=\s*(true|false)\b", original)]
+        edits += [(m.end(), m.end(), f"\nvoice_approved = {value}") for m in re.finditer(
+            r"(?m)^\s*\[identities\.[^\n]+\][ \t]*(?:#[^\n]*)?$", original)]
+        for start, end, replacement in edits:
+            updated = original[:start] + replacement + original[end:]
+            try:
+                if tomllib.loads(updated) == expected:
+                    break
+            except ValueError:
+                pass
+        else:
+            raise CommsError(f"Cannot safely edit {identity}; use a [identities.{identity}] table in the config.")
+        if not approved:
+            updated = record_rejected_voice(updated, voice_id)
+        fd, filename = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(updated)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(filename, path.stat().st_mode & 0o777)
+            if path.read_text(encoding="utf-8") != original:
+                raise CommsError("Config changed while saving approval; try the review again.")
+            os.replace(filename, path)
+        finally:
+            with suppress(FileNotFoundError):
+                os.unlink(filename)
+
+
+async def voice_review_decision(audio, executable: str, name: str) -> bool | None:
+    """Read the decision during playback, stopping audio when a decision is made."""
+    playback = asyncio.create_task(speech.play(audio, executable))
+    try:
+        await asyncio.sleep(0)  # Start playback before an immediately available answer.
+        while True:
+            try:
+                answer = (await asyncio.to_thread(
+                    input, f"Do you like {name}'s voice? [y/n/q] ")).strip().lower()
+            except EOFError:
+                return None
+            if answer in ("q", "quit"):
+                return None
+            if answer in ("y", "yes", "n", "no"):
+                return answer in ("y", "yes")
+            print("Please answer y, n, or q.")
+    finally:
+        # speech.play's cancellation cleanup terminates the player before the
+        # next identity starts or its temporary audio file is removed.
+        playback.cancel()
+        with suppress(asyncio.CancelledError):
+            await playback
+
+
+def voice_review(paths: Paths, config: dict) -> None:
+    pending = [(identity, metadata) for identity, metadata in config["identities"].items()
+               if not metadata.get("voice_approved", False)]
+    if not pending:
+        print("All identity voices are approved.")
+        return
+    if not sys.stdin.isatty():
+        raise CommsError("voice-review requires an interactive terminal.")
+    api_key = os.environ.get("ELEVENLABS_API_KEY", "")
+    if not api_key:
+        raise CommsError("Set ELEVENLABS_API_KEY before running voice-review.")
+    executable = speech.player()
+    if executable is None:
+        raise CommsError("No audio player available; install afplay, ffplay, or aplay.")
+    settings = config.get("speech", {})
+    print(f"Reviewing {len(pending)} non-approved voices. Decisions are saved immediately; q quits.")
+    with tempfile.TemporaryDirectory(prefix="agent-comms-voice-review-") as directory:
+        for index, (identity, metadata) in enumerate(pending, 1):
+            name = clean_text(metadata["name"])
+            voice_id = metadata.get("eleven_labs_voice_id", "").strip()
+            print(f"\n[{index}/{len(pending)}] {name} ({identity})", flush=True)
+            if not voice_id:
+                print("No voice ID configured; skipping without approval.")
+                continue
+            text = (f"Hello, I'm {name}. Here's a quick update: the changes are ready for review. "
+                    "We found one small issue, and the next step is to check the fix together. "
+                    "How does this voice sound to you?")
+            try:
+                audio = speech.synthesize(directory, voice_id, text, api_key,
+                                          settings.get("model", speech.DEFAULT_MODEL), settings.get("speed", 1.0))
+                try:
+                    approved = asyncio.run(voice_review_decision(audio, executable, name))
+                finally:
+                    audio.remove()
+            except (speech.SpeechError, OSError) as exc:
+                raise CommsError(f"Cannot audition {name}: {exc}") from None
+            if approved is None:
+                return
+            save_voice_approval(paths, identity, voice_id, approved)
+            print("Approved." if approved else "Not approved; voice ID added to rejected_voices.ids. Will be offered again next time.")
 
 
 def draw_id(paths: Paths, config: dict, refill: bool = False) -> str | None:
@@ -216,39 +363,37 @@ def draw_id(paths: Paths, config: dict, refill: bool = False) -> str | None:
         return identity
 
 
-def session_identity(paths: Paths, config: dict, harness: str, session_id: str) -> dict:
-    """Coordinate both adapters through durable, per-session allocation locks."""
-    if harness not in ("opencode", "codex") or not session_id or len(session_id) > 512:
-        raise CommsError("A valid harness and nonempty session ID (at most 512 characters) are required.")
-    key = hashlib.sha256(json.dumps([harness, session_id]).encode()).hexdigest()
-    directory = private_dir(paths.state / "sessions")
-    record = directory / f"{key}.json"
-    with FileLock(directory / f"{key}.lock"):
-        try:
-            saved = json.loads(record.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            saved = None
-        except (ValueError, UnicodeError):
-            raise CommsError(f"Corrupt session assignment: {record}. Repair or remove it explicitly.") from None
-        if saved is not None and (
-            not isinstance(saved, dict) or saved.get("harness") != harness
-            or saved.get("session_id") != session_id or not isinstance(saved.get("id"), str)
-        ):
-            raise CommsError(f"Invalid session assignment: {record}.")
-        if saved is None or saved["id"] not in config["identities"]:
-            saved = {"harness": harness, "session_id": session_id, "id": draw_id(paths, config)}
-            atomic_json(record, saved)
-    metadata = config["identities"][saved["id"]]
+def communication_instructions(config):
     template = Path(__file__).with_name("communication-instructions.md").read_text(encoding="utf-8")
-    # Single-pass replacement: metadata cannot introduce more template variables.
     values = {
-        "identity_name": clean_text(metadata["name"]),
-        "identity_id": saved["id"],
-        "personality": json.dumps(clean_text(metadata.get("personality", "")), ensure_ascii=False),
         "speech_model": config.get("speech", {}).get("model", speech.DEFAULT_MODEL),
     }
-    instructions = re.sub(r"\{(identity_name|identity_id|personality|speech_model)\}", lambda m: values[m[1]], template)
-    return {**metadata, **saved, "instructions": instructions}
+    return re.sub(r"\{(speech_model)\}", lambda m: values[m[1]], template)
+
+
+def pane_binding(paths, config, *, allocate=True):
+    try:
+        return pane_identity.resolve(paths, config, private_dir=private_dir, lock=FileLock,
+                                     atomic_json=atomic_json, draw_id=draw_id, error=CommsError, allocate=allocate)
+    except ValueError as exc:
+        raise CommsError(str(exc)) from None
+
+
+def checked_context():
+    try:
+        return tuios_context.context("", strict=True)
+    except tuios_context.ContextError as exc:
+        raise CommsError(str(exc)) from None
+
+
+def identify(paths, config):
+    # Verify pane presence/focus before persisting any allocation.
+    source = checked_context()
+    identity = pane_binding(paths, config)
+    if identity is None:
+        raise CommsError("Cannot resolve identity outside a tuios pane. No caller-selected identity or session fallback is allowed.")
+    prefix = expected_prefix(config, identity, source)
+    return {"name": clean_text(config["identities"][identity]["name"]), "prefix": prefix}
 
 
 def expected_prefix(config, identity, source):
@@ -257,22 +402,32 @@ def expected_prefix(config, identity, source):
     if isinstance(source, dict) and source.get("introduce") is True and isinstance(source.get("session_name"), str):
         session = clean_text(source["session_name"])[:128]
         if session:
-            return f"{clean_text(config['identities'][identity]['name'])} here, of the {session} session."
+            name = clean_text(config['identities'][identity]['name'])
+            position = source.get("position")
+            directions = {"top", "bottom", "left", "right", "top-left", "top-right", "bottom-left", "bottom-right", "center"}
+            if isinstance(position, str) and position in directions:
+                if source.get("position_reference") == "focused-pane" and position != "center":
+                    return f"{name} here, to your {position}."
+                if source.get("position_reference") == "workspace" and type(source.get("workspace")) is int:
+                    preposition = "at" if position in ("top", "bottom") else "on" if position in ("left", "right") else "in"
+                    return (f"{name} here, {preposition} the {position} of workspace {source['workspace']}, "
+                            f"in the {session} session.")
+            return f"{name} here, of the {session} session."
     return ""
 
 
 def prefix_context(config, identity):
     if identity not in config["identities"]:
         raise CommsError("Unknown identity; use an ID from the identity configuration.")
-    try:
-        source = tuios_context.context(config["identities"][identity]["name"], strict=True)
-    except tuios_context.ContextError as exc:
-        raise CommsError(str(exc)) from None
+    source = checked_context()
     return expected_prefix(config, identity, source), source
 
 
 def check_prefix(identity, prefix, message, tts):
-    introduction = re.compile(r"^[^\n]{1,128} here, of the [^\n]{1,128} session\.")
+    direction = r"(?:top-left|top-right|bottom-left|bottom-right|top|bottom|left|right|center)"
+    introduction = re.compile(
+        rf"^[^\n]{{1,128}} here, (?:of the [^\n]{{1,128}} session\.|to your {direction}\."
+        rf"|(?:in|at|on) the {direction} of workspace \d+, in the [^\n]{{1,128}} session\.)")
 
     def after_markup(text):
         return re.sub(r"^(?:(?:<[^>\n]+>|\[[^\]\n]+\])\s*)+", "", text)
@@ -288,7 +443,7 @@ def check_prefix(identity, prefix, message, tts):
             wanted = json.dumps(prefix, ensure_ascii=True) if prefix else '"" (no introduction)'
             raise CommsError(
                 f"Prefix mismatch in {field}. Expected prefix: {wanted}. "
-                f"Run 'agent-comms prefix --id {identity}' immediately before sending; "
+                "Run 'agent-comms context' immediately before sending; "
                 "use that prefix exactly once at the start of both --msg and --tts. "
                 "Focus or workspace may have changed. Message was not queued."
             )
@@ -411,8 +566,11 @@ async def rpc(paths: Paths, command: str, **payload):
 
 
 async def send(paths: Paths, identity: str, message: str, tts=None, source=None):
-    if endpoint(paths).get("prefix_policy") != PREFIX_POLICY:
+    info = endpoint(paths)
+    if info.get("prefix_policy") != PREFIX_POLICY:
         raise CommsError("Listener predates explicit-prefix validation; restart 'agent-comms serve'. Message was not queued.")
+    if isinstance(source, dict) and source.get("position_reference") and info.get("spatial_prefix") is not True:
+        raise CommsError("Listener predates spatial prefixes; restart 'agent-comms serve'. Message was not queued.")
     await rpc(paths, "send", id=identity, msg=message, tts=tts, source=source)
 
 
@@ -433,7 +591,25 @@ def truncate(text: str, width: int) -> str:
     return "".join(result) + "..."
 
 
-def dock_line(message: dict | None, *, color: bool = True, width: int = 96, offline: bool = False, highlight=False) -> str:
+def delivery_prefix(text: str, frame: int, ink: str, preparing: bool) -> str:
+    """Fixed-width activity glyphs and a soft, traveling identity glow (SGR only)."""
+    waves = ("▁▃▅▃▁", "▂▅▇▄▂", "▄▇▅▂▃", "▆▄▂▄▆", "▄▂▄▇▄", "▂▄▇▅▂")
+    orbits = ("[·  ]", "[ · ]", "[  ·]", "[ · ]")
+    badge = orbits[frame % len(orbits)] if preparing else waves[frame % len(waves)]
+    text = badge[:len(text)] + text[5:]
+    # A narrow highlight crosses the identity; caption ink never changes.
+    head = frame % (cell_width(text) + 8) - 4
+    glow = ("97", "38;5;159", "38;5;117", "38;5;75")
+    output, position = [], 0
+    for char in text:
+        distance = abs(position - head)
+        style = glow[distance] if distance < len(glow) else ink
+        output.append(f"\x1b[{style}m{char}")
+        position += cell_width(char)
+    return "".join(output) + "\x1b[0m"
+
+
+def dock_line(message: dict | None, *, color: bool = True, width: int = 96, offline: bool = False, highlight=False, frame: int | None = None) -> str:
     if offline:
         text, ink = "[! ] comms: offline", "33"
     elif message is None:
@@ -446,6 +622,8 @@ def dock_line(message: dict | None, *, color: bool = True, width: int = 96, offl
     # Color the identity/prefix; leave the message itself in the dock's text ink.
     if color:
         prefix, separator, body = text.partition(":")
+        if frame is not None and message is not None and not offline and not highlight:
+            return delivery_prefix(prefix + separator, frame, ink, message.get("phase") == "preparing") + body
         line = f"\x1b[{ink}m{prefix}{separator}\x1b[0m{body}"
         return f"\x1b[7;1m{text}\x1b[0m" if highlight else line
     return text
@@ -490,6 +668,21 @@ async def watcher_speech(paths, state, settings, muted):
                     task.result().remove()
             generation.add_done_callback(cleanup)
             raise
+        # Effects first, then normalize their final output across voices. Each
+        # optional stage falls back independently without interrupting captions.
+        for enabled, process, label in (
+            (settings.get("robot_mode", False), speech.robotize, "robot voice filter"),
+            (settings.get("normalize", True), speech.normalize, "volume normalization"),
+        ):
+            if not enabled:
+                continue
+            try:
+                processed = await process(audio)
+            except (speech.SpeechError, OSError, EOFError, ValueError, asyncio.TimeoutError):
+                print(f"agent-comms: {label} unavailable; keeping input audio.", file=sys.stderr)
+            else:
+                audio.remove()
+                audio = processed
         await rpc(paths, "speech-ready", uid=message["uid"], lease=lease, duration=audio.duration)
         while state["message"].get("phase") != "displaying":
             state["changed"].clear()
@@ -506,7 +699,7 @@ async def watcher_speech(paths, state, settings, muted):
             audio.remove()
 
 
-async def present_message(paths, state, settings, emit, width, muted, flash):
+async def present_message(paths, state, settings, emit, width, muted, flash, vfx=True):
     message = state["message"]
     display_name = truncate(message["name"], max(4, min(24, width // 3)))
     available = max(2, width - cell_width(f"[o_o] {display_name}: "))
@@ -519,19 +712,20 @@ async def present_message(paths, state, settings, emit, width, muted, flash):
             text = speech.page_at(captions, elapsed, message.get("duration", 1))
             since_arrival = time.monotonic() - state["arrived"]
             highlight = flash and since_arrival < 0.6 and int(since_arrival / 0.15) % 2 == 0
-            emit({**message, "name": display_name, "msg": text}, highlight=highlight)
+            frame = int(since_arrival * 10) if vfx else None
+            emit({**message, "name": display_name, "msg": text}, highlight=highlight, frame=frame)
             await asyncio.sleep(0.05)
     finally:
         voice.cancel()
         await asyncio.gather(voice, return_exceptions=True)
 
 
-async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=True, settings=None):
+async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=True, settings=None, vfx=True):
     last, delay = None, 0.25
 
-    def emit(message=None, offline=False, highlight=False):
+    def emit(message=None, offline=False, highlight=False, frame=None):
         nonlocal last
-        line = dock_line(message, color=color, width=width, offline=offline, highlight=highlight)
+        line = dock_line(message, color=color, width=width, offline=offline, highlight=highlight, frame=frame)
         if line != last:
             print(line, flush=True)
             last = line
@@ -566,7 +760,7 @@ async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=Tru
                         presentation.cancel()
                         await asyncio.gather(presentation, return_exceptions=True)
                     state = {"message": message, "changed": asyncio.Event(), "arrived": time.monotonic()}
-                    presentation = asyncio.create_task(present_message(paths, state, settings or {}, emit, width, muted, flash))
+                    presentation = asyncio.create_task(present_message(paths, state, settings or {}, emit, width, muted, flash, vfx and color))
                 response = await read_frame(reader, timeout=False)
         except (CommsError, OSError, asyncio.TimeoutError):
             emit(offline=True)
@@ -752,7 +946,7 @@ class Server:
             listener = await asyncio.start_server(self.handle, "127.0.0.1", 0, limit=MAX_FRAME)
             processor = None
             try:
-                atomic_json(discovery, {"protocol_version": VERSION, "prefix_policy": PREFIX_POLICY,
+                atomic_json(discovery, {"protocol_version": VERSION, "prefix_policy": PREFIX_POLICY, "spatial_prefix": True,
                                         "port": listener.sockets[0].getsockname()[1], "token": self.token})
                 with TerminalDisplay(self.quiet) as self.display, stop_signals(self.stop):
                     self.publish(None)
@@ -791,21 +985,22 @@ def parser():
         target.add_argument("--runtime-dir", default=default, help="Discovery/lock directory (AGENT_COMMS_RUNTIME_DIR)")
     common(result)
     subs = result.add_subparsers(dest="command", required=True)
-    identity = subs.add_parser("id", help="Draw one identity ID")
+    identity = subs.add_parser("context", help="Return caller name and required message prefix as JSON")
     identity.add_argument("--refill", action="store_true", help="Reshuffle without drawing")
+    review = subs.add_parser("voice-review", help="Audition non-approved voices and save approval decisions")
     serve_parser = subs.add_parser("serve", help="Run the single per-user listener")
     serve_parser.add_argument("--quiet", action="store_true", help="Disable the standalone terminal display")
     send_parser = subs.add_parser("send", help="Queue a named message")
-    send_parser.add_argument("--id", required=True)
     send_parser.add_argument("--msg", required=True)
     send_parser.add_argument("--tts", help="Speech text including optional ElevenLabs tags; defaults to --msg")
-    prefix = subs.add_parser("prefix", help="Print the required introduction, or an empty line when none is needed")
-    prefix.add_argument("--id", required=True)
-    prefix.add_argument("--json", action="store_true", help="Print the prefix and checked sender context as JSON")
     watcher = subs.add_parser("watch", help="Stream current messages as tuios push lines")
     watcher.add_argument("--no-color", action="store_true")
     watcher.add_argument("--width", type=int, default=96, help="Maximum display cells (default: 96)")
     watcher.add_argument("--mute", action="store_true", help="Display captions without generating or playing speech")
+    effects = watcher.add_mutually_exclusive_group()
+    effects.add_argument("--vfx", dest="vfx", action="store_true", help="Animate delivery waveform and identity glow (default)")
+    effects.add_argument("--no-vfx", dest="vfx", action="store_false", help="Disable delivery animation; use --no-flash too for no motion")
+    watcher.set_defaults(vfx=True)
     attention = watcher.add_mutually_exclusive_group()
     attention.add_argument("--flash", dest="flash", action="store_true", help="Flash briefly for new messages (default)")
     attention.add_argument("--no-flash", dest="flash", action="store_false", help="Disable the brief attention flash for new messages")
@@ -815,11 +1010,9 @@ def parser():
     history.add_argument("--id", help="Filter by identity ID")
     history.add_argument("--session", help="Filter by tuios session name")
     history.add_argument("--json", action="store_true", help="Print full message records including speech text")
-    session = subs.add_parser("session", help="Resolve a stable session identity and communication instructions")
-    session.add_argument("--harness", required=True, choices=("opencode", "codex"))
-    session.add_argument("--session-id", required=True)
-    session.add_argument("--format", choices=("json", "text"), default="json")
-    for sub in (identity, serve_parser, send_parser, prefix, watcher, session, history):
+    instructions = subs.add_parser("instructions", help="Print shared communication instructions without allocating identity")
+    instructions.add_argument("--format", choices=("json", "text"), default="json")
+    for sub in (identity, review, serve_parser, send_parser, watcher, instructions, history):
         common(sub, defaults=False)
     return result
 
@@ -865,25 +1058,27 @@ def main(argv=None):
             except CommsError:
                 settings = {}
             asyncio.run(watch(paths, color=not args.no_color and "NO_COLOR" not in os.environ, width=args.width,
-                              muted=args.mute, flash=args.flash, settings=settings))
+                              muted=args.mute, flash=args.flash, settings=settings, vfx=args.vfx))
         else:
             config = load_config(paths.config)
-            if args.command == "id":
-                identity = draw_id(paths, config, args.refill)
-                if identity is not None:
-                    print(identity)
+            if args.command == "context":
+                if args.refill:
+                    draw_id(paths, config, refill=True)
+                else:
+                    print(json.dumps(identify(paths, config), ensure_ascii=True, separators=(",", ":")))
+            elif args.command == "voice-review":
+                voice_review(paths, config)
             elif args.command == "send":
-                _, source = prefix_context(config, args.id)
-                validate_message(config, args.id, args.msg, args.tts, source)
-                asyncio.run(send(paths, args.id, args.msg, args.tts, source))
-            elif args.command == "prefix":
-                introduction, source = prefix_context(config, args.id)
-                print(json.dumps({"prefix": introduction, "required": bool(introduction), "context": source}, ensure_ascii=True)
-                      if args.json else introduction)
+                source = checked_context()
+                identity = pane_binding(paths, config, allocate=False)
+                if identity is None:
+                    raise CommsError("Cannot resolve sender outside a tuios pane. Run 'agent-comms context' in the caller pane before sending.")
+                validate_message(config, identity, args.msg, args.tts, source)
+                asyncio.run(send(paths, identity, args.msg, args.tts, source))
             elif args.command == "serve":
                 asyncio.run(Server(paths, config, quiet=args.quiet).run())
-            elif args.command == "session":
-                assignment = session_identity(paths, config, args.harness, args.session_id)
+            elif args.command == "instructions":
+                assignment = {"instructions": communication_instructions(config)}
                 print(assignment["instructions"] if args.format == "text" else json.dumps(assignment, ensure_ascii=True))
         return 0
     except BrokenPipeError:

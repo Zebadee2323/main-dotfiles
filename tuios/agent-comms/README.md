@@ -13,12 +13,13 @@ chmod +x agent-comms
 ./agent-comms serve
 ```
 
-In another terminal:
+In another tuios pane:
 
 ```sh
-ID=$(./agent-comms id)
-PREFIX=$(./agent-comms prefix --id "$ID") || exit 1
-./agent-comms send --id "$ID" --msg "${PREFIX:+$PREFIX }Hello from the agent dock!" --tts "${PREFIX:+$PREFIX }Hello from the agent dock!"
+# Inspect the JSON first, then use its exact name/prefix in a separate call.
+./agent-comms context
+# Replace the prefix placeholders below (omit an empty prefix).
+./agent-comms send --msg "RETURNED_PREFIX Hello from the agent dock!" --tts "RETURNED_PREFIX Hello from the agent dock!"
 ./agent-comms watch
 ./agent-comms history
 ```
@@ -38,40 +39,70 @@ been execution-tested yet. Modern Windows Terminal is recommended for ANSI
 colors.
 
 ```powershell
-$id = .\agent-comms.cmd id
-$prefix = .\agent-comms.cmd prefix --id $id
-if ($LASTEXITCODE -ne 0) { throw "Could not check prefix" }
+$lookup = .\agent-comms.cmd context | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw "Could not resolve identity" }
+$prefix = $lookup.prefix
 $message = if ($prefix) { "$prefix Hello from Windows!" } else { "Hello from Windows!" }
-.\agent-comms.cmd send --id $id --msg $message --tts $message
+.\agent-comms.cmd send --msg $message --tts $message
 ```
 
 ## Commands
 
 | Command | Behavior |
 | --- | --- |
-| `id` | Print only the next ID; refill and shuffle automatically when empty. |
-| `id --refill` | Replace remaining entries with a new shuffled bag; no draw/output. |
+| `context` | Resolve pane identity; print only `name` and `prefix` as JSON. Call before every send. |
+| `context --refill` | Replace remaining entries with a new shuffled bag; no draw/output. |
+| `voice-review` | Audition each non-approved voice, then save a yes/no approval in the config. |
 | `serve` | Own the singleton listener, timed FIFO queue, and terminal display. |
 | `serve --quiet` | Same listener without terminal display. |
-| `prefix --id ID` | Print the exact required introduction, or an empty line if none is needed. |
-| `prefix --id ID --json` | Print the prefix, requirement flag, and checked tuios context. |
-| `send --id ID --msg TEXT --tts SPEECH` | Save and queue clean display text plus separate speech text; acknowledge acceptance, not completion. |
+| `send --msg TEXT --tts SPEECH` | Resolve the pane's identity internally, save and queue display/speech text; acknowledge acceptance, not completion. |
 | `history` | Print the rolling history of at most 10 accepted messages, even offline. |
 | `history --limit 5 --id nova --json` | Filter/limit retained history and optionally include complete metadata and speech text. |
 | `history --session work` | Filter by the sender's tuios session name. |
-| `watch` | Show flashing, timed caption chunks and optionally generate/play speech. |
+| `watch` | Show animated, timed caption chunks and optionally generate/play speech. |
 | `watch --no-color --width 80` | Plain-text output, at most 80 display cells. |
+| `watch --no-vfx --no-flash` | Steady captions without delivery animation or arrival flashes. |
 | `watch --mute --no-flash` | Disable speech generation/playback and the attention flash. |
-| `session --harness opencode --session-id ID` | Resolve/persist a session identity and print JSON metadata plus messaging instructions. |
+| `instructions --format text` | Render shared messaging instructions only; never allocate an identity. |
 
-`session --format text` prints just the instruction block. Plugins use this
-helper instead of repeatedly drawing new IDs.
+`instructions --format text` prints just the instruction block. Both plugins use this
+helper to require a fresh, argument-free `context` call before **every** announcement. Instructions
+contain no assigned name or ID; those come from the caller's tool environment.
+The old `id`, `prefix`, and session-allocation commands have been removed.
 
 `NO_COLOR` also disables watcher colors. Watch width defaults to 96 cells.
 Errors go to stderr and return a nonzero exit status. Offline sends do not launch
 a server. Offline watchers show `[! ] comms: offline` and reconnect with backoff
 from 250 ms to 5 seconds. Ctrl+C stops the foreground command. The server also
 handles SIGTERM for clean shutdown where the OS delivers it.
+
+## Spatial prefixes
+
+`context` checks the current tuios focus and pane geometry on every call:
+
+- Caller is focused: no required prefix.
+- Another pane is focused in the same workspace: `Alice here, to your top-right.`
+  Directions are relative to the focused pane, including non-agent panes. Panes
+  with overlapping vertical/horizontal spans share that row/column; overlapping
+  floating panes use their centers.
+- Another workspace is current: `Alice here, in the top-left of workspace 2,
+  in the work session.` Single-axis positions use `at the bottom`, `at the top`,
+  `on the left`, or `on the right`; a central pane uses `in the center`.
+  Positions use the pane center within thirds of its workspace's pane bounds,
+  excluding minimized, unplaced, and scratch panes.
+- Detached session or unavailable geometry: fall back to the session-only
+  introduction rather than guessing. Outside tuios, identity lookup fails.
+
+Copy the exact prefix once at the start of both `--msg` and `--tts`. `send`
+rechecks focus and geometry, rejecting stale or duplicated introductions before
+queueing. Run `context` again if the layout changes. Restart an existing listener
+after upgrading: discovery advertises `spatial_prefix: true`, and spatial sends
+to older listeners fail with a restart instruction. Watchers need no protocol
+change for spatial prefixes.
+
+Identity allocation inside tuios is pane-scoped, independent of the harness or
+conversation. `send` resolves the pane's persisted binding internally and rejects
+`--id`; the agent never sees or selects the internal ID. See ownership and cleanup below.
 
 ## Configuration and locations
 
@@ -83,24 +114,63 @@ Watchers receive voice IDs from the listener's message metadata and read optiona
 speech model/speed settings from this file; restart watchers after changing those
 settings. Missing local config falls back to the Naia speech defaults.
 
+Run `agent-comms voice-review` in an interactive terminal with
+`ELEVENLABS_API_KEY` set and a supported audio player installed. It generates
+ElevenLabs speech (using API credits), plays one sample at a time, and asks
+`[y/n/q]` during playback. Answer immediately without waiting for the sample to
+finish; your decision stops the current audio. Yes saves `voice_approved = true` in that identity's table; no saves
+`false`. Missing approval means false. Only non-approved identities are reviewed
+on subsequent runs; rejected voices are offered again. Each answer is saved
+immediately, so quitting or Ctrl+C keeps completed decisions. Blank voice IDs
+are skipped. Approval is for this review workflow, not identity allocation or
+ordinary message playback.
+
+Every no answer also adds the ElevenLabs voice ID to `[rejected_voices]`'s
+`ids` array, without duplicates. Agents finding replacement voices should read
+this list and never reuse its IDs. This is persistent rejection history: later
+approval does not automatically remove an ID; edit the list manually if you
+want to allow it again. Missing `voice_approved` does not add an ID to this list.
+
+```toml
+[rejected_voices]
+ids = ["previously-rejected-voice-id"]
+```
+
 ```toml
 display_seconds = 5
 
 [speech]
 model = "eleven_turbo_v2_5"
 speed = 1.0
+normalize = true
+robot_mode = true
 
 [identities.naia]
 name = "Naia"
 eleven_labs_voice_id = ""
-personality = "Friendly, clear, and practical."
+voice_approved = false
 ```
+
+`watch` normalizes speech volume across voices by default using optional `ffmpeg`
+preprocessing (−16 LUFS target, −1 dBTP peak ceiling). Processing finishes before timed captions begin;
+playback and captions use the processed WAV's measured duration. Missing or failing
+FFmpeg falls back to the original audio with a warning. Set `[speech] normalize = false`
+to disable it. Restart watchers to load this setting; `voice-review` is unchanged.
+
+`[speech] robot_mode = true` enables the exact robot filter graph/settings from
+Neovim Naia: layered delays/chorus/tremolo, weighted mixing, EQ, compression,
+5 dB gain, and a 0.92 limiter. The bundled config enables it, matching Naia;
+set `robot_mode = false` for natural voices (also the default when omitted).
+Robot effects run before normalization, and either setting works independently.
+If effects fail or FFmpeg is missing, playback keeps the input audio and warns.
+Caption timing includes the processed audio's effect tail. Restart `watch` after
+changing the config; `voice-review` always auditions the original voice.
 
 The starter roster is Naia, Nova, Atlas, and Echo. Fill each
 `eleven_labs_voice_id` with a voice available to your ElevenLabs account to enable
-that identity's speech. Blank voice IDs deliberately remain text-only. Plugins
-must use personality metadata for agent-comms messages only, **never for normal
-assistant responses**. IDs are not exclusive reservations.
+that identity's speech. Blank voice IDs deliberately remain text-only.
+Identities have names and voices, not personalities. Obsolete `personality`
+fields in older configs are ignored and never returned or injected.
 
 Default locations:
 
@@ -134,6 +204,21 @@ configured IDs starts a new cycle; changing metadata alone does not. Corrupt or
 invalid bag contents are replaced with a fresh shuffled cycle. Invalid JSON
 also produces a warning on stderr. The separate lock file is never replaced or
 deleted while updating bag contents atomically.
+
+## Delivery effects
+
+Colored watchers animate at 10 frames per second while a message is active:
+an orbiting dot while speech is preparing, then a decorative pulsing waveform
+with a cyan/white glow sweeping across the identity. This is an activity effect,
+not an audio-level meter. Captions stay in the dock's normal ink, with unchanged
+page timing and width. Idle and offline output remain static; effects use only
+single-line text and ANSI SGR, not cursor movement or terminal-screen commands.
+
+Effects are enabled by default (`--vfx`); `--no-vfx` disables them independently
+of the existing arrival flash. Use `--no-vfx --no-flash` for no motion.
+`--no-color` or `NO_COLOR` disables both effects and flashes automatically.
+Restart existing watchers to load updated code; the tuios dock command explicitly
+includes `--vfx` so the updated configuration restarts its push component.
 
 ## Transport and lifecycle
 
@@ -204,9 +289,10 @@ as `<break time="0.3s" />`. Turbo does **not** support v3-only `[warm]`/`[excite
 audio tags. Keep `--msg` plain, readable, and equivalent in meaning:
 
 ```sh
-prefix=$(agent-comms prefix --id "$ID") || exit 1
-agent-comms send --id "$ID" --msg "${prefix:+$prefix }Build finished. Tests passed." \
-  --tts "${prefix:+$prefix }Build finished. <break time=\"0.3s\" /> Tests passed."
+agent-comms context
+# Inspect the returned JSON. Use its exact prefix in the next tool call:
+agent-comms send --msg "RETURNED_PREFIX Build finished. Tests passed." \
+  --tts "RETURNED_PREFIX Build finished. <break time=\"0.3s\" /> Tests passed."
 ```
 
 The API returns 24 kHz mono PCM; the watcher wraps it in a temporary private WAV,
@@ -245,51 +331,36 @@ The flash occurs once per new message ID, not on every caption/state update.
 `--no-flash`, `--no-color`, or `NO_COLOR` disables the visual flash. Idle watchers
 do not tick/redraw; only active messages animate caption/attention frames.
 
-## tuios session introductions
+## Mandatory lookup before sending
 
-`prefix --id ID` looks for `TUIOS_ENV=1`, `TUIOS_PANE_ID`/`TUIOS_WINDOW_ID`, and
-`TUIOS_SESSION`, then uses read-only `tuios session-info` and `tuios list-windows`
-commands to verify the sender pane, current workspace, attachment, focus, and
-other agent panes on the same workspace. A two-second timeout bounds each query.
+Agents must call `agent-comms context` in a **separate tool call before every send**,
+read the JSON result, then compose both arguments using its returned name and
+exact prefix. Never cache the result across announcements, inherit an ID from
+another conversation, or combine the lookup and send in a shell variable/one
+tool call. Never pass `--harness`, `--session-id`, or an identity to `context`: those
+flags are rejected. Ownership is derived only from the caller's pane environment.
+Outside tuios, lookup fails clearly rather than accepting an agent-selected owner.
 
-The command returns the exact prefix to put in both display and speech text when the sender's workspace is
-not visible (the session is detached or another workspace is selected), **or**
-the pane is unfocused and that workspace has multiple agent panes:
-
-```text
-Nova here, of the work session. ...
+```json
+{"name":"Veda","prefix":"Veda here, to your top-right."}
 ```
 
-An unfocused sole agent does not need the extra introduction. Shell/editor-only
-panes are not counted as agents. The sender itself counts even if detection is
-still catching up. Outside tuios, the command returns an empty line. If tuios
-environment is present but incomplete, the pane is unrecognized, or a query
-fails/is forbidden, the command returns an error instead of guessing an empty
-prefix. No pane focus or user permissions are changed; forbidden calls are not
-retried through another route.
+Output contains exactly those two fields; `prefix: ""` means no fixed
+introduction is required. Context stays internal. Lookup uses read-only
+`tuios session-info` and `tuios list-windows`, with two-second timeouts.
+Incomplete environment, an unknown pane, or failed/forbidden context queries
+produce an error, not a guessed empty prefix. No pane is focused or manipulated.
 
-**Nothing is automatically inserted.** Before every message, agents must query
-`prefix`, then put its exact result once at the start of both `--msg` and `--tts`
-(before any speech markup), followed by a space and their message. An empty result
-means no introduction. The prefix wording is fixed, not personality-styled; the
-message that follows still uses the identity's personality.
-The prefix already identifies the agent and session: do not repeat a
-self-introduction in the body, even on the first message. Always introduce yourself
-on the first message of a session: use the prefix if nonempty; otherwise introduce
-yourself in your own words in both display and speech text. On later messages, an
-empty prefix does not call for another introduction.
+**Nothing is automatically inserted.** Put nonempty `prefix` once at the start
+of both `--msg` and `--tts`, before markup. Do not add a second introduction.
+With an empty prefix, introduce yourself using the returned name on your first
+message (or when identity changes); otherwise go straight to the update.
 
-`send` queries current context again and checks both strings. Missing, stale,
-wrong, or duplicated introductions return a nonzero error naming the offending
-field and current expected prefix. No message is queued, recorded, displayed, or
-synthesized. The listener also validates the strings against the submitted context
-snapshot before acceptance; it never prepends or rewrites them. This is a workflow
-check, not proof against an authenticated client falsifying its own context.
-
-Focus can change between lookup and send. On mismatch, query again and recompose
-once rather than blindly retrying the previous strings. If context cannot be
-checked, do not submit the message. Prefix lookup itself needs no live listener
-or new identity draw and works from any directory.
+`send` reads the pane identity internally and rechecks spatial context before networking. Missing,
+stale, wrong, or duplicated introductions are rejected without queueing, history,
+or speech. On mismatch, call `context` again and recompose once. Never silently retry.
+The listener checks the submitted snapshot too; this is a workflow check, not
+authentication against clients that can falsify their own context.
 
 ## tuios bottom dock
 
@@ -305,7 +376,7 @@ components:
 center = ["custom/agent-comms", "windows"]
 
 [dock.custom.agent-comms]
-command = 'exec "$HOME/.local/bin/agent-comms" watch --width 80 --flash'
+command = 'exec "$HOME/.local/bin/agent-comms" watch --width 80 --flash --vfx'
 refresh = "push"
 max-width = 80
 ```
@@ -363,10 +434,11 @@ The server plugin injects instructions through the V2 session `context` hook,
 before the **first agent-loop model request**, including new sessions created
 inside the TUI. Empty sessions and title-generation requests do not consume IDs.
 Each tool continuation and post-compaction agent-loop request receives the same
-identity block. Concurrent initialization is coalesced. A bounded 128-session
-cache avoids spawning Python for every tool continuation; reloading/eviction
-resolves the persisted assignment again instead of drawing another identity.
-Reload after changing the communication template or identity metadata.
+lookup instructions. Concurrent initialization is coalesced. A bounded
+128-session cache stores **instructions only**, never a name, ID, or prefix.
+The agent's pre-send `context` call runs in the actual pane's tool environment, rather
+than attributing shared-server plugin processes to the wrong pane. Reload after
+changing the communication template. Metadata is read fresh by `context`.
 
 The plugin uses `python3` on POSIX and `py -3` on Windows. Set
 `AGENT_COMMS_PYTHON` to an executable path (not a shell command) to override it, or
@@ -393,20 +465,35 @@ hooks are left untouched. Helper failures emit only an advisory diagnostic, not
 model-visible raw errors, and never block the main task. Scripts and dependencies
 must be available locally; this is not a cloud-orchestrated Work integration.
 
-### Shared session ownership and messaging policy
+### Ownership and cleanup
 
-Mappings live in private `state/sessions/`, keyed by a hash of **harness +
-session ID**, with a separate per-session OS lock. Only the first lookup draws
-from the normal locked random bag. Resumes, compaction, process restarts, plugin
-reloads, and concurrent callbacks reuse the ID. Forked sessions have new session
-IDs and receive their own draw. Child-agent-specific Codex hooks are not installed
-in this version; the adapter targets SessionStart events.
+Inside tuios, `state/pane-identities.json` maps **daemon + pane UUID** to identity
+under one OS lock. The daemon key hashes the stable host/socket path (or named
+server fallback), never a PID or secret token. Workspace/session moves, harness
+switches, forks in the same pane, and process restarts reuse the binding.
+Separate panes receive distinct IDs; roster exhaustion is explicit, not silent
+identity reuse. Retained bindings reserve their names until cleanup.
 
-Metadata comes from the current config. If an assigned identity is removed from
-the roster, the next lookup reassigns it; a corrupt mapping is an explicit error
-rather than repeatedly consuming bag entries. There is no lease or mapping
-expiration yet. Allocation and mapping are two atomic writes: a crash between
-them can consume an unused bag entry, but cannot expose a partial mapping.
+On `context`, at most hourly per daemon, a complete successful read-only
+`tuios list-windows --all --json` snapshot checks every session, including
+detached panes. Confirmed missing panes get a seven-day grace period. A later
+successful snapshot after that period removes the binding; a returning pane
+clears its missing marker. Failed, forbidden, partial, or inconsistent snapshots
+never remove anything. Only records for the currently queried daemon are pruned;
+records for an unreachable/decommissioned daemon are retained for manual review.
+One shared lock file avoids accumulating a lock file for every retired pane.
+
+There is no harness/session fallback. `context` outside tuios errors instead of
+drawing a new identity or accepting caller-selected identity arguments.
+`context --refill` reshuffles the allocation bag without changing existing bindings.
+
+The first pane lookup creates a new pane binding; legacy session mappings are
+no longer read or written, and are not silently deleted. That can change the
+speaker once on upgrade.
+Metadata comes from current config. Removed identities are reassigned on lookup;
+corrupt mappings fail explicitly. Allocation and binding use atomic writes; a
+crash between them can consume an unused bag entry but cannot expose partial JSON.
+Child-agent-specific Codex hooks are not installed; the adapter targets SessionStart.
 
 [communication-instructions.md](communication-instructions.md) is the single
 template used by both adapters. It carries over the former `inform_user` rhythm:
@@ -417,10 +504,11 @@ cards before the closing message, and prohibits duplicate `nvim_inform_user`
 announcements. It also covers safe quoting, secrets, existing permissions, and
 continuing without retry spam when the listener is offline.
 
-Both adapters explicitly require the configured personality in **only** the
-`--msg` and `--tts` communications text. Agents **must not** adopt it in standard
-responses, explanations, code, or other tool interactions. Speech examples and
-the injected current model name reflect the Naia-default Turbo model.
+Both adapters require normal, clear communication, with no identity-specific
+personality. Speech examples and the injected current model name reflect the
+Naia-default Turbo model. Use `/reload` in OpenCode; refresh/reinstall Codex's
+cached plugin through its normal plugin workflow, then resume the conversation
+so revised instructions replace older hard-coded identity/prefix guidance.
 
 The old voice directives were removed from `nvim/bin/agent-instructions.md` and
 `nvim/bin/agent-reminder.md`; Neovim display/navigation instructions remain.

@@ -19,6 +19,25 @@ DEFAULT_MODEL = "eleven_turbo_v2_5"  # Same default as Naia features/voice/runti
 MAX_SECONDS = 600
 MAX_AUDIO_BYTES = SAMPLE_RATE * 2 * MAX_SECONDS
 REQUEST_TIMEOUT = 25
+# Consistent perceived speech volume across voices, with headroom for peaks.
+NORMALIZE_FILTER = "loudnorm=I=-16:TP=-1.0:LRA=11"
+# Exact graph/settings from nvim/lua/features/voice/runtime.lua (robot_voice_filter).
+ROBOT_FILTER = ",".join((
+    "asplit=4[dry][d1][d2][d3]",
+    "[d1]adelay=22|22,volume=0.78[body]",
+    "[d2]chorus=0.78:0.98:50|68|82:0.38|0.32|0.26:0.38|0.44|0.50:2.5|2.8|3.3,"
+    "tremolo=6:0.05,adelay=12|12,volume=0.68[ai]",
+    "[d3]chorus=0.65:0.9:32|48:0.30|0.24:0.30|0.36:1.8|2.1,volume=0.62[wide]",
+    "[dry][body][ai][wide]amix=4:weights=1 0.82 0.66 0.6[mix]",
+    "[mix]highpass=f=80",
+    "equalizer=f=140:t=q:w=1.2:g=3.2",
+    "equalizer=f=3200:t=q:w=1:g=2.8",
+    "equalizer=f=6000:t=q:w=1:g=1.0",
+    "acompressor=threshold=-20dB:ratio=2.4:attack=12:release=110",
+    "equalizer=f=4500:t=q:w=2:g=-1.0",
+    "volume=5dB",
+    "alimiter=limit=0.92",
+))
 
 
 class SpeechError(Exception):
@@ -120,6 +139,50 @@ def synthesize(directory, voice_id, text, api_key, model=DEFAULT_MODEL, speed=1.
         path.unlink(missing_ok=True)
         raise
     return Audio(path, len(pcm) / (SAMPLE_RATE * 2))
+
+
+async def normalize(audio):
+    """Prepare normalized PCM before caption timing starts; caller owns both files."""
+    return await filter_audio(audio, NORMALIZE_FILTER, "Volume normalization")
+
+
+async def robotize(audio):
+    """Apply Naia's robot effects; caller owns input and returned output files."""
+    return await filter_audio(audio, ROBOT_FILTER, "Robot voice filter")
+
+
+async def filter_audio(audio, graph, label):
+    """Run cancellable FFmpeg preprocessing and measure the resulting WAV."""
+    executable = shutil.which("ffmpeg")
+    if not executable:
+        raise SpeechError(f"{label} requires ffmpeg; keeping input audio.")
+    fd, filename = tempfile.mkstemp(prefix="speech-processed-", suffix=".wav", dir=audio.path.parent)
+    os.close(fd)
+    path, process = Path(filename), None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            executable, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-i", str(audio.path), "-af", graph,
+            "-ar", str(SAMPLE_RATE), "-ac", "1", "-c:a", "pcm_s16le", str(path),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        if await asyncio.wait_for(process.wait(), 30):
+            raise SpeechError(f"{label} failed; keeping input audio.")
+        try:
+            with wave.open(str(path), "rb") as stream:
+                duration = stream.getnframes() / stream.getframerate()
+        except (wave.Error, EOFError):
+            raise SpeechError(f"{label} produced invalid audio; keeping input audio.") from None
+        if duration <= 0:
+            raise SpeechError(f"{label} produced empty audio; keeping input audio.")
+        return Audio(path, duration)
+    except BaseException:
+        # Stop the writer before removing its output, including on disconnect.
+        if process is not None and process.returncode is None:
+            with suppress(ProcessLookupError):
+                process.kill()
+            await process.wait()
+        path.unlink(missing_ok=True)
+        raise
 
 
 def player():

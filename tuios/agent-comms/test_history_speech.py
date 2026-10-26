@@ -22,7 +22,7 @@ class HistoryTests(Fixture):
     def test_accepted_messages_persist_and_print_from_any_directory_while_offline(self):
         server, _ = self.start_server()
         for identity, text in (("a", "first"), ("b", "second"), ("a", "third")):
-            result = self.cli("send", "--id", identity, "--msg", text, "--tts", "[warm] " + text)
+            result = self.transport_send(identity, text, "[warm] " + text)
             self.assertEqual(result.returncode, 0, result.stderr)
         server.kill()
         server.wait(timeout=5)
@@ -125,9 +125,9 @@ class ContextTests(unittest.TestCase):
         self.assertTrue(self.inspect(attached=False)["introduce"])
         self.assertTrue(self.inspect(workspace=2, current=1)["introduce"])
 
-    def test_introduce_when_unfocused_among_multiple_agents_only(self):
+    def test_introduce_when_unfocused_even_if_other_pane_is_not_an_agent(self):
         self.assertTrue(self.inspect(focused="other", other_agent=True)["introduce"])
-        self.assertFalse(self.inspect(focused="other", other_agent=False)["introduce"])
+        self.assertTrue(self.inspect(focused="other", other_agent=False)["introduce"])
         self.assertFalse(self.inspect(focused="own", other_agent=True)["introduce"])
 
     def test_outside_tuios_or_forbidden_query_never_retries_or_blocks(self):

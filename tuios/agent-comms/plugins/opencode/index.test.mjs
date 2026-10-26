@@ -16,7 +16,7 @@ test("appends context without replacing existing instructions or duplicating its
   const calls = []
   const hook = await harness(async (python, args, options) => {
     calls.push({ python, args, options })
-    return { stdout: "Your assigned identity is echo.\nAlways close every turn with agent-comms send." }
+    return { stdout: "You MUST call agent-comms context before EVERY send.\nAlways close every turn with agent-comms send." }
   })
   const original = { type: "text", text: "Existing system instructions" }
   const event = { sessionID: "ses_test", system: [original] }
@@ -24,10 +24,11 @@ test("appends context without replacing existing instructions or duplicating its
   await hook(event)
   assert.equal(event.system.length, 2)
   assert.equal(event.system[0], original)
-  assert.match(event.system[1].text, /echo/)
-  assert.equal(calls.length, 1, "reuse the session assignment across tool continuations")
-  assert.ok(calls[0].args.includes("ses_test"))
-  assert.ok(calls[0].args.includes("opencode"))
+  assert.match(event.system[1].text, /context before EVERY send/)
+  assert.equal(calls.length, 1, "cache instructions only, not a pane identity or prefix")
+  assert.ok(calls[0].args.includes("instructions"))
+  assert.ok(!calls[0].args.includes("--session-id"))
+  assert.ok(!calls[0].args.includes("--harness"))
   assert.equal(calls[0].options.timeout, 15000)
 })
 
@@ -36,7 +37,7 @@ test("coalesces concurrent initialization, handles new sessions and post-compact
   const hook = await harness(async (_, args) => {
     calls++
     await new Promise(resolve => setImmediate(resolve))
-    return { stdout: `Identity for ${args[args.indexOf("--session-id") + 1]}` }
+    return { stdout: "Always call agent-comms context before sending." }
   })
   const one = { sessionID: "ses_one", system: [] }
   const two = { sessionID: "ses_one", system: [] }
@@ -48,7 +49,7 @@ test("coalesces concurrent initialization, handles new sessions and post-compact
   assert.deepEqual(resumed.system, one.system)
   const child = { sessionID: "ses_child", system: [] }
   await hook(child)
-  assert.notDeepEqual(child.system, one.system)
+  assert.deepEqual(child.system, one.system, "all sessions receive the same owner-free instructions")
 })
 
 test("setup never draws; missing session IDs and unavailable helpers do not block work", async () => {

@@ -17,14 +17,14 @@ export function createPlugin(run = execute) {
 
       async function instructions(sessionID) {
         if (ready.has(sessionID)) return ready.get(sessionID)
-        // Share concurrent first requests and bound the in-memory cache. Durable
-        // identity ownership remains in the helper after eviction or reload.
+        // Cache only session-specific lookup instructions, never an identity or
+        // spatial prefix. Agents call context for their actual pane before EVERY send.
         if (!pending.has(sessionID)) {
           const operation = (async () => {
             const configured = ctx.options?.python || process.env.AGENT_COMMS_PYTHON
             const python = configured || (process.platform === "win32" ? "py" : "python3")
             const args = [...(!configured && process.platform === "win32" ? ["-3"] : []), helper,
-              "session", "--harness", "opencode", "--session-id", sessionID, "--format", "text"]
+              "instructions", "--format", "text"]
             const result = await run(python, args, { timeout: 15000, maxBuffer: 128 * 1024, windowsHide: true })
             if (!result.stdout.trim()) throw new Error("Empty agent-comms instructions")
             return result.stdout.trim()

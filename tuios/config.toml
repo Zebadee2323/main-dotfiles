@@ -121,7 +121,7 @@ left = ["mode", "session", "workspaces", "trail", "tape"]
 center = ["custom/agent-comms", "windows"]
 
 [dock.custom.agent-comms]
-command = 'exec "$HOME/.local/bin/agent-comms" watch --width 80 --flash'
+command = 'exec "$HOME/.local/bin/agent-comms" watch --width 80 --flash --vfx'
 refresh = "push"
 max-width = 80
 
