@@ -95,6 +95,8 @@ If unavailable or failing, try the harness's own question tool; if that is also
 unavailable or fails, ask in normal text with the choices. Never use fallbacks to
 bypass an explicit denial or `forbidden` error.
 
+When using must first say the question with `agent-comms send` before executing `ask-human`
+
 ## Failures and permissions
 
 Respect harness permissions/approvals. On send failure or offline listener, continue
