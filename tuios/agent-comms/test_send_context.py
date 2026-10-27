@@ -9,7 +9,8 @@ from test_agent_comms import Fixture
 
 
 class SendContextTests(Fixture):
-    def invoke(self, args, *, refresh_error=None, real_binding=False):
+    def invoke(self, args, *, refresh_error=None, real_binding=False, send_error=None,
+               send_result=None):
         output, errors = io.StringIO(), io.StringIO()
         fresh = {"id": "a", "name": "Alice", "prefix": "Alice here, of the work session."}
         source = {"session_name": "work", "introduce": True}
@@ -17,7 +18,7 @@ class SendContextTests(Fixture):
              patch.object(app, "checked_context", return_value=source), \
              patch.object(app, "pane_binding", **({"wraps": app.pane_binding} if real_binding else {"return_value": "a"})), \
              patch.object(app, "listener_context", new=AsyncMock(return_value=fresh, side_effect=refresh_error)) as refresh, \
-             patch.object(app, "send", new=AsyncMock()) as send, \
+              patch.object(app, "send", new=AsyncMock(side_effect=send_error, return_value=send_result)) as send, \
              patch("sys.stdout", output), patch("sys.stderr", errors):
             code = app.main(["send", *args])
         return code, output.getvalue(), errors.getvalue(), refresh, send, fresh
@@ -100,3 +101,37 @@ class SendContextTests(Fixture):
             self.assertEqual(code, expected)
             refresh.assert_not_called()
             self.assertEqual(send.await_count, 1 if expected == 0 else 0)
+
+    def test_success_prints_only_listener_total(self):
+        prefix = "Alice here, of the work session."
+        for tts in (None, prefix + " Hello world.", prefix + " e\u0301 界."):
+            with self.subTest(tts=tts):
+                message = prefix + " A much longer message for the captions, not the voice."
+                args = ["--id", "a", "--msg", message]
+                if tts is not None:
+                    args.extend(["--tts", tts])
+                code, output, errors, refresh, send, _ = self.invoke(
+                    args, send_result={"estimated_total_seconds": 12.34})
+                self.assertEqual(code, 0)
+                self.assertEqual(errors, "")
+                self.assertEqual(output, "Estimated total time: 12.3 seconds (approximate).\n")
+                send.assert_awaited_once()
+                refresh.assert_not_called()
+
+    def test_older_listener_reports_accepted_without_inventing_total(self):
+        code, output, _, _, send, _ = self.invoke(
+            ["--id", "a", "--msg", "Alice here, of the work session. Ready."],
+            send_result={"ok": True})
+        self.assertEqual(code, 0)
+        self.assertIn("Message queued. Total time unavailable; restart the listener", output)
+        send.assert_awaited_once()
+
+    def test_failed_send_does_not_print_estimate(self):
+        code, output, errors, refresh, send, _ = self.invoke(
+            ["--id", "a", "--msg", "Alice here, of the work session. Ready."],
+            send_error=app.CommsError("offline"))
+        self.assertEqual(code, 1)
+        self.assertEqual(output, "")
+        self.assertIn("offline", errors)
+        send.assert_awaited_once()
+        refresh.assert_not_called()

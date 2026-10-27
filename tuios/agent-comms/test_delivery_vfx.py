@@ -27,8 +27,40 @@ class DeliveryRenderingTests(unittest.TestCase):
 
     def test_preparation_orbit_then_delivery_waveform(self):
         preparing = {**self.message, "phase": "preparing"}
-        self.assertTrue(SGR.sub("", app.dock_line(preparing, frame=0)).startswith("[·  ]"))
-        self.assertTrue(SGR.sub("", app.dock_line(self.message, frame=0)).startswith("▁▃▅▃▁"))
+        self.assertTrue(SGR.sub("", app.dock_line(preparing, frame=0)).startswith("●•···"))
+        badge = SGR.sub("", app.dock_line(self.message, frame=0))[:5]
+        self.assertTrue(all(char in "▁▂▃▄▅▆▇█" for char in badge))
+
+    def test_spectrum_bands_have_independent_heights_and_colors(self):
+        frames = [app.delivery_prefix("[ELE] Alice:", frame, "36", False) for frame in range(80)]
+        badges = [SGR.sub("", frame)[:5] for frame in frames]
+        self.assertGreater(len(set(badges)), 50)
+        self.assertGreater(len(set(SGR.findall(frames[0])[:5])), 2)
+        self.assertTrue(any("█" in badge for badge in badges))
+        self.assertTrue(any("▁" in badge for badge in badges))
+
+    def test_spectrum_and_scanner_follow_identity_palette(self):
+        for preparing in (True, False):
+            cyan = app.delivery_prefix("[ELE] Alice:", 3, "36", preparing)
+            pink = app.delivery_prefix("[ELE] Alice:", 3, "35", preparing)
+            self.assertEqual(SGR.sub("", cyan), SGR.sub("", pink))
+            self.assertNotEqual(cyan, pink)
+
+    def test_scanner_travels_in_both_directions(self):
+        positions = [SGR.sub("", app.delivery_prefix("[ELE] Alice:", frame, "36", True)).index("●")
+                     for frame in range(9)]
+        self.assertEqual(positions, [0, 1, 2, 3, 4, 3, 2, 1, 0])
+
+    def test_tiny_widths_and_untrusted_text_remain_safe(self):
+        message = {**self.message, "name": "Alice\x1b[2J", "msg": "Readable\ncaption\x1b]0;title\x07"}
+        for preparing in (True, False):
+            for width in range(1, 16):
+                line = app.dock_line({**message, "phase": "preparing" if preparing else "displaying"},
+                                     width=width, frame=5)
+                plain = SGR.sub("", line)
+                self.assertLessEqual(app.cell_width(plain), width)
+                self.assertNotIn("\x1b", plain)
+                self.assertNotIn("\n", plain)
 
     def test_plain_idle_and_offline_remain_static(self):
         for message, options in ((self.message, {"color": False}), (None, {}), (self.message, {"offline": True})):

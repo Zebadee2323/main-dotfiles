@@ -829,7 +829,7 @@ async def send(paths: Paths, identity: str, message: str, tts=None, source=None)
     if isinstance(source, dict) and source.get("position_reference") and info.get("spatial_prefix") is not True:
         raise CommsError("Listener predates spatial prefixes; restart 'agent-comms serve'. Message was not queued.")
     pane_env = {key: os.environ[key] for key in PANE_ENV_KEYS if os.environ.get(key)}
-    await rpc(paths, "send", id=identity, msg=message, tts=tts, source=source,
+    return await rpc(paths, "send", id=identity, msg=message, tts=tts, source=source,
               **({"pane_env": pane_env} if pane_env.get("TUIOS_ENV") == "1" else {}))
 
 
@@ -853,18 +853,44 @@ def truncate(text: str, width: int) -> str:
 
 
 def delivery_prefix(text: str, frame: int, ink: str, preparing: bool) -> str:
-    """Fixed-width activity glyphs and a soft, traveling identity glow (SGR only)."""
-    waves = ("▁▃▅▃▁", "▂▅▇▄▂", "▄▇▅▂▃", "▆▄▂▄▆", "▄▂▄▇▄", "▂▄▇▅▂")
-    orbits = ("[·  ]", "[ · ]", "[  ·]", "[ · ]")
-    badge = orbits[frame % len(orbits)] if preparing else waves[frame % len(waves)]
-    text = badge[:len(text)] + text[5:]
-    # A narrow highlight crosses the identity; caption ink never changes.
-    head = frame % (cell_width(text) + 8) - 4
-    glow = ("97", "38;5;159", "38;5;117", "38;5;75")
-    output, position = [], 0
-    for char in text:
+    """A five-cell spectrum/scanner and identity shimmer; never animate captions.
+
+    The spectrum is decorative activity, not measured audio amplitude. Only SGR
+    escapes are emitted so the same frames work in tuios push lines and pipes.
+    """
+    themes = {
+        "36": (23, 30, 37, 44, 87, 159),   # cyan / ice
+        "35": (53, 90, 127, 164, 213, 225), # violet / pink
+        "32": (22, 28, 35, 42, 120, 194),  # emerald / mint
+        "34": (17, 25, 33, 69, 117, 153),  # blue / electric
+        "33": (58, 94, 136, 178, 221, 230), # amber / gold
+    }
+    palette = themes.get(ink, themes["36"])
+    output = []
+    for column in range(min(5, cell_width(text))):
+        if preparing:
+            # A bright radar head with a fading trail sweeps back and forth.
+            sweep = frame % 8
+            head = sweep if sweep <= 4 else 8 - sweep
+            distance = abs(column - head)
+            glyph = ("●", "•", "·", "·", "·")[distance]
+            level = max(0, 5 - distance * 2)
+        else:
+            # Independent, smoothly varying bands avoid a short looping preset.
+            energy = (math.sin(frame * 0.48 + column * 1.35)
+                      + 0.55 * math.sin(frame * 0.23 - column * 0.9)) / 1.55
+            height = max(0, min(7, round(3.5 + 3.5 * energy)))
+            glyph = "▁▂▃▄▅▆▇█"[height]
+            level = min(5, 1 + height * 4 // 7)
+        output.append(f"\x1b[38;5;{palette[level]}m{glyph}")
+    # Keep the name in its identity's palette, with a soft traveling highlight.
+    tail = text[5:]
+    head = (frame * 0.65) % (cell_width(tail) + 10) - 5
+    position = 0
+    for char in tail:
         distance = abs(position - head)
-        style = glow[distance] if distance < len(glow) else ink
+        style = ("97" if distance < 0.8 else f"38;5;{palette[5]}" if distance < 2
+                 else f"38;5;{palette[4]}" if distance < 3.5 else ink)
         output.append(f"\x1b[{style}m{char}")
         position += cell_width(char)
     return "".join(output) + "\x1b[0m"
@@ -1174,6 +1200,8 @@ class Server:
         self.generation = secrets.token_hex(16)  # Public restart identity, not the auth token.
         self.queue = asyncio.Queue(maxsize=QUEUE_LIMIT)
         self.current = None
+        self.pending = {}
+        self.preparing_started_at = None
         self.watchers = {}
         self.tasks = set()
         self.title_refreshes = {}
@@ -1264,9 +1292,31 @@ class Server:
             except asyncio.QueueFull:
                 writer.close()  # A slow subscriber must not hold up global delivery.
 
+    def estimated_message_seconds(self, message):
+        if self.audio_muted:
+            return max(self.config.get("display_seconds", 5), speech.estimate_seconds(message["msg"]))
+        return 0.65 + speech.estimate_seconds(message["tts"])
+
+    def estimated_total_seconds(self):
+        now = time.monotonic()
+        remaining = 0
+        if self.current:
+            if self.current["phase"] == "displaying":
+                remaining = max(0, self.current["started_at"] + self.current["duration"]
+                                + (0.15 if self.audio_duration else 0) - now)
+            else:
+                elapsed = max(0, now - self.preparing_started_at) if self.preparing_started_at is not None else 0
+                if self.audio_muted:
+                    remaining = self.estimated_message_seconds(self.current)
+                else:
+                    remaining = max(0, 0.65 - elapsed) + speech.estimate_seconds(self.current["tts"])
+        return remaining + sum(self.estimated_message_seconds(message) for message in self.pending.values())
+
     async def process(self):
         while True:
             message = await self.queue.get()
+            self.pending.pop(message["uid"], None)
+            self.preparing_started_at = time.monotonic()
             self.claimed.clear()
             self.ready.clear()
             self.lease, self.audio_duration = None, None
@@ -1327,8 +1377,10 @@ class Server:
                         message_history.append(self.paths.state, message)
                 except (OSError, ValueError):
                     raise CommsError("Could not save message history; message was not accepted.") from None
+                self.pending[message["uid"]] = message
                 self.queue.put_nowait(message)
-                await write_frame(writer, {"ok": True, "protocol_version": VERSION})
+                await write_frame(writer, {"ok": True, "protocol_version": VERSION,
+                                           "estimated_total_seconds": self.estimated_total_seconds()})
                 self.schedule_title_refresh(message["id"], request.get("pane_env"))
             elif request.get("command") == "audio":
                 status = self.set_audio(request.get("action"), request.get("seconds"))
@@ -1612,7 +1664,12 @@ def main(argv=None):
                         "Message was not queued."
                     )
                 validate_message(config, identity, args.msg, args.tts, source)
-                asyncio.run(send(paths, identity, args.msg, args.tts, source))
+                result = asyncio.run(send(paths, identity, args.msg, args.tts, source))
+                seconds = result.get("estimated_total_seconds") if isinstance(result, dict) else None
+                if seconds is None:
+                    print("Message queued. Total time unavailable; restart the listener to enable estimates.")
+                else:
+                    print(f"Estimated total time: {seconds:.1f} seconds (approximate).")
             elif args.command == "serve":
                 private_dir(paths.state / "logs")
                 handler = RotatingFileHandler(paths.state / "logs/server.log", maxBytes=2_000_000,

@@ -199,13 +199,6 @@ name = "Emma"
 phonon_voice = "Pippa"
 eleven_labs_voice_id = "bGnz83yTAb7caZSC7BBz"
 
-# ElevenLabs: Tara - Conversational and Expressive
-[identity_groups.phonon.identities.ag_7bb26518]
-voice_approved = true
-name = "Sasha"
-phonon_voice = "Lottie"
-eleven_labs_voice_id = "P7vsEyTOpZ6YUTulin8m"
-
 # ElevenLabs: Clara V - Warm & Articulate
 [identity_groups.phonon.identities.ag_0d555bae]
 voice_approved = true

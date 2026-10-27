@@ -63,7 +63,7 @@ $message = if ($prefix) { "$prefix Hello from Windows!" } else { "Hello from Win
 | `serve` | Own the singleton listener, timed FIFO queue, and terminal display. |
 | `serve --quiet` | Same listener without terminal display. |
 | `service install/start/stop/restart/status/logs/uninstall` | Manage the per-user macOS LaunchAgent or experimental Windows scheduled task; see below. |
-| `send --id ID --msg TEXT --tts SPEECH` | Verify the expected ID against the pane binding, save and queue text; acknowledge acceptance, not completion. |
+| `send --id ID --msg TEXT --tts SPEECH` | Verify the expected ID against the pane binding, save and queue text; print approximate total time until completion. |
 | `history` | Show readable, wrapped history with timestamps and sender/session headings, even offline. Colors appear only in a terminal (respecting `NO_COLOR` / `--no-color`). |
 | `history --raw` | Print unstyled, one-line timestamp/name/message records. |
 | `history --json` | Print full machine-readable records, including speech text. Mutually exclusive with `--raw`. |
@@ -79,6 +79,15 @@ $message = if ($prefix) { "$prefix Hello from Windows!" } else { "Hello from Win
 helper to require an initial, argument-free `context` call and checked `--id` on sends. Instructions
 contain no assigned name or ID; those come from the caller's tool environment.
 The old `id`, `prefix`, and session-allocation commands have been removed.
+
+Successful sends print `Estimated total time: N.N seconds (approximate).`
+The listener adds the current message's remaining time, all queued speech, and
+0.65 seconds of TTS generation overhead per pending message, including the new one.
+Speech estimates use `--tts` (or `--msg` when omitted) and Naia's character-based
+estimate (about 180 words/minute). Current playback uses measured duration when
+available; muted delivery uses caption timing without TTS overhead. This does not
+wait for playback or guarantee completion. Restart an older listener to enable
+queue-aware estimates; older listeners still accept sends but report no total.
 
 `NO_COLOR` also disables watcher colors. Watch width defaults to 96 cells.
 Errors go to stderr and return a nonzero exit status. Offline sends do not launch
