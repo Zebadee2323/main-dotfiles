@@ -332,6 +332,16 @@ class ServerTests(Fixture):
 
 
 class RenderingTests(unittest.TestCase):
+    def test_loaded_tts_mode_badges(self):
+        message = {"id": "a", "name": "Alice", "msg": "hello"}
+        for mode, badge in (("elevenlabs", "[ELE]"), ("phonon", "[PHO]"), ("pocket_tts", "[POC]")):
+            for value in (None, message):
+                with self.subTest(mode=mode, message=value):
+                    self.assertTrue(app.dock_line(value, color=False, mode=mode).startswith(badge))
+                    self.assertIn(badge, app.dock_line(value, mode=mode))
+                    self.assertIn(badge, app.dock_line(value, mode=mode, highlight=True))
+        self.assertTrue(app.dock_line(None, color=False).startswith("[ELE]"))
+
     def test_safe_single_line_and_color(self):
         message = {"id": "a", "name": "Alice", "msg": "hello\nworld\x1b[31mred\x1b[0m\x1b]52;c;bad\x07\u202e"}
         plain = app.dock_line(message, color=False)

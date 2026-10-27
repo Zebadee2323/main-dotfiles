@@ -229,8 +229,22 @@ description = "Mute agent voice for 15 seconds"
 name = "restart-agent-comms"
 key = "prefix+alt+r"
 type = "popup"
+command = 'exec "$HOME/.local/bin/agent-comms" restart all'
+description = "Restart agent-comms everything"
+
+[[keybindings.command]]
+name = "restart-agent-comms-watchers"
+key = "prefix+alt+shift+w"
+type = "popup"
+command = 'exec "$HOME/.local/bin/agent-comms" restart watchers'
+description = "Restart agent-comms watchers only"
+
+[[keybindings.command]]
+name = "restart-agent-comms-service"
+key = "prefix+alt+shift+s"
+type = "popup"
 command = 'exec "$HOME/.local/bin/agent-comms" service restart'
-description = "Restart agent-comms"
+description = "Restart agent-comms service only"
 
 [appearance]
 theme = "ashen"

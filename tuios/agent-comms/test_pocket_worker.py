@@ -184,6 +184,7 @@ class WatcherWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_watcher_owns_worker_but_does_not_start_or_preload_it(self):
         worker = Mock(close=AsyncMock())
         with patch.object(speech, "PocketWorker", return_value=worker), \
+                patch.object(app, "watcher_revision", return_value=""), \
                 patch.object(app, "watch_stream", AsyncMock(side_effect=asyncio.CancelledError())) as stream:
             with self.assertRaises(asyncio.CancelledError):
                 await app.watch(None, color=False, width=80, settings={"mode": "pocket_tts"})
@@ -192,7 +193,9 @@ class WatcherWorkerTests(unittest.IsolatedAsyncioTestCase):
         worker.close.assert_awaited_once()
 
     async def test_non_pocket_watchers_do_not_create_a_pocket_worker(self):
-        with patch.object(speech, "PocketWorker") as worker, patch.object(app, "watch_stream", AsyncMock()):
+        with patch.object(speech, "PocketWorker") as worker, \
+                patch.object(app, "watcher_revision", return_value=""), \
+                patch.object(app, "watch_stream", AsyncMock()):
             await app.watch(None, color=False, width=80, settings={"mode": "phonon"})
         worker.assert_not_called()
 

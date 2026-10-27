@@ -20,11 +20,13 @@ delivery VFX, listener-wide live `audio` toggle/timed mute, and exact-owned
 Those extensions supersede the original v1
 voice/history exclusions below. The current wire protocol is version 2.
 State snapshots include a public listener generation, distinct from the auth
-token. On reconnect to a new generation, updated watchers close their playback
-and worker resources, then re-execute with preserved arguments to reload code
-and configuration. The tuios command palette exposes `Restart agent-comms`, which
-restarts the installed listener service and thereby reloads its watchers without
-clearing pane identities.
+token; listener generation changes do not reload watchers. Watchers poll an
+atomic runtime revision file every 250 ms, even while disconnected. An explicit
+`restart watchers` changes that revision, causing watchers to close playback and
+worker resources and re-execute with preserved arguments. `restart all` first
+restarts the installed listener service, then signals watchers (only on service
+success). `service restart` affects only the listener. The tuios palette exposes
+all three scopes. None clears pane identities or history.
 `context` now returns the caller's ID, name, and exact introduction or empty
 prefix, resolving ownership from the tuios environment only (no harness/session
 identity-selection flags). Outside tuios, lookup fails clearly. Agents must insert

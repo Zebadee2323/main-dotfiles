@@ -163,23 +163,35 @@ settings. Missing local config falls back to the Naia speech defaults.
 ### Restart from tuios
 
 Open tuios's command palette (**Ctrl+A, then `:`**, or Ctrl+A, then Shift+P
-with the bundled keymap), search **Restart agent-comms**, and run it. The fallback
-shortcut is Ctrl+A, then Alt+R. tuios currently requires a key field for custom
-command registration, but the palette can run it without using that shortcut.
+with the bundled keymap), and search **Restart agent-comms**:
 
-This runs `agent-comms service restart`. Each updated watcher detects the new
-listener generation on reconnect, cancels its current presentation, closes its
-Pocket worker, and re-executes itself with the same command-line arguments. Both
-code and configuration are reloaded, including active groups, TTS mode/model,
-speed, effects, and normalization. No PID search or separate dock refresh is
-needed for ordinary configuration changes. Pane bindings and history are not
-cleared. In-progress audio may be interrupted; Pocket starts cold on its next use.
+| Palette action | CLI | Scope |
+| --- | --- | --- |
+| Restart agent-comms everything | `agent-comms restart all` | Restart installed service, then reload watchers. |
+| Restart agent-comms watchers only | `agent-comms restart watchers` | Reload watcher code and speech config; listener unchanged. |
+| Restart agent-comms service only | `agent-comms service restart` | Reload listener code/config, including groups; watchers reconnect without reloading. |
 
-When first upgrading from a version without automatic watcher reload, restart the
-listener and replace old watcher processes once. A dock refresh alone may leave
-an already-running push watcher untouched. Future listener restarts then reload
-watchers automatically. A watcher connected to an older listener without the
-generation field keeps its previous reconnect behavior until both are upgraded.
+The watcher's idle/static badge shows its loaded mode: `[ELE]` (ElevenLabs),
+`[PHO]` (Phonon), or `[POC]` (Pocket TTS). Delivery animations temporarily replace
+the badge; offline status keeps its warning marker.
+
+Changing only `[speech].mode` needs **watchers only**. Group/identity metadata
+changes need the service; use **everything** when changing both. `restart`
+without a scope means `restart all`. tuios requires fallback keys for registration:
+Ctrl+A then Alt+R (everything), Alt+Shift+W (watchers), or Alt+Shift+S (service).
+You can use the palette instead.
+
+Watchers poll an explicit, atomically replaced revision file in their runtime
+directory every 250 ms, including while the listener is offline. On change they
+cancel presentation, close their Pocket worker, and re-execute with the same
+arguments. Service restarts alone do not change this revision and leave a warm
+worker intact. All watchers sharing that runtime directory reload; this does not
+start missing watchers. No pane bindings or history are cleared. Reloading can
+interrupt in-progress audio; Pocket starts cold on its next use. Service restarts
+discard the listener's in-memory message queue.
+
+When first upgrading an older watcher, replace it once to load this behavior.
+A dock refresh alone may leave an already-running push watcher untouched.
 
 ### Identity groups and the random bag
 
@@ -367,11 +379,11 @@ Like Phonon, non-default speed uses pitch-preserving FFmpeg `atempo`; announceme
 effects and volume normalization are unchanged. Review bypasses effects and
 normalization, and supports yes/no/skip/replay/quit for Pocket too.
 
-After changing provider/groups, use **Restart agent-comms** in tuios's palette,
+After changing provider/groups, use **Restart agent-comms everything** in tuios's palette,
 or run:
 
 ```sh
-agent-comms service restart
+agent-comms restart all
 ```
 
 Already-bound panes retain their identity; clear and re-resolve only the panes you
@@ -379,7 +391,7 @@ want to move to the Pocket group. Restart existing reviews to pick up the change
 
 For the one-time upgrade from an older watcher, stop only its verified PID, then
 refresh the dock component. Do not terminate the terminal, tuios daemon, or
-unrelated watcher processes. Updated watchers reload themselves on listener restart.
+unrelated watcher processes. Updated watchers reload on the explicit watcher signal.
 
 Sources: [upstream runtime](https://github.com/kyutai-labs/pocket-tts),
 [model terms](https://huggingface.co/kyutai/pocket-tts),
@@ -412,8 +424,8 @@ Keep the `eleven_labs_voice_id` fields: switching `mode` back to `"elevenlabs"`
 restores them. Failures fall back to captions, **never to the other provider**.
 `voice-review` auditions the provider selected by `mode`; `--all` includes approved voices.
 
-Restart the listener (`agent-comms service restart` for an installed service)
-after changing config; updated watchers automatically reload on reconnect.
+Use `agent-comms restart watchers` after changing speech mode/settings, or
+`agent-comms restart all` when also changing identity groups or listener code.
 Older watchers require one manual restart when first upgrading to this behavior.
 Invalid configs fail closed rather
 than silently selecting ElevenLabs.

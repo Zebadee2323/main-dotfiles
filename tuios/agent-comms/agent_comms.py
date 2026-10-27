@@ -868,13 +868,14 @@ def delivery_prefix(text: str, frame: int, ink: str, preparing: bool) -> str:
     return "".join(output) + "\x1b[0m"
 
 
-def dock_line(message: dict | None, *, color: bool = True, width: int = 96, offline: bool = False, highlight=False, frame: int | None = None) -> str:
+def dock_line(message: dict | None, *, color: bool = True, width: int = 96, offline: bool = False, highlight=False, frame: int | None = None, mode: str = "elevenlabs") -> str:
+    badge = {"elevenlabs": "[ELE]", "phonon": "[PHO]", "pocket_tts": "[POC]"}[mode]
     if offline:
         text, ink = "[! ] comms: offline", "33"
     elif message is None:
-        text, ink = "[o_o] comms: idle", "90"
+        text, ink = f"{badge} comms: idle", "90"
     else:
-        text = f"[o_o] {clean_text(message['name'])}: {clean_text(message['msg'])}"
+        text = f"{badge} {clean_text(message['name'])}: {clean_text(message['msg'])}"
         palette = ("36", "35", "32", "34", "33")
         ink = palette[hashlib.sha256(message["id"].encode()).digest()[0] % len(palette)]
     text = truncate(text, width)
@@ -1012,13 +1013,35 @@ async def present_message(paths, state, settings, emit, width, muted, flash, vfx
         await asyncio.gather(voice, return_exceptions=True)
 
 
+def watcher_revision(paths: Paths):
+    try:
+        return (paths.runtime / "watcher-restart.json").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+
+
+def restart_watchers(paths: Paths):
+    private_dir(paths.runtime)
+    atomic_json(paths.runtime / "watcher-restart.json", {"revision": secrets.token_hex(16)})
+
+
 async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=True, settings=None, vfx=True):
+    revision = watcher_revision(paths)
     worker = (speech.PocketWorker((settings or {}).get("pocket_tts", {}))
               if (settings or {}).get("mode") == "pocket_tts" else None)
+    stream = asyncio.create_task(watch_stream(
+        paths, color=color, width=width, muted=muted, flash=flash,
+        settings=settings, vfx=vfx, pocket_worker=worker))
     try:
-        return await watch_stream(paths, color=color, width=width, muted=muted, flash=flash,
-                                  settings=settings, vfx=vfx, pocket_worker=worker)
+        while True:
+            done, _ = await asyncio.wait((stream,), timeout=0.25)
+            if stream in done:
+                return stream.result()
+            if watcher_revision(paths) != revision:
+                return True
     finally:
+        stream.cancel()
+        await asyncio.gather(stream, return_exceptions=True)
         if worker is not None:
             await worker.close()
 
@@ -1026,8 +1049,8 @@ async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=Tru
 async def watch_stream(paths: Paths, *, color: bool, width: int, muted=False, flash=True,
                        settings=None, vfx=True, pocket_worker=None):
     last, delay = None, 0.25
-    listener_generation = None
     audio = {}
+    mode = (settings or {}).get("mode", "elevenlabs")
 
     def mute_badge():
         if not (muted or audio.get("muted")):
@@ -1037,10 +1060,10 @@ async def watch_stream(paths: Paths, *, color: bool, width: int, muted=False, fl
 
     def emit(message=None, offline=False, highlight=False, frame=None):
         nonlocal last
-        line = dock_line(message, color=color, width=width, offline=offline, highlight=highlight, frame=frame)
+        line = dock_line(message, color=color, width=width, offline=offline, highlight=highlight, frame=frame, mode=mode)
         if not offline and (badge := mute_badge()):
             line = badge + dock_line(message, color=color, width=max(1, width - len(badge)),
-                                     highlight=highlight, frame=frame)
+                                     highlight=highlight, frame=frame, mode=mode)
         if line != last:
             print(line, flush=True)
             last = line
@@ -1053,13 +1076,6 @@ async def watch_stream(paths: Paths, *, color: bool, width: int, muted=False, fl
             while True:
                 if response.get("event") != "state":
                     raise CommsError("Unexpected listener response.")
-                generation = response.get("listener_generation")
-                if isinstance(generation, str) and generation:
-                    if listener_generation is not None and generation != listener_generation:
-                        # Reconnect reached a replacement listener. Tear down audio/model
-                        # before re-executing the watcher with fresh code and config.
-                        return True
-                    listener_generation = generation
                 audio = response.get("audio", {})
                 if state is not None:
                     state["audio_badge_width"] = len(mute_badge())
@@ -1432,6 +1448,8 @@ def parser():
     serve_parser = subs.add_parser("serve", help="Run the single per-user listener")
     serve_parser.add_argument("--quiet", action="store_true", help="Disable the standalone terminal display")
     service = subs.add_parser("service", help="Manage the per-user OS service (macOS launchd / Windows Task Scheduler)")
+    restart = subs.add_parser("restart", help="Reload watchers, optionally restarting the listener service first")
+    restart.add_argument("scope", choices=("all", "watchers"), nargs="?", default="all")
     actions = service.add_subparsers(dest="action", required=True)
     for action in ("install", "start", "stop", "restart", "status", "logs", "uninstall"):
         target = actions.add_parser(action)
@@ -1470,7 +1488,7 @@ def parser():
     history.add_argument("--no-color", action="store_true", help="Disable history heading colors")
     instructions = subs.add_parser("instructions", help="Print shared communication instructions without allocating identity")
     instructions.add_argument("--format", choices=("json", "text"), default="json")
-    for sub in (identity, review, serve_parser, service, send_parser, watcher, instructions, history, audio):
+    for sub in (identity, review, serve_parser, service, restart, send_parser, watcher, instructions, history, audio):
         common(sub, defaults=False)
     return result
 
@@ -1499,6 +1517,9 @@ def main(argv=None):
     args = parser().parse_args(argv)
     try:
         paths = Paths.resolve(args)
+        restart_all = args.command == "restart" and args.scope == "all"
+        if restart_all:
+            args.command, args.action = "service", "restart"
         if args.command == "service":
             if args.action == "logs" and not 1 <= args.lines <= 10000:
                 raise CommsError("--lines must be between 1 and 10000.")
@@ -1523,6 +1544,12 @@ def main(argv=None):
                                             busy=busy, health=health, probe=probe)
             if result:
                 print(json.dumps(result) if isinstance(result, dict) else result)
+            if restart_all:
+                restart_watchers(paths)
+                print("Watcher reload requested.")
+        elif args.command == "restart":
+            restart_watchers(paths)
+            print("Watcher reload requested; listener unchanged.")
         elif args.command == "context" and args.clear_all:
             result = pane_identity.clear_all(paths, private_dir=private_dir, lock=FileLock,
                                              atomic_json=atomic_json, error=CommsError)
