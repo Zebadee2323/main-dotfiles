@@ -72,6 +72,14 @@ environment variable; outside TUIOS it is a no-op.
 
 - Mirrors the **displayed session only**. Background tabs/subagents cannot mark
   it done. A deliberately opened child conversation can be displayed normally.
+- On selecting a session or changing its title, runs `agent-comms context` in the
+  terminal client's pane environment. OpenCode keeps ownership of its native
+  terminal title; the refresh is deferred until its reactive title effects run.
+  Agent-comms then normalizes the identity prefix over the live title. Rapid
+  changes coalesce, lookups are serialized and bounded to 10 s, and failures warn
+  once without blocking mirroring. No polling, automatic retries, service startup,
+  identity caching, or changes to tuios's Thread cache are involved. Requires the
+  updated agent-comms listener; `/reload` loads this plugin change.
 - Preserves the real OpenCode session ID for resume. Serializes state reports,
   guards against stale hydration after tab switches, handles multiple pending
   permissions/forms, failures, interrupts, and cumulative model/cost metadata.

@@ -467,11 +467,17 @@ def identify(paths, config, env=None):
         raise CommsError("Cannot resolve identity outside a tuios pane. No caller-selected identity or session fallback is allowed.")
     prefix = expected_prefix(config, identity, source)
     name = clean_text(config["identities"][identity]["name"])
+    update_pane_title(paths, config, identity, source, env)
+    return {"id": identity, "name": name, "prefix": prefix}
+
+
+def update_pane_title(paths, config, identity, source, env=None):
     try:
-        pane_identity.update_title(paths, name, source, private_dir=private_dir, lock=FileLock, atomic_json=atomic_json, env=env)
+        pane_identity.update_title(paths, clean_text(config["identities"][identity]["name"]), source,
+                                   private_dir=private_dir, lock=FileLock, atomic_json=atomic_json, env=env,
+                                   names=[clean_text(meta["name"]) for meta in config["identities"].values()])
     except (OSError, ValueError, CommsError) as exc:
         print(f"agent-comms: pane name unchanged: {exc}", file=sys.stderr)
-    return {"id": identity, "name": name, "prefix": prefix}
 
 
 PANE_ENV_KEYS = frozenset(("TUIOS_ENV", "TUIOS_PANE_ID", "TUIOS_WINDOW_ID", "TUIOS_SESSION",
@@ -685,7 +691,9 @@ async def send(paths: Paths, identity: str, message: str, tts=None, source=None)
         raise CommsError("Listener predates explicit-prefix validation; restart 'agent-comms serve'. Message was not queued.")
     if isinstance(source, dict) and source.get("position_reference") and info.get("spatial_prefix") is not True:
         raise CommsError("Listener predates spatial prefixes; restart 'agent-comms serve'. Message was not queued.")
-    await rpc(paths, "send", id=identity, msg=message, tts=tts, source=source)
+    pane_env = {key: os.environ[key] for key in PANE_ENV_KEYS if os.environ.get(key)}
+    await rpc(paths, "send", id=identity, msg=message, tts=tts, source=source,
+              **({"pane_env": pane_env} if pane_env.get("TUIOS_ENV") == "1" else {}))
 
 
 def cell_width(text: str) -> int:
@@ -974,6 +982,7 @@ class Server:
         self.current = None
         self.watchers = {}
         self.tasks = set()
+        self.title_refreshes = {}
         self.stop = asyncio.Event()
         self.claimed = asyncio.Event()
         self.ready = asyncio.Event()
@@ -982,6 +991,31 @@ class Server:
         self.audio_muted = False
         self.muted_until = None
         self.audio_timer = None
+
+    def refresh_sender_title(self, env, identity):
+        try:
+            # Never allocate or trust a submitted message's pane attribution.
+            # Verify the persisted binding and the live pane in its own environment.
+            if pane_binding(self.paths, self.config, allocate=False, env=env) != identity:
+                return
+            source = checked_context(env)
+            update_pane_title(self.paths, self.config, identity, source, env)
+        except (OSError, ValueError, CommsError) as exc:
+            print(f"agent-comms: pane name unchanged: {exc}", file=sys.stderr)
+
+    def schedule_title_refresh(self, identity, pane_env):
+        if pane_env is None:
+            return  # Older clients can still send without requesting a refresh.
+        try:
+            env = request_pane_env(pane_env)
+            key = pane_identity.owner(env)[0]
+        except (ValueError, CommsError):
+            return  # Optional presentation work must not reject an accepted send.
+        if key in self.title_refreshes or len(self.title_refreshes) >= CLIENT_LIMIT:
+            return
+        task = asyncio.create_task(asyncio.to_thread(self.refresh_sender_title, env, identity))
+        self.title_refreshes[key] = task
+        task.add_done_callback(lambda _: self.title_refreshes.pop(key, None))
 
     def audio_status(self):
         remaining = max(0, math.ceil(self.muted_until - time.monotonic())) if self.muted_until is not None else None
@@ -1095,6 +1129,7 @@ class Server:
                     raise CommsError("Could not save message history; message was not accepted.") from None
                 self.queue.put_nowait(message)
                 await write_frame(writer, {"ok": True, "protocol_version": VERSION})
+                self.schedule_title_refresh(message["id"], request.get("pane_env"))
             elif request.get("command") == "audio":
                 status = self.set_audio(request.get("action"), request.get("seconds"))
                 await write_frame(writer, {"ok": True, "protocol_version": VERSION, "audio": status})
@@ -1182,6 +1217,9 @@ class Server:
                 for task in list(self.tasks):
                     task.cancel()
                 await asyncio.gather(*list(self.tasks), return_exceptions=True)
+                for task in list(self.title_refreshes.values()):
+                    task.cancel()
+                await asyncio.gather(*list(self.title_refreshes.values()), return_exceptions=True)
                 # wait_closed() also waits for connected clients. Cancel their
                 # handlers first so persistent watchers cannot block shutdown.
                 await listener.wait_closed()

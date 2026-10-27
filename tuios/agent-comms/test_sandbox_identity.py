@@ -30,7 +30,7 @@ elif command == 'list-windows' and '--all' in sys.argv:
 elif command == 'list-windows':
     data = dict(windows=[window], current_workspace=1, focused_window_id=pane)
 elif command == 'get-window':
-    data = dict(success=True, id=pane, display_name='Codex')
+    data = dict(success=True, id=pane, display_name='Codex', title='Codex')
 else:
     data = dict(success=True)
 print(json.dumps(data))

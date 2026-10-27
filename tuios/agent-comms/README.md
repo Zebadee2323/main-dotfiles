@@ -254,16 +254,22 @@ run `tuios refresh-dock agent-comms` in each attached session.
 
 ## Pane name prefixes
 
-`agent-comms context` also names its own pane `[NAME] Original title`. It keeps
-the exact prefix it applied in the daemon/pane-scoped `pane-identities.json`
-binding. Subsequent calls remove only that exact leading prefix before adding
-the current name; they never guess from a list of names or strip arbitrary
-brackets. An externally edited suffix is preserved. If the old prefix is gone,
-the whole current title becomes the new suffix. Identity reassignment retains
-prefix ownership so the former name can be replaced safely.
+`agent-comms context` also names its own pane `[NAME] Current terminal title`.
+Each lookup refreshes the suffix from tuios's live terminal title, not the
+previous custom display name. Missing, wrong, or stacked agent prefixes are
+normalized to the current identity. Only configured agent names and the binding's
+previous exact prefix are recognized; unrelated bracketed labels in the terminal
+title remain intact. Custom pane names are replaced by this normalized live title
+on lookup; there is no full-name ownership tracking.
 
-Names are custom tuios pane names, not terminal escape titles: the suffix is
-the title at naming time, not a continuously updated shell title. Clear the
+Names are custom tuios pane names, not terminal escape titles: they refresh only
+on `context` and accepted pane-scoped `send` calls, not continuously or through
+title-change subscriptions. Send refreshes run best-effort in the listener after
+acceptance, independently of message delivery; naming failures never reject the
+message. The listener verifies the pane's existing identity and live context,
+coalesces concurrent refreshes per pane, and never allocates an identity on send.
+Clients still perform no state writes. Legacy clients without pane addressing
+can send normally but do not request a title refresh. Clear the
 custom name with `tuios set-window -w PANE --name ''` to return to the shell's
 title (the next context call prefixes it again). Naming errors warn on stderr
 without breaking context's three-field JSON or retrying denied requests.

@@ -102,21 +102,27 @@ class PresentationMuteTests(unittest.IsolatedAsyncioTestCase):
 class PaneTitleTests(Fixture):
     pane_env = {"TUIOS_ENV": "1", "TUIOS_PANE_ID": "own", "TUIOS_SESSION": "work"}
 
-    def test_only_exact_owned_prefix_is_replaced_and_suffix_preserved(self):
+    def test_known_agent_prefixes_are_normalized_and_other_labels_preserved(self):
         self.assertEqual(pane_identity.prefixed_title("OC | Fix bug", "[Alice] "), "[Alice] OC | Fix bug")
         self.assertEqual(pane_identity.prefixed_title("[Alice] OC | New task", "[Bob] ", "[Alice] "),
                          "[Bob] OC | New task")
         self.assertEqual(pane_identity.prefixed_title("[Alice] OC", "[Alice] ", "[Alice] "), "[Alice] OC")
         self.assertEqual(pane_identity.prefixed_title("[Human] My title", "[Bob] ", "[Alice] "),
                          "[Bob] [Human] My title")
+        self.assertEqual(pane_identity.prefixed_title("[Alice] [Bob] OC | Task", "[Bob] ", names=["Alice", "Bob"]),
+                         "[Bob] OC | Task")
+        self.assertEqual(pane_identity.prefixed_title("[Work] OC | Task", "[Bob] ", names=["Alice", "Bob"]),
+                         "[Bob] [Work] OC | Task")
 
     def test_idempotent_rename_and_identity_change_use_saved_prefix(self):
-        title = "OC | Original title"
+        title = ""
+        terminal_title = "OC | Original title"
 
         def command(args, **kwargs):
             nonlocal title
             if args[1] == "get-window":
-                return subprocess.CompletedProcess(args, 0, json.dumps({"success": True, "id": "own", "display_name": title}))
+                return subprocess.CompletedProcess(args, 0, json.dumps({"success": True, "id": "own",
+                    "display_name": title or terminal_title, "custom_name": title, "title": terminal_title}))
             title = args[-1]
             return subprocess.CompletedProcess(args, 0, "")
 
@@ -128,10 +134,56 @@ class PaneTitleTests(Fixture):
                                            lock=app.FileLock, atomic_json=app.atomic_json, run=run)
             self.assertEqual(title, "[Bob] OC | Original title")
             self.assertEqual(sum(c.args[0][1] == "set-window" for c in run.call_args_list), 2)
+            terminal_title = "OC | New conversation"
+            pane_identity.update_title(self.paths, "Bob", {"pane_title": title}, private_dir=app.private_dir,
+                                       lock=app.FileLock, atomic_json=app.atomic_json, run=run)
+            self.assertEqual(title, "[Bob] OC | New conversation")
             title = "User renamed this"
             pane_identity.update_title(self.paths, "Bob", {"pane_title": title}, private_dir=app.private_dir,
                                        lock=app.FileLock, atomic_json=app.atomic_json, run=run)
-            self.assertEqual(title, "[Bob] User renamed this")
+            self.assertEqual(title, "[Bob] OC | New conversation")
+            title = "[Bob] User edited the suffix"
+            pane_identity.update_title(self.paths, "Bob", {"pane_title": title}, private_dir=app.private_dir,
+                                       lock=app.FileLock, atomic_json=app.atomic_json, run=run)
+            self.assertEqual(title, "[Bob] OC | New conversation")
+
+    def test_legacy_prefix_uses_live_title_without_full_name_tracking(self):
+        with patch.dict(os.environ, self.pane_env), patch.object(pane_identity, "inventory", return_value={"own"}):
+            app.pane_binding(self.paths, app.load_config(self.paths.config))
+            filename = self.paths.state / "pane-identities.json"
+            state = json.loads(filename.read_text())
+            saved = state["bindings"][pane_identity.owner()[0]]
+            saved["title_prefix"] = "[Alice] "
+            saved["title_name"] = "[Alice] OC | Old conversation"
+            app.atomic_json(filename, state)
+            run = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps({
+                "success": True, "id": "own", "title": "OC | Current conversation",
+                "custom_name": "[Alice] OC | Old conversation", "display_name": "[Alice] OC | Old conversation"})))
+            pane_identity.update_title(self.paths, "Bob", {"pane_title": "old"}, private_dir=app.private_dir,
+                                       lock=app.FileLock, atomic_json=app.atomic_json, run=run)
+            self.assertEqual(run.call_args_list[-1].args[0][-1], "[Bob] OC | Current conversation")
+            saved = json.loads(filename.read_text())["bindings"][pane_identity.owner()[0]]
+            self.assertNotIn("title_name", saved)
+
+    def test_existing_custom_name_is_normalized_from_live_title(self):
+        with patch.dict(os.environ, self.pane_env), patch.object(pane_identity, "inventory", return_value={"own"}):
+            app.pane_binding(self.paths, app.load_config(self.paths.config))
+            run = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps({
+                "success": True, "id": "own", "title": "OC | Task", "custom_name": "My pane"})))
+            pane_identity.update_title(self.paths, "Alice", {"pane_title": "My pane"}, private_dir=app.private_dir,
+                                       lock=app.FileLock, atomic_json=app.atomic_json, run=run)
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_args_list[-1].args[0][-1], "[Alice] OC | Task")
+
+    def test_missing_custom_name_means_pane_has_not_been_named(self):
+        with patch.dict(os.environ, self.pane_env), patch.object(pane_identity, "inventory", return_value={"own"}):
+            app.pane_binding(self.paths, app.load_config(self.paths.config))
+            run = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps({
+                "success": True, "id": "own", "title": "OC | Task", "display_name": "OC | Task"})))
+            pane_identity.update_title(self.paths, "Alice", {"pane_title": "OC | Task"}, private_dir=app.private_dir,
+                                       lock=app.FileLock, atomic_json=app.atomic_json, run=run)
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_args_list[-1].args[0][-1], "[Alice] OC | Task")
 
     def test_naming_failure_does_not_break_context_json_or_retry(self):
         source = {"pane_id": "own", "pane_title": "Task", "introduce": False}

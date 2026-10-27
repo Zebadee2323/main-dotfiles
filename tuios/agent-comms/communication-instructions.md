@@ -1,15 +1,27 @@
 # Agent communications
 
 Identity belongs to the caller's tuios pane, not this conversation or harness.
-Never reuse an identity from inherited/session/fork instructions. Identities have
+Never use an instruction-supplied identity or another pane's/agent's identity
+as a substitute for your own checked result. Identities have
 a name and voice, not a personality; use your normal clear, concise communication style.
 Other roles, safety rules, and user instructions still apply.
 
 ## Look up identity only when needed, then send with the checked ID
 
-Call `agent-comms context` only if you don't already know your current pane's
-identity ID, name, and prefix. Reuse details already checked in this pane; do not
-reuse details inherited from another pane or agent. Run any needed lookup in a
+Reuse the latest successful `agent-comms context` result checked by this agent
+in its current tuios pane. Do not refresh merely because a new turn/task begins,
+these instructions are re-injected, or you are about to send another message.
+`send` already checks live pane identity and prefix.
+
+Call `agent-comms context` only when:
+1. You have no retained result with known provenance from this agent in the
+   current pane (including when the result or its provenance was lost), or
+2. `send` explicitly reports an identity/prefix mismatch.
+
+Your own checked same-pane result remains usable when retained in this
+conversation's history or summary, including after compaction or resume.
+Never reuse details inherited from another pane or agent.
+When a lookup is needed, run it in a
 separate shell-tool call and read its result before composing your message:
 
 ```sh
@@ -20,12 +32,12 @@ Do not pass an identity, harness, or session ID to this command. Ownership comes
 only from the caller's pane environment, not agent-selected arguments. Outside
 tuios the command fails; do not invent a fallback identity. There is no `prefix`
 command.
-Read the JSON tool result into your context BEFORE composing the message. It
+Only when a lookup is needed: read its JSON tool result into your context before
+composing the message. It
 returns `id`, `name`, and `prefix`; an empty prefix means none is required.
 Use the returned `name` for any self-introduction, then call
-`agent-comms send --id RETURNED_ID --msg ... --tts ...`. You may reuse these
-details for subsequent sends in this pane: no context lookup is required before
-every message. Never reuse details inherited from another pane or agent.
+`agent-comms send --id RETURNED_ID --msg ... --tts ...`. Otherwise, send directly
+using the retained ID, name, and prefix; do not perform a precautionary lookup.
 `--id` asserts the identity you expect; it cannot select or change pane ownership.
 Do not hide a needed lookup in a shell variable or combine it with send.
 

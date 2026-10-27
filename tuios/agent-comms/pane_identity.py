@@ -122,15 +122,21 @@ def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, al
         return saved["id"]
 
 
-def prefixed_title(title, prefix, previous=None):
-    """Strip only the exact prefix we own, never a guessed human-name pattern."""
-    if previous and title.startswith(previous):
-        title = title[len(previous):]
+def prefixed_title(title, prefix, previous=None, names=()):
+    """Normalize known agent prefixes, preserving unrelated bracketed labels."""
+    prefixes = {prefix, *(f"[{name}] " for name in names)}
+    if previous:
+        prefixes.add(previous)
+    while True:
+        matched = next((p for p in prefixes if p and title.startswith(p)), None)
+        if matched is None:
+            break
+        title = title[len(matched):]
     return prefix + title
 
 
-def update_title(paths, name, source, *, private_dir, lock, atomic_json, run=None, env=None):
-    """Best-effort custom name, with ownership stored alongside the pane binding."""
+def update_title(paths, name, source, *, private_dir, lock, atomic_json, run=None, env=None, names=()):
+    """Best-effort identity prefix over the pane's live terminal title."""
     env = os.environ if env is None else env
     identity = owner(env)
     if identity is None or "pane_title" not in source:
@@ -149,16 +155,20 @@ def update_title(paths, name, source, *, private_dir, lock, atomic_json, run=Non
             window = json.loads(result.stdout)
             if window.get("success") is not True or window.get("id") != pane:
                 raise ValueError("Cannot verify the caller pane's current name.")
-            title = window.get("display_name")
+            title = window.get("title")
             if not isinstance(title, str):
-                raise ValueError("Pane has no readable display name.")
+                raise ValueError("Pane has no readable terminal title.")
+            custom = window.get("custom_name", "")
+            if not isinstance(custom, str):
+                raise ValueError("Pane has no readable custom name.")
             prefix = f"[{name}] "
             previous = saved.get("title_prefix")
-            updated = prefixed_title(title, prefix, previous if isinstance(previous, str) else None)
-            if updated != title:
+            updated = prefixed_title(title, prefix, previous if isinstance(previous, str) else None, names)
+            if updated != custom:
                 run([tuios_context.executable(env), "set-window", "-s", env["TUIOS_SESSION"], "-w", pane, "--name", updated],
                     capture_output=True, encoding="utf-8", timeout=2, check=True, env=env)
             saved["title_prefix"] = prefix
+            saved.pop("title_name", None)  # Retire the previous full-name ownership scheme.
             atomic_json(filename, state)
     except subprocess.SubprocessError:
         raise ValueError("Pane naming failed or was not permitted; no retry attempted.") from None

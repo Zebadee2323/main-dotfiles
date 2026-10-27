@@ -17,10 +17,10 @@ class InstructionTests(Fixture):
                 result = self.cli("instructions")
                 instructions = json.loads(result.stdout)["instructions"]
                 self.assertIn("separate shell-tool call", instructions)
-                self.assertIn("Read the JSON tool result into your context BEFORE composing", instructions)
+                self.assertIn("Only when a lookup is needed: read its JSON tool result", instructions)
                 self.assertIn("combine it with send", instructions)
                 self.assertIn("It already identifies you and your location", instructions)
-                self.assertIn("no context lookup is required before", instructions)
+                self.assertIn("do not perform a precautionary lookup", instructions)
                 self.assertIn("--id RETURNED_ID", instructions)
                 self.assertIn("Never reuse details inherited from another pane or agent", instructions)
                 self.assertIn("\nagent-comms context\n", instructions)
@@ -33,6 +33,17 @@ class InstructionTests(Fixture):
                 self.assertNotIn("Personality:", instructions)
                 self.assertNotIn("Session identity:", instructions)
                 self.assertFalse((self.paths.state / "bag.json").exists())
+
+    def test_instructions_require_reuse_across_turns_and_compaction(self):
+        instructions = json.loads(self.cli("instructions").stdout)["instructions"]
+        self.assertIn("Reuse the latest successful `agent-comms context` result", instructions)
+        self.assertIn("Do not refresh merely because a new turn/task begins", instructions)
+        self.assertIn("these instructions are re-injected", instructions)
+        self.assertIn("including after compaction or resume", instructions)
+        self.assertIn("result or its provenance was lost", instructions)
+        self.assertIn("`send` explicitly reports an identity/prefix mismatch", instructions)
+        self.assertNotIn("inherited/session/fork instructions", instructions)
+        self.assertNotIn("You may reuse", instructions)
 
     def test_session_rendering_is_identical_and_never_uses_session_to_select_identity(self):
         outputs = [self.cli("instructions").stdout for _ in range(3)]
