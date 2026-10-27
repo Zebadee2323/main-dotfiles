@@ -3,7 +3,7 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Replace the unapproved voices in agent-comms/config.toml. Keep every ID unique, don't use rejected_voices, and don't mark replacements approved. You may add collection voices if necessary. Use fixture configuration and mocked ElevenLabs responses only.",
+      "prompt": "Replace the unapproved voices in agent-comms/config.toml. Keep every ID unique, don't use rejected_elevenlabs_voices, and don't mark replacements approved. You may add collection voices if necessary. Use fixture configuration and mocked ElevenLabs responses only.",
       "expected_output": "Only unapproved identities receive fresh IDs; approved identities, names, and the rejection list are preserved. Returned collection IDs are checked against exclusions. Replacements have verified standard pricing and configured model support; all final IDs are unique. No live API mutations or TTS.",
       "files": []
     },

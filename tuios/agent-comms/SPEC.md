@@ -10,8 +10,9 @@ The program lives in `tuios/agent-comms/` in this dotfiles repository. This
 specification captures the agreed design before implementation.
 
 Later extensions are implemented and documented in README.md: durable `history`,
-separate `send --tts` speech text, watcher-side ElevenLabs speech using the
-Naia-default `eleven_turbo_v2_5`, synchronized caption chunks and attention flashes,
+separate `send --tts` speech text, watcher-side configurable local Phonon 31m or
+ElevenLabs speech (Naia-default `eleven_turbo_v2_5`), backend-specific injected
+speech guidance, synchronized caption chunks and attention flashes,
 explicit checked spatial prefixes returned by `context`, pane-stable identity ownership,
 delivery VFX, listener-wide live `audio` toggle/timed mute, and exact-owned
 `[NAME] ` pane-name prefixes applied by `context`. Personalities and the separate
@@ -165,10 +166,37 @@ updates for a tuios dock component.
 
 ## Identity configuration and bag state
 
-Use TOML keyed by stable identity IDs. Each identity has:
+Use TOML keyed by globally unique stable identity IDs, either legacy
+`[identities.ID]` or `[identity_groups.GROUP.identities.ID]`. A top-level
+`active_groups` array selects the union eligible for bag draws and voice review.
+Omitting it includes all identities. Invalid/empty/duplicate group selections fail
+closed; a membership change invalidates the bag. Existing pane bindings remain
+stable until cleared or their identity is removed. Each identity has:
 
 - `name`: the human-readable display name.
 - `eleven_labs_voice_id`: voice metadata.
+- `phonon_voice`: local Phonon catalog name; blank/missing disables Phonon speech
+  for this identity. `[speech].mode` selects `phonon`, `pocket_tts`, or `elevenlabs` (legacy default).
+  `[speech.phonon]` configures the external `ptts` executable and 31m model repo.
+  Runtime dependencies and cached weights are stored outside the source tree.
+- `phonon_voice_approved`: Phonon-only review approval (default false), independent
+  of ElevenLabs `voice_approved`. `voice-review` uses the configured provider;
+  `--all` includes approved voices, `s` skips without saving any decision, and
+  `r` replays the existing sample without synthesizing again.
+- `pocket_tts_voice`: Pocket preset name or permitted local reference voice path.
+  Local WAV and exported `.safetensors` paths may be absolute, home-relative, or
+  relative to the configuration file's directory (for example `voices/alice.wav`).
+  Config loading resolves local paths for both review and announcement playback
+  without rewriting the source TOML; preset names and URLs remain unchanged.
+  `[speech.pocket_tts]` configures the external executable and language.
+  `pocket_tts_voice_approved` is its independent approval flag (default false).
+  Each watcher lazily owns a private Pocket model worker, started only after a
+  successful speech claim. Voice conditioning states are cached strictly on first
+  use, not preloaded from the roster. Model/cache persist until watcher exit or
+  interrupted/failed synthesis; pipes serialize requests without a network service.
+- `elevenlabs_speed` / `phonon_speed` / `pocket_tts_speed`: independent global or identity multipliers
+  (0.7–1.2). Identity overrides global; provider-specific overrides legacy `speed`
+  within each scope. Used by both watcher playback and voice review.
 
 Illustrative structure, not a finalized identity roster:
 

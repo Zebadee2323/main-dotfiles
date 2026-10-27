@@ -57,7 +57,8 @@ $message = if ($prefix) { "$prefix Hello from Windows!" } else { "Hello from Win
 | `context` | Resolve pane identity; print `id`, `name`, and `prefix` as JSON. Reuse until a send returns fresh context on mismatch. |
 | `context --refill` | Replace remaining entries with a new shuffled bag; no draw/output. |
 | `context --clear` | Release only the caller pane's mapped ID; print `cleared` and the previous `id` as JSON. No replacement is allocated. |
-| `voice-review` | Audition each non-approved voice, then save a yes/no approval in the config. |
+| `voice-review` | Audition non-approved voices using the configured TTS mode; approve, reject, skip unchanged, replay, or quit. |
+| `voice-review --all` | Audition every configured voice, including already-approved ones. |
 | `serve` | Own the singleton listener, timed FIFO queue, and terminal display. |
 | `serve --quiet` | Same listener without terminal display. |
 | `service install/start/stop/restart/status/logs/uninstall` | Manage the per-user macOS LaunchAgent or experimental Windows scheduled task; see below. |
@@ -140,28 +141,82 @@ platforms, resolved relative to the program rather than your working directory
 (including when launched through a symlink). Restart the server after changing it.
 An explicitly selected missing config is an error; it is not silently generated.
 Watchers receive voice IDs and per-identity speed overrides from the listener's message metadata and read optional
-speech model/speed settings from this file; restart watchers after changing those
+speech mode/model/speed settings from this file; restart watchers after changing those
 settings. Missing local config falls back to the Naia speech defaults.
 
-Run `agent-comms voice-review` in an interactive terminal with
-`ELEVENLABS_API_KEY` set and a supported audio player installed. It generates
-ElevenLabs speech (using API credits), plays one sample at a time, and asks
-`[y/n/q]` during playback. Answer immediately without waiting for the sample to
-finish; your decision stops the current audio. Yes saves `voice_approved = true` in that identity's table; no saves
-`false`. Missing approval means false. Only non-approved identities are reviewed
-on subsequent runs; rejected voices are offered again. Each answer is saved
-immediately, so quitting or Ctrl+C keeps completed decisions. Blank voice IDs
-are skipped. Approval is for this review workflow, not identity allocation or
-ordinary message playback.
+### Identity groups and the random bag
 
-Every no answer also adds the ElevenLabs voice ID to `[rejected_voices]`'s
+Identities can live under named groups. Select one or more groups at the **top of
+the file** (before any table headers):
+
+```toml
+active_groups = ["pocket_tts"] # Or ["phonon"], or both.
+
+[identity_groups.phonon.identities.ag_example1]
+name = "Example One"
+phonon_voice = "Juniper"
+
+[identity_groups.pocket_tts.identities.ag_example2]
+name = "Example Two"
+pocket_tts_voice = "alba"
+```
+
+Only identities in `active_groups` fill the random bag and appear in voice review
+(including `--all`). The bundled groups are `phonon` (the original 25 identities,
+including preserved ElevenLabs IDs) and `pocket_tts` (21 identities, one for each
+English preset in Pocket TTS 4.0.1). Six other-language presets are not included
+in the English group. Display names follow the Pocket presets.
+
+Group selection and `[speech].mode` are independent: set both when changing
+provider. Blank voices for the selected provider remain text-only. Multiple
+groups may be active, but each identity needs a voice for the selected provider
+to speak. IDs must be globally unique, even across inactive groups.
+
+Omitting `active_groups` includes all identities, preserving legacy flat
+`[identities.ID]` configs; flat and grouped identities can coexist. Explicit group
+selection excludes ungrouped identities. Empty/unknown/duplicate active group
+lists fail validation. Changing membership rebuilds the bag on its next draw.
+
+**Existing pane bindings remain stable**, even if their group becomes inactive.
+To move a pane to the newly selected group, run `agent-comms context --clear` in
+that pane, then run `agent-comms context`. Never clear other panes' bindings.
+Restart the listener after editing groups; restart dock watchers after editing
+speech settings. Review decisions update the original nested TOML table without
+flattening the file or modifying other groups.
+
+Run `agent-comms voice-review` in an interactive terminal with a supported audio
+player installed. It uses `[speech].mode`: Pocket TTS needs `pocket-tts`, Phonon needs `ptts`; ElevenLabs needs
+`ELEVENLABS_API_KEY` and consumes API credits. Use `agent-comms voice-review --all`
+to include approved voices in the active groups. Samples play without robot effects or normalization,
+but honor the configured speed. The prompt accepts:
+
+- `y` / `yes`: approve this provider's voice.
+- `n` / `no`: mark this provider's voice not approved.
+- `s` / `skip`: stop the sample and move on **without changing any approval or
+  rejection history**, including when reviewing an already-approved voice.
+- `r` / `replay`: restart the same audio sample from the beginning without saving
+  a decision or generating new speech (no additional ElevenLabs request).
+- `q` / `quit` (or EOF): stop the review without changing the current voice.
+
+Answer during or after playback; replay stops any current player before restarting.
+Your approval, skip, or quit stops the current audio immediately.
+Approvals are independent: ElevenLabs uses `voice_approved`, Phonon uses
+`phonon_voice_approved`, and Pocket TTS uses `pocket_tts_voice_approved`.
+Missing approval means false. The default run reviews only
+non-approved voices for the selected provider; rejected and never-approved skipped
+voices are offered again. Each yes/no is saved immediately, so quitting or Ctrl+C
+keeps completed decisions. Blank voices are skipped without changes. Approval is
+for this workflow only, not identity allocation or ordinary message playback.
+
+In ElevenLabs mode, every no answer also adds the voice ID to `[rejected_elevenlabs_voices]`'s
 `ids` array, without duplicates. Agents finding replacement voices should read
 this list and never reuse its IDs. This is persistent rejection history: later
 approval does not automatically remove an ID; edit the list manually if you
 want to allow it again. Missing `voice_approved` does not add an ID to this list.
+Phonon and Pocket TTS decisions do not modify this ElevenLabs rejection list.
 
 ```toml
-[rejected_voices]
+[rejected_elevenlabs_voices]
 ids = ["previously-rejected-voice-id"]
 ```
 
@@ -169,22 +224,195 @@ ids = ["previously-rejected-voice-id"]
 display_seconds = 5
 
 [speech]
+mode = "phonon" # "phonon", "pocket_tts", or "elevenlabs" (legacy default).
 model = "eleven_turbo_v2_5"
-speed = 1.0
+elevenlabs_speed = 1.0
+phonon_speed = 1.0
+pocket_tts_speed = 1.0
 normalize = true
 robot_mode = true
+
+[speech.phonon]
+model = "hf://gradium/phonon-31m-en"
+executable = "~/.local/bin/ptts" # Or "ptts" if it is on the watcher's PATH.
 
 [identities.naia]
 name = "Naia"
 eleven_labs_voice_id = ""
+phonon_voice = "Juniper"
 voice_approved = false
-speed = 1.1 # Optional override of [speech].speed for this identity.
+phonon_voice_approved = false
+elevenlabs_speed = 1.1 # Optional per-identity override.
+phonon_speed = 1.0
 ```
 
-Identity `speed` applies to both `watch` playback and `voice-review`. It must be
-a number from 0.7 to 1.2; omit it to use `[speech].speed` (default 1.0).
-Restart the server after changing identity overrides; restart watchers too when
-first upgrading to a version that supports them.
+### Local Pocket TTS
+
+Install outside the repo, in a separate uv tool environment. Python 3.11 avoids
+dependency compatibility surprises and does not change agent-comms' interpreter:
+
+```sh
+uv tool install --python 3.11 pocket-tts==4.0.1
+# Warm the model/preset cache; output goes outside the repo.
+pocket-tts generate --language english --voice alba --text "Hello from Pocket TTS." --output-path "$TMPDIR/pocket-test.wav"
+```
+
+Select the Pocket group and backend:
+
+```toml
+active_groups = ["pocket_tts"] # Top level, before table headers.
+
+[speech]
+mode = "pocket_tts"
+pocket_tts_speed = 1.0
+
+[speech.pocket_tts]
+executable = "~/.local/bin/pocket-tts"
+language = "english"
+```
+
+Each identity's `pocket_tts_voice` accepts a preset name, a local reference WAV,
+or an exported `.safetensors` voice. Relative file paths resolve from the directory
+containing `config.toml`, not the listener's working directory. Absolute paths
+and `~/` paths also work. For example, store a clone in `agent-comms/voices/`:
+
+```toml
+[identity_groups.pocket_tts.identities.ag_example2]
+name = "My voice"
+pocket_tts_voice = "voices/my-voice.safetensors" # Or "voices/my-voice.wav".
+pocket_tts_voice_approved = false # Audition with agent-comms voice-review first.
+```
+
+From the `agent-comms` directory, export a permitted reference recording once:
+
+```sh
+pocket-tts export-voice --language english /path/to/reference.wav voices/my-voice.safetensors
+```
+
+Export uses up to the first 30 seconds. Use the same model/language for export
+and synthesis; re-export after changing models. Local cloning can
+require access to the upstream gated cloning weights and acceptance of their
+terms. Public preset voices worked without a token in this setup. No terms are
+accepted automatically. Use recordings you have permission to clone; preset
+recordings and model weights can have separate licenses.
+
+Runtime dependencies (including PyTorch) are in `uv tool dir`, outside this repo;
+model and preset assets are cached under `~/.cache/huggingface/hub` and/or
+`~/.cache/pocket_tts`. This environment is substantially larger than Phonon's
+Rust-based runtime. First downloads require network access; cached generation
+needs no paid API key. Missing tools or synthesis failures yield captions, never
+a cloud fallback; voice review reports the failure and stops.
+
+Each watcher owns a private resident Pocket worker in the installed tool's Python
+environment. It starts only after that watcher wins a speech lease for an actual
+announcement. The model loads once, and its in-memory voice-state cache starts
+empty: a voice is loaded only on first use, then reused when selected again.
+There is no roster preloading. Muted, text-only, and unclaimed messages load no
+voice states. Previously downloaded preset files remain in the user disk cache;
+this is separate from the lazy in-memory cache.
+
+The worker stays warm between announcements and watcher reconnects. It uses
+serialized JSON requests through private pipes (no network listener), bounded
+PCM WAV validation, and complete-WAV playback, not streaming playback. A synthesis
+timeout, worker failure, or cancellation during generation stops the worker before
+removing partial audio. Its model/cache are recreated lazily on the next request.
+Cancelling playback or audio effects after generation leaves the idle model warm.
+Exiting the watcher closes its worker; other watchers do not share its memory.
+
+The normal uv install's `pocket-tts` executable locates its environment's Python
+automatically. For unusual installations, set `python_executable` under
+`[speech.pocket_tts]` to an interpreter with Pocket TTS installed. The agent-comms
+listener/core does not import PyTorch.
+
+`voice-review` still uses the one-shot CLI per new sample; replay reuses that
+sample without regeneration. Its auditions do not populate the watcher's cache.
+Like Phonon, non-default speed uses pitch-preserving FFmpeg `atempo`; announcement
+effects and volume normalization are unchanged. Review bypasses effects and
+normalization, and supports yes/no/skip/replay/quit for Pocket too.
+
+After changing provider/groups, restart the listener and refresh dock watchers:
+
+```sh
+agent-comms service restart
+tuios refresh-dock agent-comms
+```
+
+Already-bound panes retain their identity; clear and re-resolve only the panes you
+want to move to the Pocket group. Restart existing reviews to pick up the changes.
+
+**Push-watcher restart caveat:** `tuios refresh-dock` can report success without
+replacing an already-running push watcher. After a code/provider upgrade, verify
+that the actual `agent-comms watch` process restarted. If it did not, stop only
+that verified watcher PID, then refresh the dock component. Do not terminate the
+terminal, tuios daemon, or unrelated watcher processes. A listener restart alone
+does not reload the watcher's Python code or speech settings.
+
+Sources: [upstream runtime](https://github.com/kyutai-labs/pocket-tts),
+[model terms](https://huggingface.co/kyutai/pocket-tts),
+[reference voice licenses](https://huggingface.co/kyutai/tts-voices).
+
+### Local Phonon 31m
+
+Install the optional runtime **outside this repository**, in uv's isolated user
+tool environment (the agent-comms core remains standard-library-only):
+
+```sh
+uv tool install ptts==0.4.2
+ptts --list-voices
+# Warm the user cache before enabling speech; write the sample outside the repo.
+ptts --model hf://gradium/phonon-31m-en --lang en --quant q8_0 --device cpu --voice Juniper -o "$TMPDIR/phonon-test.wav" "Hello from Phonon."
+```
+
+On Windows use an appropriate temporary output path and set `executable` to
+the installed `ptts.exe` path if needed. `uv tool dir` shows the isolated tools;
+model weights (~64 MB) and requested voices go into the user Hugging Face cache
+(normally `~/.cache/huggingface/hub`), not this repo. The first use needs network
+access to download these public assets; cached synthesis is local and needs no
+ElevenLabs or Gradium API key. Phonon 31m weights are Apache 2.0.
+
+Set `[speech] mode = "phonon"` and each identity's `phonon_voice` to a catalog
+name. Blank/missing names keep that identity text-only in Phonon mode. The
+bundled `phonon` group has 25 identities with distinct conversational English voices;
+the existing ElevenLabs approval flags do not represent Phonon auditions.
+Keep the `eleven_labs_voice_id` fields: switching `mode` back to `"elevenlabs"`
+restores them. Failures fall back to captions, **never to the other provider**.
+`voice-review` auditions the provider selected by `mode`; `--all` includes approved voices.
+
+Restart the listener (`agent-comms service restart` for an installed service)
+and dock watchers (`tuios refresh-dock agent-comms` for the bundled dock) after
+upgrading or changing config. Restarting only the listener
+does not upgrade already-running watcher code. Invalid configs fail closed rather
+than silently selecting ElevenLabs.
+
+`agent-comms instructions` renders the selected mode and only that provider's
+speech guidance before the harness plugins inject it. No provider inference by
+the agent is needed. Existing sessions may retain previously injected guidance;
+fresh sessions receive the current mode (or reload the rendered instructions).
+
+Phonon currently uses a cancellable `ptts` subprocess and the existing complete-WAV
+playback path, not streaming playback or a permanently resident model. Playback
+starts after synthesis and optional effects, so the model's advertised streaming
+latency is not the app's latency. SSML break tags from older agents are removed;
+new agents are instructed to send plain text. Non-default speed uses FFmpeg's
+pitch-preserving `atempo` filter; install FFmpeg to use speed overrides. Set
+`robot_mode = false` to audition the unmodified voice (existing effects are retained
+by default in this config). The normalizer remains independently configurable.
+
+`elevenlabs_speed`, `phonon_speed`, and `pocket_tts_speed` configure independent speed multipliers,
+globally in `[speech]` or within each identity table. All apply to `watch` and
+`voice-review` and must be numbers from 0.7 to 1.2. Resolution order:
+
+1. Identity's selected-provider speed (`phonon_speed`, `pocket_tts_speed`, or `elevenlabs_speed`).
+2. Identity's legacy `speed`, if present.
+3. `[speech]` selected-provider speed.
+4. `[speech].speed` (legacy fallback), then 1.0.
+
+ElevenLabs receives the multiplier in `voice_settings.speed`; Phonon and Pocket TTS use local
+FFmpeg `atempo` processing without changing pitch. A provider's setting never
+affects the other provider. The bundled config preserves the previous rates:
+global 1.0 for all providers, and Tarquin's identity override 1.2 for ElevenLabs and Phonon.
+Restart the server and dock watchers after changing speed settings; a fresh
+`voice-review` process reads the current config without a restart.
 
 `watch` normalizes speech volume across voices by default using optional `ffmpeg`
 preprocessing (−16 LUFS target, −1 dBTP peak ceiling). Processing finishes before timed captions begin;

@@ -60,7 +60,8 @@ def timestamp(value):
     return type(value) in (int, float) and math.isfinite(value) and value >= 0
 
 
-def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, allocate=True, clear=False, env=None):
+def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, allocate=True, clear=False, env=None,
+            eligible_ids=None):
     identity = owner(env)
     if identity is None:
         if clear:
@@ -109,11 +110,12 @@ def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, al
             # Throttle failures too; never retry a forbidden query via another route.
             state["scanned"][daemon] = now
         if saved is None or saved["id"] not in config["identities"]:
+            eligible = set(config["identities"]) if eligible_ids is None else set(eligible_ids)
             used = {r["id"] for k, r in state["bindings"].items() if k != key}
-            if not set(config["identities"]) - used:
+            if not eligible - used:
                 atomic_json(filename, state)
                 raise error("No unassigned pane identities remain. Add identities or wait for confirmed stale bindings to be pruned.")
-            for _ in range(2 * len(config["identities"])):
+            for _ in range(2 * len(eligible)):
                 selected = draw_id(paths, config)
                 if selected not in used:
                     break

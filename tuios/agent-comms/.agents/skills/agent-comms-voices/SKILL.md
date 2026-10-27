@@ -16,6 +16,10 @@ silently approving replacements, or introducing voice-specific surcharges.
 2. Read and parse the on-disk TOML afresh on every invocation. The user may have
    approved or rejected voices since the preceding refresh. Treat attachments and
    prior conversation lists as context, not as the current source of truth.
+   Enumerate both legacy `identities` and `identity_groups.GROUP.identities`.
+   Preserve each identity's original table location and group activation settings.
+   Skip identities without an ElevenLabs assignment when refreshing a mixed-provider
+   roster; do not replace Pocket TTS or Phonon voice fields with ElevenLabs voices.
 3. Snapshot the original text and parsed data outside the repository for comparison.
    Inspect existing changes; do not overwrite unrelated work.
 4. Determine the operation:
@@ -35,7 +39,7 @@ silently approving replacements, or introducing voice-specific surcharges.
   unrelated configuration intact. Voice catalog names need not match identity names.
 - Preserve approved voice IDs in normal refreshes. Set every new assignment's
   `voice_approved = false`; never approve a voice on the user's behalf.
-- Exclude every ID in `[rejected_voices].ids`, across all identities. Do not remove
+- Exclude every ID in `[rejected_elevenlabs_voices].ids`, across all identities. Do not remove
   IDs from that list or add IDs merely because you replaced them. Rejection is a
   separate user decision, not a synonym for "previously assigned" or "costly".
 - Ensure assigned IDs are unique across the **entire** configuration, including
@@ -124,7 +128,7 @@ After editing, parse TOML and programmatically check:
 
 1. Every intended target has a different ID and `voice_approved = false`.
 2. Non-target identities and target display names are unchanged.
-3. All assigned IDs are unique and none intersect `rejected_voices.ids`.
+3. All assigned IDs are unique and none intersect `rejected_elevenlabs_voices.ids`.
 4. Every replacement exists in the account and supports the configured model.
 5. All assigned voices pass the current no-surcharge check, or explicitly report
    unresolved exceptions without claiming success.

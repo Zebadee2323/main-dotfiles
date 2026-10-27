@@ -234,6 +234,51 @@ def format_history(messages, *, width=88, color=False):
     return "\n".join(lines)
 
 
+def identity_tables(config):
+    """Index raw TOML identity tables without losing their group or edit location."""
+    legacy = config.get("identities", {})
+    groups = config.get("identity_groups", {})
+    if not isinstance(legacy, dict) or not isinstance(groups, dict):
+        raise CommsError("identities and identity_groups must be tables.")
+    identities = dict(legacy)
+    for group, table in groups.items():
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", group):
+            raise CommsError(f"Invalid identity group: {group!r}")
+        if not isinstance(table, dict) or not isinstance(table.get("identities"), dict) or not table["identities"]:
+            raise CommsError(f"Identity group {group} needs nonempty identities.")
+        for identity, metadata in table["identities"].items():
+            if identity in identities:
+                raise CommsError(f"Duplicate identity ID across groups: {identity}")
+            identities[identity] = metadata
+    return identities
+
+
+def active_identity_ids(config):
+    """Group activation controls new draws, not existing pane ownership."""
+    if "active_groups" not in config:
+        return set(config["identities"])
+    return {identity for group in config["active_groups"]
+            for identity in config["identity_groups"][group]["identities"]}
+
+
+def voice_fields(mode):
+    return {"elevenlabs": ("eleven_labs_voice_id", "voice_approved"),
+            "phonon": ("phonon_voice", "phonon_voice_approved"),
+             "pocket_tts": ("pocket_tts_voice", "pocket_tts_voice_approved")}[mode]
+
+
+def resolve_pocket_voice(voice, config_dir):
+    """Keep preset names/URLs; anchor local voice files to the config directory."""
+    voice = voice.strip()
+    if not voice or "://" in voice:
+        return voice
+    local = Path(voice).expanduser()
+    if (local.is_absolute() or "/" in voice or "\\" in voice
+            or local.suffix):
+        return str(local if local.is_absolute() else config_dir / local)
+    return voice
+
+
 def load_config(path: Path) -> dict:
     # Config is editable source data, not private runtime state. Do not chmod its
     # parent directory or leave lock files next to it.
@@ -248,20 +293,39 @@ def load_config(path: Path) -> dict:
     settings = config.get("speech", {})
     if not isinstance(settings, dict) or not isinstance(settings.get("model", speech.DEFAULT_MODEL), str):
         raise CommsError("speech must be a table with a text model name.")
-    speed = settings.get("speed", 1.0)
-    if type(speed) not in (int, float) or not math.isfinite(speed) or not 0.7 <= speed <= 1.2:
-        raise CommsError("speech.speed must be between 0.7 and 1.2.")
+    if settings.get("mode", "elevenlabs") not in ("elevenlabs", "phonon", "pocket_tts"):
+        raise CommsError("speech.mode must be 'elevenlabs', 'phonon', or 'pocket_tts'.")
+    for provider, keys in (("phonon", ("model", "executable")),
+                           ("pocket_tts", ("language", "executable", "python_executable"))):
+        options = settings.get(provider, {})
+        if not isinstance(options, dict):
+            raise CommsError(f"speech.{provider} must be a table.")
+        for key in keys:
+            if key in options and (not isinstance(options[key], str) or not options[key].strip()):
+                raise CommsError(f"speech.{provider}.{key} must be nonempty text.")
+    for key in ("speed", "elevenlabs_speed", "phonon_speed", "pocket_tts_speed"):
+        speed = settings.get(key, 1.0)
+        if type(speed) not in (int, float) or not math.isfinite(speed) or not 0.7 <= speed <= 1.2:
+            raise CommsError(f"speech.{key} must be between 0.7 and 1.2.")
     if type(settings.get("normalize", True)) is not bool:
         raise CommsError("speech.normalize must be a boolean.")
     if type(settings.get("robot_mode", False)) is not bool:
         raise CommsError("speech.robot_mode must be a boolean.")
-    rejected = config.get("rejected_voices", {})
+    rejected = config.get("rejected_elevenlabs_voices", {})
     if (not isinstance(rejected, dict) or not isinstance(rejected.get("ids", []), list)
             or any(not isinstance(voice, str) or not voice.strip() for voice in rejected.get("ids", []))):
-        raise CommsError("rejected_voices.ids must be an array of nonempty voice ID strings.")
-    identities = config.get("identities")
-    if not isinstance(identities, dict) or not identities:
-        raise CommsError("Config must contain at least one [identities.ID] table.")
+        raise CommsError("rejected_elevenlabs_voices.ids must be an array of nonempty voice ID strings.")
+    identities = identity_tables(config)
+    if not identities:
+        raise CommsError("Config must contain at least one identity table.")
+    config["identities"] = identities  # Runtime index; source remains grouped on disk.
+    if "active_groups" in config:
+        active = config["active_groups"]
+        groups = config.get("identity_groups", {})
+        if (not isinstance(active, list) or not active
+                or any(not isinstance(g, str) or g not in groups for g in active)
+                or len(set(active)) != len(active)):
+            raise CommsError("active_groups must be a nonempty array of unique configured identity group names.")
     for identity, metadata in identities.items():
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", identity):
             raise CommsError(f"Invalid identity ID: {identity!r}")
@@ -270,22 +334,33 @@ def load_config(path: Path) -> dict:
         if len(metadata["name"]) > 128:
             raise CommsError(f"Identity {identity} name is too long (maximum 128 characters).")
         metadata.pop("personality", None)  # Ignore obsolete fields in older user configs.
-        for key in ("eleven_labs_voice_id",):
+        for key in ("eleven_labs_voice_id", "phonon_voice", "pocket_tts_voice"):
             if not isinstance(metadata.get(key, ""), str):
                 raise CommsError(f"Identity {identity}: {key} must be text.")
-        if type(metadata.get("voice_approved", False)) is not bool:
-            raise CommsError(f"Identity {identity}: voice_approved must be a boolean.")
-        if "speed" in metadata:
-            speed = metadata["speed"]
-            if type(speed) not in (int, float) or not math.isfinite(speed) or not 0.7 <= speed <= 1.2:
-                raise CommsError(f"Identity {identity}: speed must be between 0.7 and 1.2.")
+        if "pocket_tts_voice" in metadata:
+            metadata["pocket_tts_voice"] = resolve_pocket_voice(
+                metadata["pocket_tts_voice"], path.resolve().parent)
+        for key in ("voice_approved", "phonon_voice_approved", "pocket_tts_voice_approved"):
+            if type(metadata.get(key, False)) is not bool:
+                raise CommsError(f"Identity {identity}: {key} must be a boolean.")
+        for key in ("speed", "elevenlabs_speed", "phonon_speed", "pocket_tts_speed"):
+            if key in metadata:
+                speed = metadata[key]
+                if type(speed) not in (int, float) or not math.isfinite(speed) or not 0.7 <= speed <= 1.2:
+                    raise CommsError(f"Identity {identity}: {key} must be between 0.7 and 1.2.")
     return config
+
+
+def speech_speed(settings, metadata, mode, *, legacy_key="speed"):
+    """Identity overrides global; provider-specific overrides legacy at each scope."""
+    key = f"{mode}_speed"
+    return metadata.get(key, metadata.get(legacy_key, settings.get(key, settings.get("speed", 1.0))))
 
 
 def record_rejected_voice(source: str, voice_id: str) -> str:
     """Add to the persistent avoidance list without rewriting unrelated TOML."""
     expected = tomllib.loads(source)
-    rejected = expected.setdefault("rejected_voices", {})
+    rejected = expected.setdefault("rejected_elevenlabs_voices", {})
     ids = rejected.setdefault("ids", [])
     if voice_id in ids:
         return source
@@ -293,38 +368,39 @@ def record_rejected_voice(source: str, voice_id: str) -> str:
     encoded = json.dumps(voice_id)
     # Validate each candidate structurally, so lookalike text inside multiline
     # personality strings or other tables can never be edited by accident.
-    candidates = [source + f"\n[rejected_voices]\nids = [{encoded}]\n"]
+    candidates = [source + f"\n[rejected_elevenlabs_voices]\nids = [{encoded}]\n"]
     candidates += [source[:m.end()] + f"{encoded}, " + source[m.end():]
                    for m in re.finditer(r"(?m)^[ \t]*ids[ \t]*=[ \t]*\[", source)]
     candidates += [source[:m.end()] + f"\nids = [{encoded}]" + source[m.end():]
-                   for m in re.finditer(r"(?m)^\[rejected_voices\][ \t]*(?:#[^\n]*)?$", source)]
+                   for m in re.finditer(r"(?m)^\[rejected_elevenlabs_voices\][ \t]*(?:#[^\n]*)?$", source)]
     for candidate in candidates:
         try:
             if tomllib.loads(candidate) == expected:
                 return candidate
         except ValueError:
             pass
-    raise CommsError("Cannot safely edit rejected_voices; use a [rejected_voices] table with an ids array.")
+    raise CommsError("Cannot safely edit rejected_elevenlabs_voices; use a [rejected_elevenlabs_voices] table with an ids array.")
 
 
-def save_voice_approval(paths: Paths, identity: str, voice_id: str, approved: bool) -> None:
+def save_voice_approval(paths: Paths, identity: str, voice_id: str, approved: bool, *, mode="elevenlabs") -> None:
     """Save approval and rejection history together, preserving unrelated config."""
+    voice_field, approval_field = voice_fields(mode)
     private_dir(paths.state)
     with FileLock(paths.state / "voice-review.lock"):
         path = paths.config.resolve()  # Keep a symlinked config intact.
         original = path.read_text(encoding="utf-8")
         expected = tomllib.loads(original)
-        metadata = expected.get("identities", {}).get(identity)
-        if metadata is None or metadata.get("eleven_labs_voice_id") != voice_id:
+        metadata = identity_tables(expected).get(identity)
+        if metadata is None or metadata.get(voice_field, "").strip() != voice_id:
             raise CommsError(f"Identity {identity} changed during review; approval was not saved.")
-        metadata["voice_approved"] = approved
+        metadata[approval_field] = approved
         value = "true" if approved else "false"
         # Try surgical edits, accepting one only if TOML parsing proves that it
         # changes exactly the intended field (not text inside a personality).
         edits = [(m.start(1), m.end(1), value) for m in re.finditer(
-            r"(?m)^\s*voice_approved\s*=\s*(true|false)\b", original)]
-        edits += [(m.end(), m.end(), f"\nvoice_approved = {value}") for m in re.finditer(
-            r"(?m)^\s*\[identities\.[^\n]+\][ \t]*(?:#[^\n]*)?$", original)]
+            rf"(?m)^\s*{approval_field}\s*=\s*(true|false)\b", original)]
+        edits += [(m.end(), m.end(), f"\n{approval_field} = {value}") for m in re.finditer(
+            r"(?m)^\s*\[(?:identities|identity_groups\.[^\]\n]+\.identities)\.[^\n]+\][ \t]*(?:#[^\n]*)?$", original)]
         for start, end, replacement in edits:
             updated = original[:start] + replacement + original[end:]
             try:
@@ -333,8 +409,8 @@ def save_voice_approval(paths: Paths, identity: str, voice_id: str, approved: bo
             except ValueError:
                 pass
         else:
-            raise CommsError(f"Cannot safely edit {identity}; use a [identities.{identity}] table in the config.")
-        if not approved:
+            raise CommsError(f"Cannot safely edit {identity}; use an explicit identity table in the config.")
+        if not approved and mode == "elevenlabs":
             updated = record_rejected_voice(updated, voice_id)
         fd, filename = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
         try:
@@ -351,7 +427,7 @@ def save_voice_approval(paths: Paths, identity: str, voice_id: str, approved: bo
                 os.unlink(filename)
 
 
-async def voice_review_decision(audio, executable: str, name: str) -> bool | None:
+async def voice_review_decision(audio, executable: str, name: str) -> bool | str | None:
     """Read the decision during playback, stopping audio when a decision is made."""
     playback = asyncio.create_task(speech.play(audio, executable))
     try:
@@ -359,14 +435,23 @@ async def voice_review_decision(audio, executable: str, name: str) -> bool | Non
         while True:
             try:
                 answer = (await asyncio.to_thread(
-                    input, f"Do you like {name}'s voice? [y/n/q] ")).strip().lower()
+                    input, f"Do you like {name}'s voice? [y/n/s/r/q] (s skips, r replays) ")).strip().lower()
             except EOFError:
                 return None
             if answer in ("q", "quit"):
                 return None
+            if answer in ("s", "skip"):
+                return "skip"
+            if answer in ("r", "replay"):
+                playback.cancel()
+                with suppress(asyncio.CancelledError):
+                    await playback
+                playback = asyncio.create_task(speech.play(audio, executable))
+                await asyncio.sleep(0)
+                continue
             if answer in ("y", "yes", "n", "no"):
                 return answer in ("y", "yes")
-            print("Please answer y, n, or q.")
+            print("Please answer y, n, s (skip unchanged), r (replay), or q.")
     finally:
         # speech.play's cancellation cleanup terminates the player before the
         # next identity starts or its temporary audio file is removed.
@@ -375,27 +460,32 @@ async def voice_review_decision(audio, executable: str, name: str) -> bool | Non
             await playback
 
 
-def voice_review(paths: Paths, config: dict) -> None:
+def voice_review(paths: Paths, config: dict, *, all_voices=False) -> None:
+    settings = config.get("speech", {})
+    mode = settings.get("mode", "elevenlabs")
+    voice_field, approval_field = voice_fields(mode)
+    active = active_identity_ids(config)
     pending = [(identity, metadata) for identity, metadata in config["identities"].items()
-               if not metadata.get("voice_approved", False)]
+               if identity in active and (all_voices or not metadata.get(approval_field, False))]
     if not pending:
         print("All identity voices are approved.")
         return
     if not sys.stdin.isatty():
         raise CommsError("voice-review requires an interactive terminal.")
     api_key = os.environ.get("ELEVENLABS_API_KEY", "")
-    if not api_key:
+    if mode == "elevenlabs" and not api_key:
         raise CommsError("Set ELEVENLABS_API_KEY before running voice-review.")
     executable = speech.player()
     if executable is None:
         raise CommsError("No audio player available; install afplay, ffplay, or aplay.")
-    settings = config.get("speech", {})
-    print(f"Reviewing {len(pending)} non-approved voices. Decisions are saved immediately; q quits.")
+    selection = "all" if all_voices else "non-approved"
+    print(f"Reviewing {len(pending)} {selection} voices using {mode}. "
+          "Decisions are saved immediately; s skips unchanged, r replays, q quits.")
     with tempfile.TemporaryDirectory(prefix="agent-comms-voice-review-") as directory:
         for index, (identity, metadata) in enumerate(pending, 1):
             name = clean_text(metadata["name"])
-            voice_id = metadata.get("eleven_labs_voice_id", "").strip()
-            print(f"\n[{index}/{len(pending)}] {name} ({identity})", flush=True)
+            voice_id = metadata.get(voice_field, "").strip()
+            print(f"\n[{index}/{len(pending)}] {name} ({identity}) — {mode}: {voice_id}", flush=True)
             if not voice_id:
                 print("No voice ID configured; skipping without approval.")
                 continue
@@ -403,24 +493,39 @@ def voice_review(paths: Paths, config: dict) -> None:
                     "We found one small issue, and the next step is to check the fix together. "
                     "How does this voice sound to you?")
             try:
-                audio = speech.synthesize(directory, voice_id, text, api_key,
-                                          settings.get("model", speech.DEFAULT_MODEL),
-                                          metadata.get("speed", settings.get("speed", 1.0)))
+                speed = speech_speed(settings, metadata, mode)
+                if mode == "phonon":
+                    audio = asyncio.run(speech.synthesize_phonon(
+                        directory, voice_id, text, settings.get("phonon", {}), speed))
+                elif mode == "pocket_tts":
+                    audio = asyncio.run(speech.synthesize_pocket_tts(
+                        directory, voice_id, text, settings.get("pocket_tts", {}), speed))
+                else:
+                    audio = speech.synthesize(directory, voice_id, text, api_key,
+                                              settings.get("model", speech.DEFAULT_MODEL), speed)
                 try:
                     approved = asyncio.run(voice_review_decision(audio, executable, name))
                 finally:
                     audio.remove()
-            except (speech.SpeechError, OSError) as exc:
+            except (speech.SpeechError, OSError, asyncio.TimeoutError) as exc:
                 raise CommsError(f"Cannot audition {name}: {exc}") from None
             if approved is None:
                 return
-            save_voice_approval(paths, identity, voice_id, approved)
-            print("Approved." if approved else "Not approved; voice ID added to rejected_voices.ids. Will be offered again next time.")
+            if approved == "skip":
+                print("Skipped; approval unchanged.")
+                continue
+            save_voice_approval(paths, identity, voice_id, approved, mode=mode)
+            if approved:
+                print("Approved.")
+            elif mode == "elevenlabs":
+                print("Not approved; voice ID added to rejected_elevenlabs_voices.ids. Will be offered again next time.")
+            else:
+                print("Not approved; will be offered again next time.")
 
 
 def draw_id(paths: Paths, config: dict, refill: bool = False) -> str | None:
     private_dir(paths.state)
-    ids = sorted(config["identities"])
+    ids = sorted(active_identity_ids(config))
     state_file = paths.state / "bag.json"
     with FileLock(paths.state / "bag.lock"):
         state = {}
@@ -447,16 +552,28 @@ def draw_id(paths: Paths, config: dict, refill: bool = False) -> str | None:
 
 def communication_instructions(config):
     template = Path(__file__).with_name("communication-instructions.md").read_text(encoding="utf-8")
+    settings = config.get("speech", {})
+    mode = settings.get("mode", "elevenlabs")
+    if mode in ("phonon", "pocket_tts"):
+        label = "Phonon" if mode == "phonon" else "Pocket TTS"
+        guidance = (f"TTS mode: `{mode}` (local {label}). Use plain text only, without SSML "
+                    "or bracketed acting tags. Use punctuation for pauses.")
+    else:
+        guidance = (f"TTS mode: `elevenlabs`. ElevenLabs model: `{settings.get('model', speech.DEFAULT_MODEL)}`. "
+                    "For Naia-default Turbo, use natural phrasing/punctuation and occasional SSML pauses "
+                    '(e.g. `<break time="0.3s" />`), never v3-only tags (`[warm]`, `[excited]`). '
+                    "Plain text is valid; avoid gratuitous markup.")
     values = {
-        "speech_model": config.get("speech", {}).get("model", speech.DEFAULT_MODEL),
+        "speech_guidance": guidance,
     }
-    return re.sub(r"\{(speech_model)\}", lambda m: values[m[1]], template)
+    return re.sub(r"\{(speech_guidance)\}", lambda m: values[m[1]], template)
 
 
 def pane_binding(paths, config, *, allocate=True, clear=False, env=None):
     try:
         return pane_identity.resolve(paths, config, private_dir=private_dir, lock=FileLock,
-                                     atomic_json=atomic_json, draw_id=draw_id, error=CommsError, allocate=allocate, clear=clear, env=env)
+                                     atomic_json=atomic_json, draw_id=draw_id, error=CommsError, allocate=allocate,
+                                     clear=clear, env=env, eligible_ids=active_identity_ids(config))
     except ValueError as exc:
         raise CommsError(str(exc)) from None
 
@@ -606,9 +723,14 @@ def validate_message(config: dict, identity, message, tts=None, source=None) -> 
     check_prefix(identity, expected_prefix(config, identity, source), message, tts)
     metadata = config["identities"][identity]
     result = {"id": identity, "name": clean_text(metadata["name"]), "msg": message,
-              "tts": tts, "voice_id": metadata.get("eleven_labs_voice_id", "").strip()}
+              "tts": tts, "voice_id": metadata.get("eleven_labs_voice_id", "").strip(),
+              "phonon_voice": metadata.get("phonon_voice", "").strip(),
+              "pocket_tts_voice": metadata.get("pocket_tts_voice", "").strip()}
     if "speed" in metadata:
         result["voice_speed"] = metadata["speed"]
+    for key in ("elevenlabs_speed", "phonon_speed", "pocket_tts_speed"):
+        if key in metadata:
+            result[key] = metadata[key]
     if isinstance(source, dict) and isinstance(source.get("session_name"), str):
         session = clean_text(source["session_name"])[:128]
         result["session_name"] = session
@@ -770,7 +892,11 @@ async def watcher_speech(paths, state, settings, muted):
     message = state["message"]
     key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
     executable = speech.player()
-    if muted or not key or not message.get("voice_id") or not executable or message.get("phase") != "preparing":
+    mode = settings.get("mode", "elevenlabs")
+    field = "voice_id" if mode == "elevenlabs" else voice_fields(mode)[0]
+    voice = message.get(field)
+    if (muted or not voice or (mode == "elevenlabs" and not key)
+            or not executable or message.get("phase") != "preparing"):
         return
     audio, lease, workspace, generation = None, None, None, None
     try:
@@ -785,15 +911,29 @@ async def watcher_speech(paths, state, settings, muted):
         def generate():
             generated = speech.synthesize(directory, message["voice_id"], message["tts"], key,
                                           settings.get("model", speech.DEFAULT_MODEL),
-                                          message.get("voice_speed", settings.get("speed", 1.0)))
+                                          speech_speed(settings, message, mode, legacy_key="voice_speed"))
             result["audio"] = generated
             if cancelled.is_set():
                 generated.remove()
             return generated
 
-        generation = asyncio.create_task(asyncio.to_thread(generate))
+        if mode == "phonon":
+            audio = await speech.synthesize_phonon(
+                directory, voice, message["tts"], settings.get("phonon", {}),
+                speech_speed(settings, message, mode, legacy_key="voice_speed"))
+        elif mode == "pocket_tts":
+            speed = speech_speed(settings, message, mode, legacy_key="voice_speed")
+            worker = state.get("pocket_worker")
+            if worker is not None:
+                audio = await worker.synthesize(directory, voice, message["tts"], speed)
+            else:
+                audio = await speech.synthesize_pocket_tts(
+                    directory, voice, message["tts"], settings.get("pocket_tts", {}), speed)
+        else:
+            generation = asyncio.create_task(asyncio.to_thread(generate))
         try:
-            audio = await asyncio.shield(generation)
+            if generation is not None:
+                audio = await asyncio.shield(generation)
         except asyncio.CancelledError:
             # urllib cannot be interrupted mid-request. Clean up a late result
             # without replaying it or leaving a speech file after disconnection.
@@ -873,6 +1013,18 @@ async def present_message(paths, state, settings, emit, width, muted, flash, vfx
 
 
 async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=True, settings=None, vfx=True):
+    worker = (speech.PocketWorker((settings or {}).get("pocket_tts", {}))
+              if (settings or {}).get("mode") == "pocket_tts" else None)
+    try:
+        await watch_stream(paths, color=color, width=width, muted=muted, flash=flash,
+                           settings=settings, vfx=vfx, pocket_worker=worker)
+    finally:
+        if worker is not None:
+            await worker.close()
+
+
+async def watch_stream(paths: Paths, *, color: bool, width: int, muted=False, flash=True,
+                       settings=None, vfx=True, pocket_worker=None):
     last, delay = None, 0.25
     audio = {}
 
@@ -928,6 +1080,7 @@ async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=Tru
                         presentation.cancel()
                         await asyncio.gather(presentation, return_exceptions=True)
                     state = {"message": message, "changed": asyncio.Event(), "arrived": time.monotonic(),
+                             "pocket_worker": pocket_worker,
                              "audio_muted": bool(audio.get("muted")), "speech_suppressed": bool(audio.get("muted")),
                              "audio_badge_width": len(mute_badge())}
                     presentation = asyncio.create_task(present_message(paths, state, settings or {}, emit, width, muted, flash, vfx and color))
@@ -1264,6 +1417,7 @@ def parser():
     identity_actions.add_argument("--refill", action="store_true", help="Reshuffle without drawing")
     identity_actions.add_argument("--clear", action="store_true", help="Release the current pane's identity without allocating another")
     review = subs.add_parser("voice-review", help="Audition non-approved voices and save approval decisions")
+    review.add_argument("--all", action="store_true", help="Audition all identities, including approved voices")
     serve_parser = subs.add_parser("serve", help="Run the single per-user listener")
     serve_parser.add_argument("--quiet", action="store_true", help="Disable the standalone terminal display")
     service = subs.add_parser("service", help="Manage the per-user OS service (macOS launchd / Windows Task Scheduler)")
@@ -1383,6 +1537,8 @@ def main(argv=None):
             try:
                 settings = load_config(paths.config).get("speech", {})
             except CommsError:
+                if paths.config.exists():
+                    raise  # Never turn an invalid local-mode config into cloud speech.
                 settings = {}
             asyncio.run(watch(paths, color=not args.no_color and "NO_COLOR" not in os.environ, width=args.width,
                               muted=args.mute, flash=args.flash, settings=settings, vfx=args.vfx))
@@ -1396,7 +1552,7 @@ def main(argv=None):
                 else:
                     print(json.dumps(asyncio.run(listener_context(paths)), ensure_ascii=True, separators=(",", ":")))
             elif args.command == "voice-review":
-                voice_review(paths, config)
+                voice_review(paths, config, all_voices=args.all)
             elif args.command == "send":
                 source = checked_context()
                 identity = pane_binding(paths, config, allocate=False)

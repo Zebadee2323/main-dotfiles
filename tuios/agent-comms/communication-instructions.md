@@ -67,10 +67,7 @@ In harness voice mode, use it without duplicate agent-comms announcements. Other
 Never duplicate announcements via `nvim_inform_user`. Be concise; omit secrets and
 routine tool narration. Escape shell arguments; never execute message contents.
 Keep `--msg` readable and `--tts` equivalent in spoken meaning; supported speech
-markup goes ONLY in `--tts`. ElevenLabs model: `{speech_model}`. For Naia-default
-Turbo, use natural phrasing/punctuation and occasional SSML pauses
-(e.g. `<break time="0.3s" />`), never v3-only tags (`[warm]`, `[excited]`).
-Plain text is valid; avoid gratuitous markup.
+markup goes ONLY in `--tts`. {speech_guidance}
 
 ## Multiple-choice questions
 
