@@ -1016,8 +1016,8 @@ async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=Tru
     worker = (speech.PocketWorker((settings or {}).get("pocket_tts", {}))
               if (settings or {}).get("mode") == "pocket_tts" else None)
     try:
-        await watch_stream(paths, color=color, width=width, muted=muted, flash=flash,
-                           settings=settings, vfx=vfx, pocket_worker=worker)
+        return await watch_stream(paths, color=color, width=width, muted=muted, flash=flash,
+                                  settings=settings, vfx=vfx, pocket_worker=worker)
     finally:
         if worker is not None:
             await worker.close()
@@ -1026,6 +1026,7 @@ async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=Tru
 async def watch_stream(paths: Paths, *, color: bool, width: int, muted=False, flash=True,
                        settings=None, vfx=True, pocket_worker=None):
     last, delay = None, 0.25
+    listener_generation = None
     audio = {}
 
     def mute_badge():
@@ -1052,6 +1053,13 @@ async def watch_stream(paths: Paths, *, color: bool, width: int, muted=False, fl
             while True:
                 if response.get("event") != "state":
                     raise CommsError("Unexpected listener response.")
+                generation = response.get("listener_generation")
+                if isinstance(generation, str) and generation:
+                    if listener_generation is not None and generation != listener_generation:
+                        # Reconnect reached a replacement listener. Tear down audio/model
+                        # before re-executing the watcher with fresh code and config.
+                        return True
+                    listener_generation = generation
                 audio = response.get("audio", {})
                 if state is not None:
                     state["audio_badge_width"] = len(mute_badge())
@@ -1145,6 +1153,7 @@ class Server:
     def __init__(self, paths: Paths, config: dict, *, quiet=False):
         self.paths, self.config, self.quiet = paths, config, quiet
         self.token = secrets.token_hex(32)
+        self.generation = secrets.token_hex(16)  # Public restart identity, not the auth token.
         self.queue = asyncio.Queue(maxsize=QUEUE_LIMIT)
         self.current = None
         self.watchers = {}
@@ -1221,7 +1230,8 @@ class Server:
                 min(1, self.muted_until - time.monotonic()), self.audio_tick)
 
     def snapshot(self):
-        return {"ok": True, "protocol_version": VERSION, "event": "state", "message": dict(self.current) if self.current else None,
+        return {"ok": True, "protocol_version": VERSION, "event": "state", "listener_generation": self.generation,
+                "message": dict(self.current) if self.current else None,
                 "audio": self.audio_status()}
 
     def publish(self, message):
@@ -1416,6 +1426,7 @@ def parser():
     identity_actions = identity.add_mutually_exclusive_group()
     identity_actions.add_argument("--refill", action="store_true", help="Reshuffle without drawing")
     identity_actions.add_argument("--clear", action="store_true", help="Release the current pane's identity without allocating another")
+    identity_actions.add_argument("--clear-all", action="store_true", help="Release all pane identities in this state directory; agents must run context again")
     review = subs.add_parser("voice-review", help="Audition non-approved voices and save approval decisions")
     review.add_argument("--all", action="store_true", help="Audition all identities, including approved voices")
     serve_parser = subs.add_parser("serve", help="Run the single per-user listener")
@@ -1512,6 +1523,10 @@ def main(argv=None):
                                             busy=busy, health=health, probe=probe)
             if result:
                 print(json.dumps(result) if isinstance(result, dict) else result)
+        elif args.command == "context" and args.clear_all:
+            result = pane_identity.clear_all(paths, private_dir=private_dir, lock=FileLock,
+                                             atomic_json=atomic_json, error=CommsError)
+            print(json.dumps(result, ensure_ascii=True, separators=(",", ":")))
         elif args.command == "audio":
             if args.seconds is not None and (args.action != "mute" or not math.isfinite(args.seconds) or not 0 < args.seconds <= 86400):
                 raise CommsError("--seconds must be greater than 0 and at most 86400, for mute only.")
@@ -1540,8 +1555,12 @@ def main(argv=None):
                 if paths.config.exists():
                     raise  # Never turn an invalid local-mode config into cloud speech.
                 settings = {}
-            asyncio.run(watch(paths, color=not args.no_color and "NO_COLOR" not in os.environ, width=args.width,
-                              muted=args.mute, flash=args.flash, settings=settings, vfx=args.vfx))
+            reload_watcher = asyncio.run(watch(
+                paths, color=not args.no_color and "NO_COLOR" not in os.environ, width=args.width,
+                muted=args.mute, flash=args.flash, settings=settings, vfx=args.vfx))
+            if reload_watcher:
+                original_args = list(sys.argv[1:] if argv is None else argv)
+                os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve()), *original_args])
         else:
             config = load_config(paths.config)
             if args.command == "context":

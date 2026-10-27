@@ -19,6 +19,12 @@ delivery VFX, listener-wide live `audio` toggle/timed mute, and exact-owned
 `prefix` command have been removed.
 Those extensions supersede the original v1
 voice/history exclusions below. The current wire protocol is version 2.
+State snapshots include a public listener generation, distinct from the auth
+token. On reconnect to a new generation, updated watchers close their playback
+and worker resources, then re-execute with preserved arguments to reload code
+and configuration. The tuios command palette exposes `Restart agent-comms`, which
+restarts the installed listener service and thereby reloads its watchers without
+clearing pane identities.
 `context` now returns the caller's ID, name, and exact introduction or empty
 prefix, resolving ownership from the tuios environment only (no harness/session
 identity-selection flags). Outside tuios, lookup fails clearly. Agents must insert
@@ -79,6 +85,19 @@ does not draw a new identity. The following describes the internal allocator:
 Force a fresh shuffle of the complete configuration bag, replacing any remaining
 transient entries. **Do not draw or print an ID.** Use the same lock as normal
 draws.
+
+### `agent-comms context --clear-all`
+
+Explicit local administrative reset of all pane bindings in the selected state
+directory, across all daemons and sessions. Acquire the same lock as allocation
+and atomically replace bindings and scan timestamps with empty tables. Print
+`{"cleared": N}` with the number of released bindings; repeated resets return zero.
+Do not allocate identities, refill the bag, edit config, delete history, change
+titles, or cancel queued announcements. Existing listeners observe the reset
+without restarting; each pane must look up `context` before its next send (a new
+draw may return the same identity). Works outside tuios and offline, without
+loading config, but requires state write access. Corrupt mappings fail explicitly.
+Mutually exclusive with `--clear` and `--refill`.
 
 ### `agent-comms serve`
 

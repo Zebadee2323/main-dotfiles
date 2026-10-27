@@ -97,6 +97,47 @@ class PaneIdentityTests(Fixture):
         result = self.cli("context", "--clear", "--refill")
         self.assertEqual(result.returncode, 2)
 
+    def test_clear_all_offline_across_daemons_preserves_other_state(self):
+        self.bind()
+        with patch.dict(os.environ, {**self.pane_env, "TUIOS_SOCKET": "/other/daemon.sock"}), \
+                patch.object(pane_identity, "inventory", return_value={"own"}):
+            app.pane_binding(self.paths, self.config)
+        bag = (self.paths.state / "bag.json").read_text()
+        history = self.paths.state / "history.jsonl"
+        history.write_text("keep history")
+        source = self.paths.config.read_text()
+        # Administrative reset needs neither a pane nor a running listener/config.
+        self.paths.config.unlink()
+        result = self.cli("context", "--clear-all")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"cleared": 2})
+        self.assertEqual(json.loads((self.paths.state / "pane-identities.json").read_text()),
+                         {"version": 1, "bindings": {}, "scanned": {}})
+        self.assertEqual((self.paths.state / "bag.json").read_text(), bag)
+        self.assertEqual(history.read_text(), "keep history")
+        with self.assertRaisesRegex(app.CommsError, "no current identity"):
+            self.bind(allocate=False)
+        self.paths.config.write_text(source)
+        self.assertIn(self.bind(), self.config["identities"])
+
+    def test_clear_all_is_idempotent_and_does_not_draw(self):
+        for _ in range(2):
+            result = self.cli("context", "--clear-all")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {"cleared": 0})
+        self.assertFalse((self.paths.state / "bag.json").exists())
+
+    def test_clear_all_rejects_corrupt_state_and_conflicting_flags(self):
+        self.bind()
+        filename = self.paths.state / "pane-identities.json"
+        filename.write_text("not json")
+        result = self.cli("context", "--clear-all")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Corrupt pane", result.stderr)
+        self.assertEqual(filename.read_text(), "not json")
+        for flag in ("--clear", "--refill"):
+            self.assertEqual(self.cli("context", "--clear-all", flag).returncode, 2)
+
     def test_removed_roster_identity_reassigns_but_corrupt_map_does_not_draw(self):
         first = self.bind()
         self.config["identities"].pop(first)

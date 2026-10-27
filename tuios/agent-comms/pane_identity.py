@@ -60,6 +60,35 @@ def timestamp(value):
     return type(value) in (int, float) and math.isfinite(value) and value >= 0
 
 
+def read_state(filename, error):
+    try:
+        state = json.loads(filename.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        state = {"version": 1, "bindings": {}, "scanned": {}}
+    except (ValueError, UnicodeError):
+        raise error(f"Corrupt pane identity mapping: {filename}. Repair it explicitly.") from None
+    if (not isinstance(state, dict) or state.get("version") != 1
+            or not isinstance(state.get("bindings"), dict) or not isinstance(state.get("scanned"), dict)
+            or any(not isinstance(k, str) or not timestamp(v) for k, v in state["scanned"].items())
+            or any(not isinstance(k, str) or not isinstance(r, dict)
+                   or any(not isinstance(r.get(f), str) for f in ("daemon", "pane_id", "id"))
+                   or ("missing_since" in r and not timestamp(r["missing_since"]))
+                   for k, r in state["bindings"].items())):
+        raise error(f"Invalid pane identity mapping: {filename}.")
+    return state
+
+
+def clear_all(paths, *, private_dir, lock, atomic_json, error):
+    """Administrative reset across all daemons, serialized with pane allocation."""
+    directory = private_dir(paths.state)
+    filename = directory / "pane-identities.json"
+    with lock(directory / "pane-identities.lock"):
+        state = read_state(filename, error)
+        count = len(state["bindings"])
+        atomic_json(filename, {"version": 1, "bindings": {}, "scanned": {}})
+    return {"cleared": count}
+
+
 def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, allocate=True, clear=False, env=None,
             eligible_ids=None):
     identity = owner(env)
@@ -72,31 +101,14 @@ def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, al
     # chmod, or open a lock file in the listener's private state directory.
     directory = private_dir(paths.state) if allocate else paths.state
     filename = directory / "pane-identities.json"
-    def read_state():
-        try:
-            state = json.loads(filename.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            state = {"version": 1, "bindings": {}, "scanned": {}}
-        except (ValueError, UnicodeError):
-            raise error(f"Corrupt pane identity mapping: {filename}. Repair it explicitly.") from None
-        if (not isinstance(state, dict) or state.get("version") != 1
-                or not isinstance(state.get("bindings"), dict) or not isinstance(state.get("scanned"), dict)
-                or any(not isinstance(k, str) or not timestamp(v) for k, v in state["scanned"].items())
-                or any(not isinstance(k, str) or not isinstance(r, dict)
-                       or any(not isinstance(r.get(f), str) for f in ("daemon", "pane_id", "id"))
-                       or ("missing_since" in r and not timestamp(r["missing_since"]))
-                       for k, r in state["bindings"].items())):
-            raise error(f"Invalid pane identity mapping: {filename}.")
-        return state
-
     if not allocate:
-        saved = read_state()["bindings"].get(key)
+        saved = read_state(filename, error)["bindings"].get(key)
         if saved is None or saved["id"] not in config["identities"]:
             raise error("Pane has no current identity. Run 'agent-comms context' before sending.")
         return saved["id"]
 
     with lock(directory / "pane-identities.lock"):
-        state = read_state()
+        state = read_state(filename, error)
         if clear:
             saved = state["bindings"].pop(key, None)
             if saved is not None:

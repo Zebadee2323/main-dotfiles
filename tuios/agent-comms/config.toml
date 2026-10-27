@@ -1,11 +1,11 @@
 # Shared identity configuration. Read by default regardless of working directory.
 display_seconds = 5
-active_groups = ["pocket_tts"] # Groups eligible for NEW random-bag draws.
+active_groups = ["phonon"] # Groups eligible for NEW random-bag draws.
 
 # Select local Pocket TTS / Phonon 31m or ElevenLabs. Credentials are read only
 # from ELEVENLABS_API_KEY in watcher processes, never from this file.
 [speech]
-mode = "pocket_tts" # "pocket_tts", "phonon", or "elevenlabs".
+mode = "elevenlabs" # "pocket_tts", "phonon", or "elevenlabs".
 model = "eleven_turbo_v2_5"
 elevenlabs_speed = 1.0
 phonon_speed = 1.0

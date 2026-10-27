@@ -57,6 +57,7 @@ $message = if ($prefix) { "$prefix Hello from Windows!" } else { "Hello from Win
 | `context` | Resolve pane identity; print `id`, `name`, and `prefix` as JSON. Reuse until a send returns fresh context on mismatch. |
 | `context --refill` | Replace remaining entries with a new shuffled bag; no draw/output. |
 | `context --clear` | Release only the caller pane's mapped ID; print `cleared` and the previous `id` as JSON. No replacement is allocated. |
+| `context --clear-all` | Release every pane mapping in the selected state directory; print the number cleared as JSON. Works outside tuios and with the listener offline. |
 | `voice-review` | Audition non-approved voices using the configured TTS mode; approve, reject, skip unchanged, replay, or quit. |
 | `voice-review --all` | Audition every configured voice, including already-approved ones. |
 | `serve` | Own the singleton listener, timed FIFO queue, and terminal display. |
@@ -134,6 +135,21 @@ does not change other panes, history, or the shuffled bag. Sends require a fresh
 the same one) and refreshes the pane's title; clearing alone leaves its title
 unchanged. Restart an existing listener once after upgrading to enable clearing.
 
+To make **all agents refresh their identities**, run:
+
+```sh
+agent-comms context --clear-all
+```
+
+This administrative command clears mappings across all tuios daemons/sessions in
+the selected state directory and prints `{"cleared": N}`. It takes the same lock
+as allocation and works without a running listener or valid config. It requires
+local state write access; there is no sandbox bypass. The roster, shuffle bag,
+history, queued announcements, and current pane titles are unchanged. Each pane
+must run `agent-comms context` before sending again; a new draw may return the same
+identity. Existing listeners read the updated mappings without a restart.
+`--clear-all`, `--clear`, and `--refill` are mutually exclusive.
+
 ## Configuration and locations
 
 Edit [config.toml](config.toml) in this directory. It is the default on all
@@ -143,6 +159,27 @@ An explicitly selected missing config is an error; it is not silently generated.
 Watchers receive voice IDs and per-identity speed overrides from the listener's message metadata and read optional
 speech mode/model/speed settings from this file; restart watchers after changing those
 settings. Missing local config falls back to the Naia speech defaults.
+
+### Restart from tuios
+
+Open tuios's command palette (**Ctrl+A, then `:`**, or Ctrl+A, then Shift+P
+with the bundled keymap), search **Restart agent-comms**, and run it. The fallback
+shortcut is Ctrl+A, then Alt+R. tuios currently requires a key field for custom
+command registration, but the palette can run it without using that shortcut.
+
+This runs `agent-comms service restart`. Each updated watcher detects the new
+listener generation on reconnect, cancels its current presentation, closes its
+Pocket worker, and re-executes itself with the same command-line arguments. Both
+code and configuration are reloaded, including active groups, TTS mode/model,
+speed, effects, and normalization. No PID search or separate dock refresh is
+needed for ordinary configuration changes. Pane bindings and history are not
+cleared. In-progress audio may be interrupted; Pocket starts cold on its next use.
+
+When first upgrading from a version without automatic watcher reload, restart the
+listener and replace old watcher processes once. A dock refresh alone may leave
+an already-running push watcher untouched. Future listener restarts then reload
+watchers automatically. A watcher connected to an older listener without the
+generation field keeps its previous reconnect behavior until both are upgraded.
 
 ### Identity groups and the random bag
 
@@ -180,8 +217,8 @@ lists fail validation. Changing membership rebuilds the bag on its next draw.
 **Existing pane bindings remain stable**, even if their group becomes inactive.
 To move a pane to the newly selected group, run `agent-comms context --clear` in
 that pane, then run `agent-comms context`. Never clear other panes' bindings.
-Restart the listener after editing groups; restart dock watchers after editing
-speech settings. Review decisions update the original nested TOML table without
+Restart agent-comms after editing groups or speech settings (see above).
+Review decisions update the original nested TOML table without
 flattening the file or modifying other groups.
 
 Run `agent-comms voice-review` in an interactive terminal with a supported audio
@@ -330,22 +367,19 @@ Like Phonon, non-default speed uses pitch-preserving FFmpeg `atempo`; announceme
 effects and volume normalization are unchanged. Review bypasses effects and
 normalization, and supports yes/no/skip/replay/quit for Pocket too.
 
-After changing provider/groups, restart the listener and refresh dock watchers:
+After changing provider/groups, use **Restart agent-comms** in tuios's palette,
+or run:
 
 ```sh
 agent-comms service restart
-tuios refresh-dock agent-comms
 ```
 
 Already-bound panes retain their identity; clear and re-resolve only the panes you
 want to move to the Pocket group. Restart existing reviews to pick up the changes.
 
-**Push-watcher restart caveat:** `tuios refresh-dock` can report success without
-replacing an already-running push watcher. After a code/provider upgrade, verify
-that the actual `agent-comms watch` process restarted. If it did not, stop only
-that verified watcher PID, then refresh the dock component. Do not terminate the
-terminal, tuios daemon, or unrelated watcher processes. A listener restart alone
-does not reload the watcher's Python code or speech settings.
+For the one-time upgrade from an older watcher, stop only its verified PID, then
+refresh the dock component. Do not terminate the terminal, tuios daemon, or
+unrelated watcher processes. Updated watchers reload themselves on listener restart.
 
 Sources: [upstream runtime](https://github.com/kyutai-labs/pocket-tts),
 [model terms](https://huggingface.co/kyutai/pocket-tts),
@@ -379,9 +413,9 @@ restores them. Failures fall back to captions, **never to the other provider**.
 `voice-review` auditions the provider selected by `mode`; `--all` includes approved voices.
 
 Restart the listener (`agent-comms service restart` for an installed service)
-and dock watchers (`tuios refresh-dock agent-comms` for the bundled dock) after
-upgrading or changing config. Restarting only the listener
-does not upgrade already-running watcher code. Invalid configs fail closed rather
+after changing config; updated watchers automatically reload on reconnect.
+Older watchers require one manual restart when first upgrading to this behavior.
+Invalid configs fail closed rather
 than silently selecting ElevenLabs.
 
 `agent-comms instructions` renders the selected mode and only that provider's
@@ -411,14 +445,14 @@ ElevenLabs receives the multiplier in `voice_settings.speed`; Phonon and Pocket 
 FFmpeg `atempo` processing without changing pitch. A provider's setting never
 affects the other provider. The bundled config preserves the previous rates:
 global 1.0 for all providers, and Tarquin's identity override 1.2 for ElevenLabs and Phonon.
-Restart the server and dock watchers after changing speed settings; a fresh
+Restart agent-comms after changing speed settings; a fresh
 `voice-review` process reads the current config without a restart.
 
 `watch` normalizes speech volume across voices by default using optional `ffmpeg`
 preprocessing (−16 LUFS target, −1 dBTP peak ceiling). Processing finishes before timed captions begin;
 playback and captions use the processed WAV's measured duration. Missing or failing
 FFmpeg falls back to the original audio with a warning. Set `[speech] normalize = false`
-to disable it. Restart watchers to load this setting; `voice-review` is unchanged.
+to disable it. Restart agent-comms to load this setting; `voice-review` is unchanged.
 
 `[speech] robot_mode = true` enables the exact robot filter graph/settings from
 Neovim Naia: layered delays/chorus/tremolo, weighted mixing, EQ, compression,
@@ -693,7 +727,7 @@ launchd's minimal PATH cannot locate it. A found executable is never retried via
 another path after a permission or query failure. Errors distinguish client pane
 checks from listener identity lookup and report missing executables separately
 from access denials.
-`context --refill` and `voice-review` remain explicit local maintenance commands
+`context --refill`, `context --clear-all`, and `voice-review` remain explicit local maintenance commands
 and still require write access to their state/configuration.
 
 **Nothing is automatically inserted.** Put nonempty `prefix` once at the start

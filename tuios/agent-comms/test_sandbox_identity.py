@@ -117,6 +117,25 @@ sys.exit(app.main(sys.argv[2:]))
         self.assertEqual(lookup.returncode, 0, lookup.stderr)
         self.assertEqual(set(json.loads(lookup.stdout)), {'id', 'name', 'prefix'})
 
+    def test_admin_clear_all_invalidates_live_listener_bindings(self):
+        identities = {}
+        for pane in ('caller', 'other'):
+            self.env['TUIOS_PANE_ID'] = pane
+            result = self.restricted_cli('context')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            identities[pane] = json.loads(result.stdout)['id']
+        cleared = self.cli('context', '--clear-all')
+        self.assertEqual(cleared.returncode, 0, cleared.stderr)
+        self.assertEqual(json.loads(cleared.stdout), {'cleared': 2})
+        for pane, identity in identities.items():
+            self.env['TUIOS_PANE_ID'] = pane
+            sent = self.restricted_cli('send', '--id', identity, '--msg', 'Stale.')
+            self.assertEqual(sent.returncode, 1)
+            self.assertIn('no current identity', sent.stderr)
+            lookup = self.restricted_cli('context')
+            self.assertEqual(lookup.returncode, 0, lookup.stderr)
+        self.assertEqual(len(json.loads((self.paths.state / 'pane-identities.json').read_text())['bindings']), 2)
+
 
 class ContextClientTests(Fixture):
     def test_clear_requires_upgraded_listener(self):

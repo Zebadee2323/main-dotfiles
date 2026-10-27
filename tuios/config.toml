@@ -225,6 +225,13 @@ type = "popup"
 command = 'exec "$HOME/.local/bin/agent-comms" audio mute --seconds 15'
 description = "Mute agent voice for 15 seconds"
 
+[[keybindings.command]]
+name = "restart-agent-comms"
+key = "prefix+alt+r"
+type = "popup"
+command = 'exec "$HOME/.local/bin/agent-comms" service restart'
+description = "Restart agent-comms"
+
 [appearance]
 theme = "ashen"
 border_style = "ascii"
