@@ -287,6 +287,14 @@ def load_config(path: Path) -> dict:
             config = tomllib.load(stream)
     except (ValueError, OSError) as exc:
         raise CommsError(f"Cannot read identity config {path}: {exc}") from None
+    user = config.get("user", {})
+    if not isinstance(user, dict):
+        raise CommsError("user must be a table.")
+    for key in ("name", "tts_name"):
+        if key in user and (not isinstance(user[key], str) or not clean_text(user[key])):
+            raise CommsError(f"user.{key} must be nonempty text.")
+    if "tts_name" in user and "name" not in user:
+        raise CommsError("user.tts_name requires user.name.")
     duration = config.get("display_seconds", 5)
     if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration) or not 0 < duration <= 3600:
         raise CommsError("display_seconds must be a number greater than 0 and at most 3600.")
@@ -552,6 +560,18 @@ def draw_id(paths: Paths, config: dict, refill: bool = False) -> str | None:
 
 def communication_instructions(config):
     template = Path(__file__).with_name("communication-instructions.md").read_text(encoding="utf-8")
+    user = config.get("user", {})
+    if "name" in user:
+        name = json.dumps(clean_text(user["name"]), ensure_ascii=False)
+        tts_name = json.dumps(clean_text(user.get("tts_name", user["name"])), ensure_ascii=False)
+        user_guidance = (f"The human user's name is {name} in written responses and `--msg`. "
+                         f"Use {tts_name} in `--tts` when addressing or mentioning the user, "
+                         "so speech pronounces their name correctly. These are two spellings "
+                         "of the same user's name, not agent identities. Do not change your "
+                         "checked agent name or required prefix to match the user's name.")
+    else:
+        user_guidance = ("No user name is configured. Do not invent one; refer to the user "
+                         "generically unless they supply a name.")
     settings = config.get("speech", {})
     mode = settings.get("mode", "elevenlabs")
     if mode in ("phonon", "pocket_tts"):
@@ -565,8 +585,9 @@ def communication_instructions(config):
                     "Plain text is valid; avoid gratuitous markup.")
     values = {
         "speech_guidance": guidance,
+        "user_guidance": user_guidance,
     }
-    return re.sub(r"\{(speech_guidance)\}", lambda m: values[m[1]], template)
+    return re.sub(r"\{(speech_guidance|user_guidance)\}", lambda m: values[m[1]], template)
 
 
 def pane_binding(paths, config, *, allocate=True, clear=False, env=None):

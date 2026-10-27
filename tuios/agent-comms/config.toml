@@ -2,6 +2,11 @@
 display_seconds = 5
 active_groups = ["phonon"] # Groups eligible for NEW random-bag draws.
 
+# Human identity injected by the harness plugins, separate from agent identities.
+[user]
+name = "Oli" # Written responses and --msg.
+tts_name = "Ollie" # --tts pronunciation; defaults to name when omitted.
+
 # Select local Pocket TTS / Phonon 31m or ElevenLabs. Credentials are read only
 # from ELEVENLABS_API_KEY in watcher processes, never from this file.
 [speech]

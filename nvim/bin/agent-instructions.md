@@ -1,5 +1,3 @@
-The user is called Ollie.
-
 # Tool names and connection
 
 Use the tools from the `naia` MCP server. They use upstream's `nvim_` prefix:
@@ -26,17 +24,17 @@ Use the dedicated tools rather than generic editor commands:
 - `nvim_set_quickfix`: actionable findings or multiple locations. Prefer a new list,
   label informational bookmarks and never auto-jump.
 - `nvim_jump_to_location`: explicitly requested navigation, or when opening a
-  location materially helps. Otherwise let Ollie choose companion links.
+  location materially helps. Otherwise let the user choose companion links.
 
 Skip displays for acknowledgments, purely conversational replies, redundant
 progress updates, explicit chat-only requests, or unavailable tools.
 
 Respect approvals. Pending is NOT success. Read `nvim_get_ui_request_status` only
 on demand, never in a polling loop. Never retry rejected/muted requests, approve
-on Ollie's behalf, change policies, or bypass them through another tool.
+on the user's behalf, change policies, or bypass them through another tool.
 
 When asked for a walkthrough, use `nvim_walkthrough_start` or
-`nvim_walkthrough_load`. Keep confirmation enabled unless Ollie explicitly asks
+`nvim_walkthrough_load`. Keep confirmation enabled unless the user explicitly asks
 to skip it. A pending tour is not active. Fetch `nvim_walkthrough_current_context`
 before mutations and preserve its revision/playback guards. Use
 `nvim_walkthrough_file_spec` before authoring a portable tour file.

@@ -37,13 +37,30 @@ local function editing_window()
   local current = vim.api.nvim_get_current_win()
   local windows = { current }
   vim.list_extend(windows, vim.api.nvim_tabpage_list_wins(0))
+  local anchor
   for _, window in ipairs(windows) do
     local buffer = vim.api.nvim_win_get_buf(window)
-    if vim.api.nvim_win_get_config(window).relative == "" and vim.bo[buffer].buftype == "" then
-      return window
+    local config = vim.api.nvim_win_get_config(window)
+    if config.relative == "" and not config.external then
+      anchor = anchor or window
+      if vim.bo[buffer].buftype == "" and not vim.wo[window].winfixbuf then
+        return window
+      end
     end
   end
-  error("No normal editing window is available in this tab")
+  -- Terminal/scratch-only tabs still need a source destination. Create a fresh
+  -- normal buffer instead of replacing a special buffer or unlocking its view.
+  assert(anchor, "No split window is available in this tab")
+  local buffer = vim.api.nvim_create_buf(true, false)
+  local ok, window = pcall(vim.api.nvim_open_win, buffer, true, {
+    win = anchor, split = vim.o.columns >= 100 and "right" or "below",
+  })
+  if not ok then
+    vim.api.nvim_buf_delete(buffer, {})
+    error(window)
+  end
+  vim.wo[window].winfixbuf = false
+  return window
 end
 
 local function navigation(target)
@@ -204,7 +221,7 @@ end
 
 -- Displaying a companion only needs a split anchor, not a source-editing
 -- buffer. Prefer an editing window, but allow terminal/nofile-only tabs too.
--- Keep editing_window() strict for source navigation.
+-- Source navigation instead creates a fresh editing split when needed.
 local function companion_anchor()
   local windows = { vim.api.nvim_get_current_win() }
   vim.list_extend(windows, vim.api.nvim_tabpage_list_wins(0))

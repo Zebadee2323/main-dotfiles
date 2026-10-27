@@ -1021,6 +1021,22 @@ native-voice exception and Claude Code readability guidance, requests editor
 cards before the closing message, and covers safe quoting, secrets, existing
 permissions, and continuing without retry spam when the listener is offline.
 
+Configure the human user's name separately from agent identities in `config.toml`:
+
+```toml
+[user]
+name = "Oli"       # Written responses and --msg.
+tts_name = "Ollie" # Pronunciation spelling for --tts; defaults to name.
+```
+
+Both harness plugins inject these names through `agent-comms instructions`.
+Names are optional; without `[user]`, instructions use generic user references.
+Neovim's static instructions do not define a user name. This guides agent-authored
+text and speech; it does not automatically rewrite messages or agent prefixes.
+OpenCode caches rendered instructions per session, so use a fresh session after
+changing these values (or reload the plugin); Codex picks them up at its next
+SessionStart hook, including resume/compact.
+
 Both adapters require normal, clear communication, with no identity-specific
 personality. Speech examples and the injected current model name reflect the
 Naia-default Turbo model. Use `/reload` in OpenCode; refresh/reinstall Codex's

@@ -6,6 +6,10 @@ or another pane/agent. Identity supplies a name and voice, not a personality;
 keep your normal clear, concise style. Other roles, safety rules, and user
 instructions still apply.
 
+## User identity
+
+{user_guidance}
+
 ## Identity and sending
 
 Reuse your latest successful same-pane `agent-comms context` result, including
@@ -45,7 +49,7 @@ Send with the checked/retained values:
 
 When another agent asks you a question, answer in your normal response text;
 the asking agent will read that text as the answer. Do not use `agent-comms send`
-to reply: it announces messages to Ollie, not to the asking agent. Do not duplicate
+to reply: it announces messages to the user, not to the asking agent. Do not duplicate
 the answer through agent messaging or a spoken closing summary.
 
 When contacting another agent, explicitly identify yourself as an agent and include
@@ -65,7 +69,7 @@ In harness voice mode, use it without duplicate agent-comms announcements. Other
 - Always acknowledge user prompts with `agent-comms send` before starting work; give brief, casual, useful progress updates. Quick answers need only the close.
 - **Close EVERY human-facing turn**, even one-line answers: request appropriate Neovim
   cards/companions, then `agent-comms send` a final summary immediately BEFORE
-  the self-contained final text so Ollie sees it while reading.
+  the self-contained final text so the user sees it while reading.
 - Also output message text for harness readability.
 
 Replies to another agent's questions use normal response text only, as above;
