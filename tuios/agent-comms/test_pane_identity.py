@@ -60,6 +60,43 @@ class PaneIdentityTests(Fixture):
         self.assertEqual(len(json.loads((self.paths.state / "bag.json").read_text())["remaining"]), 2)
         self.assertEqual(len(json.loads((self.paths.state / "pane-identities.json").read_text())["bindings"]), 1)
 
+    def test_clear_only_removes_current_pane_and_does_not_draw(self):
+        bound = self.bind()
+        other = self.bind("other")
+        filename = self.paths.state / "pane-identities.json"
+        before = json.loads(filename.read_text())
+        bag = (self.paths.state / "bag.json").read_text()
+        with patch.dict(os.environ, self.pane_env):
+            key = pane_identity.owner()[0]
+            self.assertEqual(app.pane_binding(self.paths, self.config, clear=True),
+                             {"cleared": True, "id": bound})
+            self.assertEqual(app.pane_binding(self.paths, self.config, clear=True),
+                             {"cleared": False, "id": None})
+            with self.assertRaisesRegex(app.CommsError, "no current identity"):
+                app.pane_binding(self.paths, self.config, allocate=False)
+        del before["bindings"][key]
+        self.assertEqual(json.loads(filename.read_text()), before)
+        self.assertEqual((self.paths.state / "bag.json").read_text(), bag)
+        self.assertEqual(self.bind("other", allocate=False), other)
+        self.assertIn(self.bind(), self.config["identities"])
+
+    def test_clear_rejects_outside_pane_and_corrupt_mapping(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(app.CommsError, "outside a tuios pane"):
+                app.pane_binding(self.paths, self.config, clear=True)
+        self.assertFalse(self.paths.state.exists())
+        self.bind()
+        filename = self.paths.state / "pane-identities.json"
+        filename.write_text("not json")
+        with patch.dict(os.environ, self.pane_env):
+            with self.assertRaisesRegex(app.CommsError, "Corrupt pane"):
+                app.pane_binding(self.paths, self.config, clear=True)
+        self.assertEqual(filename.read_text(), "not json")
+
+    def test_clear_and_refill_are_mutually_exclusive(self):
+        result = self.cli("context", "--clear", "--refill")
+        self.assertEqual(result.returncode, 2)
+
     def test_removed_roster_identity_reassigns_but_corrupt_map_does_not_draw(self):
         first = self.bind()
         self.config["identities"].pop(first)

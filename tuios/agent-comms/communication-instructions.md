@@ -62,7 +62,7 @@ Do not hide a needed lookup in a shell variable or combine it with send.
 
 If the harness is already in voice mode, use it without duplicate agent-comms
 announcements. Otherwise:
-- Open longer tasks with a short acknowledgment before research/edits, then give
+- Open tasks with a short acknowledgment before research/edits, then give
   brief, casual, useful progress updates. For quick answers, send only the close.
 - **Always close every turn**, even one-line answers, with `agent-comms send`
   summarizing the final answer immediately BEFORE the self-contained final text,

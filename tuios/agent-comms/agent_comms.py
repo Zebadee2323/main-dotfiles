@@ -449,10 +449,10 @@ def communication_instructions(config):
     return re.sub(r"\{(speech_model)\}", lambda m: values[m[1]], template)
 
 
-def pane_binding(paths, config, *, allocate=True, env=None):
+def pane_binding(paths, config, *, allocate=True, clear=False, env=None):
     try:
         return pane_identity.resolve(paths, config, private_dir=private_dir, lock=FileLock,
-                                     atomic_json=atomic_json, draw_id=draw_id, error=CommsError, allocate=allocate, env=env)
+                                     atomic_json=atomic_json, draw_id=draw_id, error=CommsError, allocate=allocate, clear=clear, env=env)
     except ValueError as exc:
         raise CommsError(str(exc)) from None
 
@@ -501,7 +501,7 @@ def request_pane_env(value):
     return {**env, **value}
 
 
-async def listener_context(paths):
+async def listener_context(paths, *, clear=False):
     env = {k: os.environ[k] for k in PANE_ENV_KEYS if k in os.environ}
     request_pane_env(env)  # Fail locally when the caller has no pane; never guess.
     try:
@@ -510,6 +510,10 @@ async def listener_context(paths):
         raise CommsError(f"Client pane check failed: {exc}") from None
     if endpoint(paths).get("pane_identity") is not True:
         raise CommsError("Listener predates sandbox-compatible identity lookup; restart 'agent-comms serve'.")
+    if clear:
+        if endpoint(paths).get("pane_identity_clear") is not True:
+            raise CommsError("Listener predates pane identity clearing; restart 'agent-comms serve'.")
+        return (await rpc(paths, "clear-context", pane_env=env))["result"]
     identity = (await rpc(paths, "context", pane_env=env))["identity"]
     # The listener owns persistent identity allocation, but may still have an
     # older prefix implementation loaded after an update. Use the same local
@@ -1116,6 +1120,11 @@ class Server:
             if request.get("command") == "ping":
                 await write_frame(writer, {"ok": True, "protocol_version": VERSION, "pid": os.getpid(),
                                            "service_id": os.environ.get("AGENT_COMMS_SERVICE_ID")})
+            elif request.get("command") == "clear-context":
+                env = request_pane_env(request.get("pane_env"))
+                await asyncio.to_thread(checked_context, env)
+                result = await asyncio.to_thread(pane_binding, self.paths, self.config, clear=True, env=env)
+                await write_frame(writer, {"ok": True, "protocol_version": VERSION, "result": result})
             elif request.get("command") == "context":
                 env = request_pane_env(request.get("pane_env"))
                 # File locks and tuios queries must not stall speech/watch clients.
@@ -1200,7 +1209,7 @@ class Server:
             processor = None
             try:
                 atomic_json(discovery, {"protocol_version": VERSION, "prefix_policy": PREFIX_POLICY, "spatial_prefix": True,
-                                        "audio_control": True, "pane_identity": True,
+                                        "audio_control": True, "pane_identity": True, "pane_identity_clear": True,
                                         "port": listener.sockets[0].getsockname()[1], "token": self.token})
                 with TerminalDisplay(self.quiet) as self.display, stop_signals(self.stop):
                     self.publish(None)
@@ -1249,7 +1258,9 @@ def parser():
     common(result)
     subs = result.add_subparsers(dest="command", required=True)
     identity = subs.add_parser("context", help="Return caller ID, name, and required message prefix as JSON")
-    identity.add_argument("--refill", action="store_true", help="Reshuffle without drawing")
+    identity_actions = identity.add_mutually_exclusive_group()
+    identity_actions.add_argument("--refill", action="store_true", help="Reshuffle without drawing")
+    identity_actions.add_argument("--clear", action="store_true", help="Release the current pane's identity without allocating another")
     review = subs.add_parser("voice-review", help="Audition non-approved voices and save approval decisions")
     serve_parser = subs.add_parser("serve", help="Run the single per-user listener")
     serve_parser.add_argument("--quiet", action="store_true", help="Disable the standalone terminal display")
@@ -1378,6 +1389,8 @@ def main(argv=None):
             if args.command == "context":
                 if args.refill:
                     draw_id(paths, config, refill=True)
+                elif args.clear:
+                    print(json.dumps(asyncio.run(listener_context(paths, clear=True)), ensure_ascii=True, separators=(",", ":")))
                 else:
                     print(json.dumps(asyncio.run(listener_context(paths)), ensure_ascii=True, separators=(",", ":")))
             elif args.command == "voice-review":

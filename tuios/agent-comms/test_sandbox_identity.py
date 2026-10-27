@@ -94,8 +94,38 @@ sys.exit(app.main(sys.argv[2:]))
             self.assertFalse(json.loads(stream.readline())['ok'])
         self.assertFalse((self.paths.state / 'pane-identities.json').exists())
 
+    def test_clear_and_reallocate_without_client_state_writes(self):
+        first = self.restricted_cli('context')
+        self.assertEqual(first.returncode, 0, first.stderr)
+        identity = json.loads(first.stdout)
+        bag = (self.paths.state / 'bag.json').read_text()
+        cleared = self.restricted_cli('context', '--clear')
+        self.assertEqual(cleared.returncode, 0, cleared.stderr)
+        self.assertEqual(json.loads(cleared.stdout), {'cleared': True, 'id': identity['id']})
+        self.assertEqual(json.loads((self.paths.state / 'pane-identities.json').read_text())['bindings'], {})
+        self.assertEqual((self.paths.state / 'bag.json').read_text(), bag)
+        repeated = self.restricted_cli('context', '--clear')
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        self.assertEqual(json.loads(repeated.stdout), {'cleared': False, 'id': None})
+        sent = self.restricted_cli('send', '--id', identity['id'], '--msg', 'Ready.')
+        self.assertEqual(sent.returncode, 1)
+        self.assertIn('no current identity', sent.stderr)
+        lookup = self.restricted_cli('context')
+        self.assertEqual(lookup.returncode, 0, lookup.stderr)
+        self.assertEqual(set(json.loads(lookup.stdout)), {'id', 'name', 'prefix'})
+
 
 class ContextClientTests(Fixture):
+    def test_clear_requires_upgraded_listener(self):
+        import asyncio
+        env = {'TUIOS_ENV': '1', 'TUIOS_PANE_ID': 'caller', 'TUIOS_SESSION': 'work'}
+        with patch.dict(os.environ, env), patch.object(app, 'checked_context', return_value={}), \
+             patch.object(app, 'endpoint', return_value={'pane_identity': True}), \
+             patch.object(app, 'rpc', new_callable=AsyncMock) as rpc:
+            with self.assertRaisesRegex(app.CommsError, 'restart'):
+                asyncio.run(app.listener_context(self.paths, clear=True))
+            rpc.assert_not_called()
+
     def test_context_uses_client_prefix_policy_with_stale_listener(self):
         import asyncio
         env = {'TUIOS_ENV': '1', 'TUIOS_PANE_ID': 'caller', 'TUIOS_SESSION': 'work'}

@@ -56,6 +56,7 @@ $message = if ($prefix) { "$prefix Hello from Windows!" } else { "Hello from Win
 | --- | --- |
 | `context` | Resolve pane identity; print `id`, `name`, and `prefix` as JSON. Reuse until a send reports a mismatch. |
 | `context --refill` | Replace remaining entries with a new shuffled bag; no draw/output. |
+| `context --clear` | Release only the caller pane's mapped ID; print `cleared` and the previous `id` as JSON. No replacement is allocated. |
 | `voice-review` | Audition each non-approved voice, then save a yes/no approval in the config. |
 | `serve` | Own the singleton listener, timed FIFO queue, and terminal display. |
 | `serve --quiet` | Same listener without terminal display. |
@@ -119,6 +120,13 @@ conversation. `send` resolves the pane's persisted binding internally and requir
 `--id` to match it. This is an assertion, not an identity selector. A mismatch
 rejects the send and directs the agent to refresh its ID, name, and prefix through
 `context`. See ownership and cleanup below.
+
+Run `agent-comms context --clear` in the pane whose mapping you want to release.
+It is safe to repeat (`cleared: false`, `id: null` when already unmapped), and
+does not change other panes, history, or the shuffled bag. Sends require a fresh
+`context` lookup afterward. That lookup allocates an available identity (possibly
+the same one) and refreshes the pane's title; clearing alone leaves its title
+unchanged. Restart an existing listener once after upgrading to enable clearing.
 
 ## Configuration and locations
 

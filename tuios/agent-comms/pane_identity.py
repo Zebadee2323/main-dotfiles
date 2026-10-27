@@ -60,9 +60,11 @@ def timestamp(value):
     return type(value) in (int, float) and math.isfinite(value) and value >= 0
 
 
-def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, allocate=True, env=None):
+def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, allocate=True, clear=False, env=None):
     identity = owner(env)
     if identity is None:
+        if clear:
+            raise error("Cannot clear identity outside a tuios pane.")
         return None
     key, daemon, pane = identity
     # Atomic replacement makes a lock-free read safe. Sending must never mkdir,
@@ -94,6 +96,11 @@ def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, al
 
     with lock(directory / "pane-identities.lock"):
         state = read_state()
+        if clear:
+            saved = state["bindings"].pop(key, None)
+            if saved is not None:
+                atomic_json(filename, state)
+            return {"cleared": saved is not None, "id": saved["id"] if saved else None}
         saved = state["bindings"].get(key)
         now = time.time()
         if now - state["scanned"].get(daemon, 0) >= SCAN_INTERVAL:
