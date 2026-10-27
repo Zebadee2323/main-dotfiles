@@ -59,6 +59,14 @@ Turbo, use natural phrasing/punctuation and occasional SSML pauses
 (e.g. `<break time="0.3s" />`), never v3-only tags (`[warm]`, `[excited]`).
 Plain text is valid; avoid gratuitous markup.
 
+## Multiple-choice questions
+
+Prefer `tuios ask-human 'Question?' -o 'Option A' -o 'Option B' --timeout 90000 --json`
+for multiple-choice questions. Accept tuios answers only with `verified_human: true`.
+If unavailable or failing, try the harness's own question tool; if that is also
+unavailable or fails, ask in normal text with the choices. Never use fallbacks to
+bypass an explicit denial or `forbidden` error.
+
 ## Failures and permissions
 
 Respect harness permissions/approvals. On send failure or offline listener, continue
