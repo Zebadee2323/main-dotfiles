@@ -10,13 +10,6 @@ return {
         end,
     },
     {
-        'folke/sidekick.nvim',
-        dependencies = { 'guill/mcp-tools.nvim' },
-        config = function()
-            require('config.sidekick')
-        end,
-    },
-    {
         'olimorris/codecompanion.nvim',
         dependencies = {
             'nvim-lua/plenary.nvim',

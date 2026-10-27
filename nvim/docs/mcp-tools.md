@@ -27,7 +27,7 @@ tour state and continue using the same registered tools.
 
 Harness -> authenticated mcp-tools HTTP endpoint -> Neovim RPC -> provider callback.
 
-Sidekick still selects the exact editor through NVIM/NVIM_LISTEN_ADDRESS. It
+The `naia-attach` launcher selects the exact editor through NVIM/NVIM_LISTEN_ADDRESS. It
 queries connection_info() once for a current URL/token. That API is sensitive;
 public status omits authentication. There is no secret file or observer timer.
 
@@ -39,25 +39,34 @@ same-name OpenCode/Codex server entries are replaced as a whole to avoid stale
 stdio commands or credentials. Other servers/settings remain untouched.
 
 Each connection has its own upstream MCP session. A bridge restart rotates
-credentials and may change its ephemeral port: relaunch through Sidekick instead
+credentials and may change its ephemeral port: relaunch through the attachment shim instead
 of expecting an old connection to automatically adopt a fresh snapshot.
 
 ## Instructions
 
-Sidekick launches OpenCode with a private V2 server and launch-only MCP/plugin
-configuration. The `opencode/naia` plugin supplies instructions before every
-agent-loop model call, so new sessions inside that TUI retain the voice/UI rules.
-Ordinary OpenCode launches are not opted in. No new durable session instruction
-entries are written; legacy entries and existing shared-service registrations
-are not automatically removed. The private server still uses ordinary session
-history/database persistence. Claude receives appended system instructions and
-the reminder hook; Codex receives its instruction-file setting. The MCP server
-itself does not supply Naia initialization instructions.
+The shim injects only `bin/agent-notice.md`, telling the agent it is attached and
+can consult the Naia skill later. The detailed guidance lives in
+`agent/skills/naia/SKILL.md`; attachment does not load its body automatically.
+
+OpenCode uses a private V2 server with native launch-only `instructions` and
+`skills` sources, not a custom instruction plugin. Claude appends the short
+notice and loads the skill-only `agent/` plugin with `--plugin-dir`; its skill is
+named `naia:naia`. Codex also discovers that qualified name from the shared
+plugin manifest. There is no per-turn reminder hook. Codex gets the short notice
+through `developer_instructions`, leaving the default model instructions intact.
+Before Codex starts, the shim ensures `$CODEX_HOME/skills/naia` (default
+`~/.codex/skills/naia`) is a symlink to the Neovim-owned skill. Existing correct
+links are reused; unrelated entries are never replaced. This one persistent
+link also makes the skill discoverable in ordinary Codex sessions.
+
+The MCP server itself does not supply Naia initialization instructions. No
+durable session instruction entries are written. Legacy entries are not removed.
+Agent-comms identity and speech guidance remain a separate harness integration.
 
 ## Independent editor-safe lifecycle
 
 The inspected upstream TypeScript SIGTERM/SIGINT handler calls nvim.quit(), which
-the npm client implements as a force-quit of Neovim. Ollie's config has a separate
+the npm client implements as a force-quit of Neovim. This config has a separate
 features/mcp_tools_runtime.lua compatibility guard. It has no Naia dependency:
 it preserves upstream's API/settings, starts a direct Node/Bun child, and kills
 only that child on stop. Direct Node uses tsx's import loader rather than npx/tsx

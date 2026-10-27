@@ -18,7 +18,7 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-MODULE = runpy.run_path(str(ROOT / "bin" / "sidekick-naia-cli"))
+MODULE = runpy.run_path(str(ROOT / "bin" / "naia-attach"))
 
 
 @unittest.skipUnless(os.environ.get("NAIA_TEST_OPENCODE") == "1" and shutil.which("opencode"), "opt-in OpenCode integration")
@@ -70,7 +70,10 @@ class PrivateServerIntegrationTests(unittest.TestCase):
                 }},
             }
             for use_naia in (True, True, False):
-                config = {**base, "plugins": [MODULE["OPENCODE_PLUGIN_DIR"]] if use_naia else []}
+                config = {**base}
+                if use_naia:
+                    config.update({"instructions": [str(MODULE["NOTICE_FILE"])],
+                                   "skills": [str(MODULE["SKILLS_DIR"])]})
                 env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
                 start = len(requests)
                 result = subprocess.run(["opencode", "run", "--standalone", "--title", "Test", "Say OK"],
@@ -80,7 +83,11 @@ class PrivateServerIntegrationTests(unittest.TestCase):
                 self.assertTrue(actual, "expected a request to the local fake model")
                 system = "\n".join(str(message.get("content", "")) for request in actual
                                    for message in request.get("messages", []) if message["role"] in ("system", "developer"))
-                self.assertEqual("# Showing things in Neovim" in system, use_naia, system[:500])
+                self.assertEqual("You are attached to a Neovim instance through the NAIA MCP tool." in system,
+                                 use_naia, system[:500])
+                self.assertEqual("Use the attached Neovim editor through NAIA MCP" in json.dumps(actual),
+                                 use_naia, json.dumps(actual)[:20000])
+                self.assertNotIn("# Showing things in Neovim", system, "skill body must stay on demand")
                 self.assertNotIn("nvim_inform_user", system)
 
 

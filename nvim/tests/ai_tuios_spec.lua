@@ -3,7 +3,7 @@ local file = debug.getinfo(1, "S").source:sub(2)
 local root = vim.fn.fnamemodify(file, ":p:h:h")
 vim.opt.rtp:prepend(root)
 
-local calls, notices, choice, picker, failure, sidekick_sends
+local calls, notices, choice, picker, failure
 local windows, agents, before_select
 local executable = 1
 vim.schedule = function(fn) fn() end
@@ -25,7 +25,7 @@ vim.system = function(argv, _, callback)
 end
 
 local function reset()
-  calls, notices, picker, choice, failure, sidekick_sends = {}, {}, nil, nil, nil, {}
+  calls, notices, picker, choice, failure = {}, {}, nil, nil, nil
   executable = 1
   before_select = nil
   vim.env.TUIOS_ENV, vim.env.TUIOS_PANE_ID = "1", "editor"
@@ -108,30 +108,30 @@ reset()
 vim.env.TUIOS_SESSION = nil
 assert(routing.send(message) and #calls == 0 and #notices == 1)
 
--- Exercise the actual command: preserve context and Sidekick's non-submit mode.
-package.loaded.naia = { wrapper_path = function() return "unused" end }
-package.loaded.sidekick = { setup = function() end }
-package.loaded["sidekick.cli"] = { send = function(opts) sidekick_sends[#sidekick_sends + 1] = opts end }
-dofile(root .. "/lua/config/sidekick.lua")
+-- Commands retain tuios routing without depending on an embedded CLI plugin.
+dofile(root .. "/lua/config/ai.lua")
 reset()
 vim.env.TUIOS_ENV = nil
 vim.cmd("AISend explain this")
-assert(#sidekick_sends == 1 and sidekick_sends[1].submit == false)
-assert(sidekick_sends[1].msg:find("explain this\n\n@", 1, true))
+assert(#calls == 0 and notices[1]:find("AICopy", 1, true))
 reset()
 vim.cmd("AISend explain this")
-assert(#sidekick_sends == 0 and calls[5][2] == "send-text")
+assert(calls[5][2] == "send-text")
+assert(calls[5][9]:find("explain this\n\n@", 1, true))
 reset()
 vim.cmd("AIMessage hello there")
-assert(#sidekick_sends == 0 and calls[5][9] == "hello there")
+assert(calls[5][9] == "hello there")
 assert(calls[6][2] == "focus-window")
 reset()
 vim.env.TUIOS_ENV = nil
 vim.cmd("AIMessage hello there")
-assert(#sidekick_sends == 1 and sidekick_sends[1].submit == true)
-assert(sidekick_sends[1].msg == "hello there")
+assert(#calls == 0 and notices[1]:find("AICopy", 1, true))
 reset()
 agents[3].state = "needs_input"
 vim.cmd("AIMessage hello there")
-assert(#sidekick_sends == 0 and #calls == 4, "Blocked tuios sends must not fall back to Sidekick")
-print("PASS: AISend tuios workspace routing, picker, cancellation, errors and Sidekick fallback")
+assert(#calls == 4, "Blocked tuios sends must not use another destination")
+assert(vim.api.nvim_get_commands({}).AI == nil, "Sidekick toggle command must be removed")
+reset()
+vim.cmd("AICopy explain this")
+assert(vim.fn.getreg('"'):find("explain this\n\n@", 1, true))
+print("PASS: AI commands retain tuios routing and clipboard support without Sidekick")

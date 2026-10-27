@@ -167,7 +167,7 @@ class IntegrationTests(unittest.TestCase):
         self.remote(a, "require('naia').start()")
         self.assertEqual(one.call("nvim_echo", {"mode": "one"})["content"][0]["text"], "first:one")
         self.remote(a, "require('naia').restart()")
-        launcher = runpy.run_path(str(ROOT / "bin" / "sidekick-naia-cli"), run_name="integration_launcher")
+        launcher = runpy.run_path(str(ROOT / "bin" / "naia-attach"), run_name="integration_launcher")
         with patch.dict(os.environ, {"NVIM": a["socket"]}):
             self.assertTrue(launcher["get_naia_connection_info"]() == {"url": a["url"], "token": a["token"]},
                             "Naia registration restart must not change bridge credentials")

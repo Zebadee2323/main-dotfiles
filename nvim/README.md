@@ -28,7 +28,7 @@ Small standalone helpers register commands on their first `require`.
 
 Naia is a first-party subsystem in `lua/naia/`, not a local Lazy plugin. The
 MCP dependency's setup callback loads `config/naia.lua` after configuring the
-shared bridge; Sidekick and CodeCompanion depend on that same MCP plugin.
+shared bridge; CodeCompanion depends on that same MCP plugin.
 There is no runtime dependency on `~/Development/nvim-naia`.
 
 - `naia/init.lua`, `backend.lua`, `state.lua`, `config.lua`: provider API,
@@ -48,8 +48,11 @@ There is no runtime dependency on `~/Development/nvim-naia`.
 - `naia/walkthrough/response.lua` decodes/normalizes legacy chat/YAML responses;
   `file.lua` retains strict portable-file validation. MCP editing/registration
   remains in `tools.lua`, placement in `layout.lua`, confirmation in `prompt.lua`.
-- `bin/sidekick-naia-cli` and its instruction files: launch-scoped harness setup.
-- `opencode/naia/`: the Sidekick-only OpenCode instruction plugin.
+- `bin/naia-attach`: launch-scoped MCP configuration and skill discovery.
+- `bin/agent-notice.md`: the short attachment notice, without detailed UI rules.
+- `agent/skills/naia/SKILL.md`: on-demand editor usage guidance for all harnesses.
+- `agent/.claude-plugin/plugin.json`: Claude's session-only skill packaging.
+- `config/ai.lua`: tuios messaging and clipboard commands, independent of Sidekick.
 
 Voice playback remains in `features/voice/`; the shared MCP safety guard stays
 independent in `features/mcp_tools_runtime.lua`. UI commands and cleanup hooks
@@ -68,17 +71,18 @@ navigation/deletion, CodeCompanion folds, and path lookup outside Git. Timers ar
 invalidated on stop and cleaned up on editor shutdown.
 
 Run `make check` from this directory for configuration specs plus the imported
-provider, launcher, instruction-plugin and walkthrough regressions. Imported tests
+provider, launcher, skill-discovery and walkthrough regressions. Imported tests
 live in `tests/naia/`, without the standalone project's historical phase folders.
 The config specs using the real bridge registry require the installed MCP plugin.
 `make test-integration` exercises live HTTP transport; `make
-test-opencode-integration` exercises an installed OpenCode against a fake model.
-Both integration suites are opt-in. See [walkthrough reference](docs/walkthrough.md)
+test-opencode-integration` exercises an installed OpenCode against a fake model;
+`make test-codex-integration` verifies native skill discovery without model calls.
+These integration suites are opt-in. See [walkthrough reference](docs/walkthrough.md)
 and [bridge notes](docs/mcp-tools.md) for details.
 
 The launcher requires Python 3.9+; the bridge requires Bun or Node.js 18.19+
 with its npm dependencies installed. Walkthroughs require Neovim 0.11+.
-After this migration, restart Neovim and relaunch Sidekick rather than hot-reloading
+After this migration, restart Neovim and relaunch the attached agents rather than hot-reloading
 the existing bridge/session. The old standalone repository is not modified or
 deleted, but is no longer loaded by this configuration.
 
@@ -103,7 +107,7 @@ Use `:Lazy profile` to inspect loading costs. Plugin versions remain pinned in
 `guill/mcp-tools.nvim` is independently configured by `config/mcp_tools.lua` and
 starts before Naia loads. Naia registers individual tools alongside other
 providers; it does not initialize, configure, start or stop this shared server.
-The upstream OpenCode integration stays disabled because Sidekick handles the
+The upstream OpenCode integration stays disabled because `naia-attach` handles the
 OpenCode V2 connection to the exact parent editor.
 
 `features/mcp_tools_runtime.lua` is a temporary, Naia-independent safety guard:
@@ -118,8 +122,8 @@ the script entry point remains a normal filesystem path.
 - `:MCPToolsStart`, `:MCPToolsStop`, `:MCPToolsRestart`, `:MCPToolsStatus` control
   the shared transport independently of Naia.
 - `:NaiaStart`, `:NaiaStop`, `:NaiaRestart` attach/detach only Naia registrations.
-- Sidekick configures native HTTP connections to the existing bridge; no stdio
-  adapter is used and it never starts transport. Relaunch through Sidekick after
+- The attachment shim configures native HTTP connections to the existing bridge; no stdio
+  adapter is used and it never starts transport. Relaunch through the shim after
   a bridge restart to refresh its launch-scoped URL/token. Claude/Codex approvals follow the
   harness's policy rather than blanket approval of every shared-server tool.
 - Run `nvim --headless -u NONE -l tests/mcp_tools_spec.lua` to test configuration
@@ -128,9 +132,19 @@ the script entry point remains a normal filesystem path.
   ordinary text/JSON; all MCP tool names have upstream's `nvim_` prefix.
   Walkthrough tools are `nvim_walkthrough_*` (no `ai_`). Register before connecting;
   reconnect after adding/removing tools. Existing walkthrough edits need no reconnect.
-- Instructions are supplied through Sidekick, not the MCP server. Its private
-  OpenCode server injects them into every session, including new in-TUI sessions.
-  Claude and Codex still receive them at launch time.
+- The shim injects only the short attachment notice. Detailed UI guidance is an
+  optional Naia skill (`naia` in OpenCode, `naia:naia` in Codex/Claude), not an
+  automatically loaded prompt or reminder hook.
+  OpenCode's private server uses native `instructions` and `skills` config;
+  Claude uses `--append-system-prompt` and the local skill-only `--plugin-dir`.
+  Codex uses `developer_instructions` and ensures `$CODEX_HOME/skills/naia`
+  (default `~/.codex/skills/naia`) links to `agent/skills/naia` before launching.
+  A correct link is reused; conflicting files, directories or links are preserved
+  and the launch is cancelled. The link persists and is discoverable in ordinary
+  Codex sessions too. No approval policy or global harness config is changed.
+- Sidekick is no longer installed. Its `:AI` toggle and terminal keybinding are
+  removed. `:AISend`, `:AIMessage` and commit prompts route only to tuios agents;
+  outside tuios they explain how to use `:AICopy`, which remains available.
 - Run `nvim --headless -u NONE -l tests/naia_native_tools_spec.lua` to verify your
   configured tools against the upstream registry without starting a bridge.
 

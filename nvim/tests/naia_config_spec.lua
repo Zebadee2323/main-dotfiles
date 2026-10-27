@@ -13,7 +13,8 @@ for _, spec in ipairs(specs) do
     if type(spec) == 'table' then
         assert(not spec.dir and spec.name ~= 'nvim-naia', 'Naia must not be a local plugin')
         if spec[1] == 'guill/mcp-tools.nvim' then bridge = spec end
-        if spec[1] == 'folke/sidekick.nvim' or spec[1] == 'olimorris/codecompanion.nvim' then
+        assert(spec[1] ~= 'folke/sidekick.nvim', 'Sidekick must not be installed')
+        if spec[1] == 'olimorris/codecompanion.nvim' then
             assert(vim.tbl_contains(spec.dependencies, 'guill/mcp-tools.nvim'))
         end
     end
@@ -35,6 +36,6 @@ for _, name in ipairs({ 'NaiaStart', 'NaiaStop', 'NaiaRestart', 'NaiaStatus' }) 
 end
 package.loaded.naia = nil
 local wrapper = require('naia').wrapper_path()
-assert(wrapper == root .. '/bin/sidekick-naia-cli', 'Launcher must resolve inside this config')
+assert(wrapper == root .. '/bin/naia-attach', 'Launcher must resolve inside this config')
 assert(vim.fn.executable(wrapper) == 1, 'Launcher must stay executable')
 print('PASS: first-party Naia startup, dependency ordering, commands and launcher path')

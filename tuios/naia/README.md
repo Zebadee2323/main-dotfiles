@@ -34,11 +34,16 @@ including forked headless RPC servers, then asks their Unix sockets for readines
 and `require('naia').wrapper_path()`. It never starts an editor or bridge, types
 into a pane, or scans unrelated editor sockets.
 
-The selected editor's **existing Sidekick launcher** handles MCP registration,
-authentication and agent instructions. OpenCode uses a private V2 server and
-its Naia instruction plugin; Codex and Claude receive launch-scoped MCP/instruction
-overrides. Tokens stay in the launch environment, not arguments or files.
-Existing harness permissions remain in force. No global/project config is written.
+The selected editor's `nvim/bin/naia-attach` handles MCP configuration,
+authentication and a short attachment notice. Detailed editor guidance lives in
+`nvim/agent/skills/naia/SKILL.md` and is loaded only when useful. OpenCode uses a
+private V2 server with native skill/instruction sources; Claude loads the local
+skill-only plugin for this session. Codex creates a missing symlink at
+`$CODEX_HOME/skills/naia` (default `~/.codex/skills/naia`) to the Neovim-owned skill,
+or reuses the correct existing link. Conflicting entries are left untouched and
+cancel attachment. That link persists and is visible to other Codex sessions.
+Tokens stay in the launch environment, not arguments or files. Existing harness
+permissions remain in force. No global/project config is written.
 OpenCode administrative commands are handled by the upstream launcher without
 Naia config; explicit `--server` conversation launches are rejected upstream.
 

@@ -31,7 +31,7 @@ def run(argv):
 
 
 def cli_path(target, env):
-    """Remove shim directories from PATH so Sidekick cannot recurse into us."""
+    """Remove shim directories from PATH so the attachment launcher cannot recurse."""
     directories = []
     executable = None
     for entry in env.get("PATH", os.defpath).split(os.pathsep):
@@ -95,7 +95,7 @@ def sockets_for(pids):
 
 
 def probe(socket):
-    # No credentials leave the editor during discovery. Sidekick queries them later.
+    # No credentials leave the editor during discovery. The launcher queries them later.
     lua = """(function()
       local ok, naia = pcall(require, 'naia')
       if not ok or not naia.is_ready() then return '' end

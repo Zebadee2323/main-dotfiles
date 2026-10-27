@@ -109,7 +109,7 @@ function M.wrapper_path()
   local path = source:sub(1, 1) == "@" and source:sub(2) or source
   local config_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(path)))
 
-  return vim.fs.normalize(config_root .. "/bin/sidekick-naia-cli")
+  return vim.fs.normalize(config_root .. "/bin/naia-attach")
 end
 
 function M.last_error()

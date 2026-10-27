@@ -1043,8 +1043,9 @@ Naia-default Turbo model. Use `/reload` in OpenCode; refresh/reinstall Codex's
 cached plugin through its normal plugin workflow, then resume the conversation
 so revised instructions replace older hard-coded identity/prefix guidance.
 
-The old voice directives were removed from `nvim/bin/agent-instructions.md` and
-`nvim/bin/agent-reminder.md`; Neovim display/navigation instructions remain.
+Neovim display/navigation guidance now lives in
+`nvim/agent/skills/naia/SKILL.md`, separate from communications instructions;
+the attachment shim injects only a short notice and makes that skill discoverable.
 Existing conversations can retain older instructions until reloaded/resumed.
 Claude Code does not have an agent-comms startup adapter in this version; the
 shared template keeps its readability rule for reuse, not automatic installation.

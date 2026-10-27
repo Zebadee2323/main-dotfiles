@@ -1,5 +1,5 @@
 -- MCP tools is an independent service. Naia is only one tool provider.
--- Keep the legacy opencode.nvim integration disabled: Sidekick configures V2.
+-- Keep the legacy opencode.nvim integration disabled: naia-attach configures V2.
 require('features.mcp_tools_runtime').install()
 local mcp = require('mcp-tools')
 mcp.setup({

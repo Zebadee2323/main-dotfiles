@@ -1,8 +1,7 @@
 NVIM_BIN ?= nvim
-NODE_BIN ?= node
 PYTHON_BIN ?= python3
 
-.PHONY: check test test-config test-naia test-integration test-opencode-integration
+.PHONY: check test test-config test-naia test-integration test-opencode-integration test-codex-integration
 
 check: test
 
@@ -18,8 +17,7 @@ test-naia:
 	@set -e; for spec in tests/naia/test_*.lua; do \
 		$(NVIM_BIN) --headless -u tests/naia/minimal_init.lua -l "$$spec"; \
 	done
-	$(PYTHON_BIN) tests/naia/test_sidekick_naia_cli.py
-	$(NODE_BIN) --experimental-vm-modules --test tests/naia/test_opencode_plugin.mjs
+	$(PYTHON_BIN) tests/naia/test_naia_attach.py
 
 # Opt-in: starts isolated editors with the installed upstream bridge.
 test-integration:
@@ -30,3 +28,7 @@ test-integration:
 # Opt-in: installed OpenCode, isolated database, local fake model (no real model).
 test-opencode-integration:
 	NAIA_TEST_OPENCODE=1 $(PYTHON_BIN) tests/naia/test_opencode_private_integration.py
+
+# Opt-in: installed Codex lists skills using isolated HOME; no model calls.
+test-codex-integration:
+	NAIA_TEST_CODEX=1 $(PYTHON_BIN) tests/naia/test_codex_skill_integration.py

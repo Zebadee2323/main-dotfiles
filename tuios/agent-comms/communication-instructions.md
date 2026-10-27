@@ -83,7 +83,8 @@ markup goes ONLY in `--tts`. {speech_guidance}
 ## ElevenLabs v4 Turbo speech markup
 
 For ElevenLabs v4 Turbo, use square-bracket audio tags such as
-`[laughs]` to enhance your delivery. Put tags ONLY in the `--tts` string, never in
+`[laughs]` to enhance your delivery, try to use at least one in every message.
+Put tags ONLY in the `--tts` string, never in
 `--msg` or the readable message text. Keep any required introduction before tags.
 Example (after satisfying introduction rules): `--msg 'Glad you approve!'`
 with `--tts 'Glad you approve! [laughs]'`. Express yourself with tags!

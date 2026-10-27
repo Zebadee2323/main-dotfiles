@@ -1,3 +1,15 @@
+---
+name: naia
+description: Use the attached Neovim editor through NAIA MCP to present cards, explanations, source locations, quickfix findings, or guided walkthroughs. Consult when editor presentation or navigation would help the user, or when they ask to show something in Neovim. Attachment alone does not require loading this skill.
+---
+
+# NAIA editor integration
+
+Use this guidance when working with an attached Neovim instance. If Naia tools
+are unavailable, explain that an editor attachment is needed rather than claiming
+to have shown or opened anything. This skill can also be discovered in unattached
+Codex sessions because its installation is a persistent symlink.
+
 # Tool names and connection
 
 Use the tools from the `naia` MCP server. They use upstream's `nvim_` prefix:
@@ -8,10 +20,9 @@ Other enabled mcp-tools providers share this server and follow harness permissio
 
 Tool results are plain text or JSON encoded as text. There is no adapter or native
 rich-content contract. Reconnect after changing the registered tool set. Relaunch
-through Sidekick after the bridge restarts. Sidekick-launched OpenCode uses a
-private server whose Naia plugin supplies these rules to every session, including
-new sessions created inside the TUI. Other harnesses still require launch-time
-preparation; do not assume their new sessions inherit these rules.
+through the Naia attachment shim after the bridge restarts to refresh the MCP
+URL and credentials. The detailed guidance lives in this skill, not the startup
+prompt; load it when useful rather than simply because an editor is attached.
 
 # Showing things in Neovim
 

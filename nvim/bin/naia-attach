@@ -2,63 +2,35 @@
 
 import json
 import os
-import shlex
+from pathlib import Path
 import subprocess
 import sys
 from urllib.parse import urlsplit
 
 
 def warn(message):
-    print(f"sidekick-naia-cli: {message}", file=sys.stderr)
+    print(f"naia-attach: {message}", file=sys.stderr)
 
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-AGENT_INSTRUCTIONS_FILE = os.path.join(SCRIPT_DIR, "agent-instructions.md")
-AGENT_REMINDER_FILE = os.path.join(SCRIPT_DIR, "agent-reminder.md")
-OPENCODE_PLUGIN_DIR = os.path.realpath(os.path.join(SCRIPT_DIR, "..", "opencode", "naia"))
+NOTICE_FILE = Path(SCRIPT_DIR) / "agent-notice.md"
+AGENT_DIR = Path(SCRIPT_DIR).parent / "agent"
+SKILLS_DIR = AGENT_DIR / "skills"
+NAIA_SKILL = SKILLS_DIR / "naia"
 MCP_TOKEN_ENV = "NAIA_MCP_TOKEN"
 
 
-def notify_nvim(message, level="INFO"):
-    nvim_server = os.environ.get("NVIM") or os.environ.get("NVIM_LISTEN_ADDRESS")
-    if not nvim_server:
-        return
-
-    lua_chunk = """
-(function(args)
-  local msg, level_name = args[1], args[2]
-  vim.schedule(function()
-    local level = vim.log.levels[level_name] or vim.log.levels.INFO
-    vim.notify(msg, level, { title = "Sidekick Naia" })
-  end)
-  return true
-end)(_A)
-""".strip()
-    expr = "luaeval(%s, %s)" % (
-        json.dumps(lua_chunk),
-        json.dumps([message, level]),
-    )
-
+def ensure_codex_skill(env):
+    """Install only our missing link; never overwrite another skill or stale link."""
+    home = Path(env.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    link = home / "skills" / "naia"
+    link.parent.mkdir(parents=True, exist_ok=True)
     try:
-        subprocess.run(
-            ["nvim", "--headless", "--server", nvim_server, "--remote-expr", expr],
-            capture_output=True, text=True, check=False, timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return
-
-
-def deep_merge(base, override):
-    if not isinstance(base, dict) or not isinstance(override, dict):
-        return override
-
-    merged = dict(base)
-    for key, value in override.items():
-        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
-            merged[key] = deep_merge(merged[key], value)
-        else:
-            merged[key] = value
-    return merged
+        link.symlink_to(NAIA_SKILL, target_is_directory=True)
+    except FileExistsError:
+        pass  # Includes concurrent launches and dangling links; verify below.
+    if not link.is_symlink() or link.resolve() != NAIA_SKILL.resolve():
+        raise ValueError(f"{link} already exists and is not a symlink to {NAIA_SKILL}; left untouched")
 
 
 def get_naia_connection_info():
@@ -123,62 +95,20 @@ end)()
 def build_opencode_env(env, connection_info):
     env = dict(env)
     env[MCP_TOKEN_ENV] = connection_info["token"]
-    payload = {
-        "mcp": {
-            "servers": {
-                "naia": {
-                    "type": "remote",
-                    "url": connection_info["url"],
-                    "oauth": False,
-                    "headers": {"Authorization": "Bearer {env:" + MCP_TOKEN_ENV + "}"},
-                    "disabled": False,
-                }
-            }
-        },
+    config = json.loads(env.get("OPENCODE_CONFIG_CONTENT") or "{}")
+    mcp = config.setdefault("mcp", {})
+    mcp.setdefault("servers", {})["naia"] = {
+        "type": "remote", "url": connection_info["url"], "oauth": False,
+        "headers": {"Authorization": "Bearer {env:" + MCP_TOKEN_ENV + "}"},
     }
-
-    existing = env.get("OPENCODE_CONFIG_CONTENT")
-    if existing:
-        try:
-            parsed = json.loads(existing)
-            if not isinstance(parsed, dict):
-                raise ValueError("configuration must be an object")
-        except ValueError:
-            warn("invalid OPENCODE_CONFIG_CONTENT, replacing it with Naia MCP config")
-            parsed = {}
-    else:
-        parsed = {}
-
-    merged = deep_merge(parsed, payload)
-    # Replace our server as a whole, including any inherited V1 definition.
-    merged["mcp"].pop("naia", None)
-    merged["mcp"]["servers"]["naia"] = payload["mcp"]["servers"]["naia"]
-    plugins = merged.setdefault("plugins", [])
-    if not isinstance(plugins, list):
-        raise ValueError("OpenCode plugins configuration must be a list")
-    # Keep caller plugins and make repeated preparation idempotent.
-    plugins = [entry for entry in plugins
-               if entry != OPENCODE_PLUGIN_DIR
-               and not (isinstance(entry, dict) and entry.get("package") == OPENCODE_PLUGIN_DIR)]
-    merged["plugins"] = plugins + [OPENCODE_PLUGIN_DIR]
-    # The plugin now owns Naia instructions. Remove only our legacy config
-    # entry; unrelated caller instruction files must remain untouched.
-    if isinstance(merged.get("instructions"), list):
-        merged["instructions"] = [path for path in merged["instructions"] if path != AGENT_INSTRUCTIONS_FILE]
-        if not merged["instructions"]:
-            del merged["instructions"]
-
-    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(merged)
+    for key, path in (("instructions", NOTICE_FILE), ("skills", SKILLS_DIR)):
+        entries = config.setdefault(key, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"OpenCode {key} must be a list")
+        if str(path) not in entries:
+            entries.append(str(path))
+    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
     return env
-
-
-def read_agent_instructions():
-    try:
-        with open(AGENT_INSTRUCTIONS_FILE, "r", encoding="utf-8") as handle:
-            return handle.read()
-    except OSError as error:
-        warn(f"failed to read agent instructions file: {error}")
-        return None
 
 
 def opencode_session_options(argv):
@@ -233,11 +163,6 @@ def build_opencode_args(argv):
         return argv
     if "--server" in options["connection_args"]:
         raise ValueError("Naia requires a private server, not an explicit --server")
-    instructions = read_agent_instructions()
-    if not instructions or not instructions.strip():
-        raise ValueError("cannot launch Naia without a readable, non-empty agent instructions file")
-    if not os.path.isfile(os.path.join(OPENCODE_PLUGIN_DIR, "index.js")):
-        raise ValueError("cannot launch Naia without the OpenCode instructions plugin")
     # Let OpenCode handle new/resumed/continued/forked sessions itself. Inserting
     # before -- preserves literal run messages and workspace arguments.
     if "--standalone" in options["connection_args"]:
@@ -266,38 +191,13 @@ def build_claude_args(argv, connection_info):
         json.dumps(mcp_config),
     ]
 
-    instructions = read_agent_instructions()
-    if not instructions or not instructions.strip():
-        raise ValueError("cannot launch Naia without readable, non-empty agent instructions")
-    extra += ["--append-system-prompt", instructions]
-
-    # Re-inject a lightweight reminder on every turn so the core Naia rules
-    # never drift out of context. The reminder text lives in its own file
-    # (agent-reminder.md) so it can be edited without touching this script.
-    if os.path.exists(AGENT_REMINDER_FILE):
-        hook_settings = {
-            "hooks": {
-                "UserPromptSubmit": [
-                    {
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": f"cat {shlex.quote(AGENT_REMINDER_FILE)}",
-                            }
-                        ]
-                    }
-                ]
-            }
-        }
-        extra += ["--settings", json.dumps(hook_settings)]
+    extra += ["--append-system-prompt", NOTICE_FILE.read_text(encoding="utf-8").strip(),
+              "--plugin-dir", str(AGENT_DIR)]
 
     return extra + argv
 
 
 def build_codex_args(argv, connection_info):
-    instructions = read_agent_instructions()
-    if not instructions or not instructions.strip():
-        raise ValueError("cannot launch Naia without readable, non-empty agent instructions")
     # Replace this server as a whole, so an inherited old stdio command cannot
     # conflict with the new URL. Neither the override nor instructions contain a token.
     server = ("{ url = " + json.dumps(connection_info["url"])
@@ -306,7 +206,7 @@ def build_codex_args(argv, connection_info):
         "-c",
         "mcp_servers.naia=" + server,
         "-c",
-        f"model_instructions_file={json.dumps(AGENT_INSTRUCTIONS_FILE)}",
+        "developer_instructions=" + json.dumps(NOTICE_FILE.read_text(encoding="utf-8").strip()),
     ]
     return extra + argv
 
@@ -324,32 +224,31 @@ def main():
     connection_info = get_naia_connection_info()
     if not connection_info:
         warn("Naia bridge info unavailable, launching without injected MCP config")
-        notify_nvim("Naia bridge info unavailable, launching without injected MCP config", "WARN")
 
     try:
+        if connection_info:
+            if not NOTICE_FILE.read_text(encoding="utf-8").strip() or not (NAIA_SKILL / "SKILL.md").is_file():
+                raise ValueError("Naia attachment notice and skill must be installed")
         if target == "opencode":
             if connection_info:
                 # Administrative commands must not inherit Naia's launch config.
                 if opencode_session_options(target_args) is not None:
                     target_args = build_opencode_args(target_args)
                     env = build_opencode_env(env, connection_info)
-                    notify_nvim("Launching private opencode with Naia MCP and instructions")
         elif target == "codex":
             if connection_info:
                 env[MCP_TOKEN_ENV] = connection_info["token"]
-                notify_nvim("Launching codex with Naia MCP")
+                ensure_codex_skill(env)
                 target_args = build_codex_args(target_args, connection_info)
         elif target == "claude":
             if connection_info:
                 env[MCP_TOKEN_ENV] = connection_info["token"]
-                notify_nvim("Launching claude with Naia MCP")
                 target_args = build_claude_args(target_args, connection_info)
         else:
             warn(f"unsupported target CLI: {target}")
             return 1
-    except (ValueError, KeyError, TypeError, OSError) as error:
-        warn(f"failed to prepare {target} MCP/instructions: {error}")
-        notify_nvim("Failed to prepare Naia MCP/instructions; launch cancelled (see terminal)", "ERROR")
+    except (ValueError, KeyError, TypeError, AttributeError, OSError) as error:
+        warn(f"failed to prepare {target} attachment: {error}")
         return 1
 
     os.execvpe(target, [target] + target_args, env)
