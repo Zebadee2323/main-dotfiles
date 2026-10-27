@@ -202,6 +202,22 @@ local function prune_companions()
   end
 end
 
+-- Displaying a companion only needs a split anchor, not a source-editing
+-- buffer. Prefer an editing window, but allow terminal/nofile-only tabs too.
+-- Keep editing_window() strict for source navigation.
+local function companion_anchor()
+  local windows = { vim.api.nvim_get_current_win() }
+  vim.list_extend(windows, vim.api.nvim_tabpage_list_wins(0))
+  local fallback
+  for _, window in ipairs(windows) do
+    if vim.api.nvim_win_get_config(window).relative == "" then
+      if vim.bo[vim.api.nvim_win_get_buf(window)].buftype == "" then return window end
+      fallback = fallback or window
+    end
+  end
+  return assert(fallback, "No split window is available in this tab")
+end
+
 function M.open_companion(focus)
   prune_companions()
   local buffer = companion_history[companion_index]
@@ -218,7 +234,7 @@ function M.open_companion(focus)
     vim.api.nvim_win_set_buf(window, buffer)
     if focus then vim.api.nvim_set_current_win(window) end
   else
-    local source = editing_window()
+    local source = companion_anchor()
     local config = { win = source, split = vim.o.columns >= 100 and "right" or "below" }
     if config.split == "right" then
       config.width = math.min(60, math.floor(vim.api.nvim_win_get_width(source) * 0.4))
