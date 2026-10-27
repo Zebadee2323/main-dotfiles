@@ -574,6 +574,8 @@ def pane_binding(paths, config, *, allocate=True, clear=False, env=None):
         return pane_identity.resolve(paths, config, private_dir=private_dir, lock=FileLock,
                                      atomic_json=atomic_json, draw_id=draw_id, error=CommsError, allocate=allocate,
                                      clear=clear, env=env, eligible_ids=active_identity_ids(config))
+    except pane_identity.MissingIdentityError as exc:
+        raise ContextMismatch(f"{exc} Message was not queued.") from None
     except ValueError as exc:
         raise CommsError(str(exc)) from None
 

@@ -12,6 +12,10 @@ GRACE_SECONDS = 7 * 24 * 3600
 SCAN_INTERVAL = 3600
 
 
+class MissingIdentityError(ValueError):
+    """The caller has no usable binding; a checked context lookup can recover it."""
+
+
 def owner(env=None):
     env = os.environ if env is None else env
     if env.get("TUIOS_ENV") != "1":
@@ -104,7 +108,7 @@ def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, al
     if not allocate:
         saved = read_state(filename, error)["bindings"].get(key)
         if saved is None or saved["id"] not in config["identities"]:
-            raise error("Pane has no current identity. Run 'agent-comms context' before sending.")
+            raise MissingIdentityError("Pane has no current identity.")
         return saved["id"]
 
     with lock(directory / "pane-identities.lock"):

@@ -102,7 +102,8 @@ def context(name, run=subprocess.run, env=None, strict=False):
                          if window.get("workspace") == workspace and window.get("window_id") != pane)
         session_name = info.get("session_name") or session
         source = {"session_name": session_name, "pane_id": pane, "workspace": workspace,
-                   "introduce": not sole_agent and (not visible or not focused)}
+                   # Being alone only removes ambiguity in the workspace the user can see.
+                   "introduce": not visible or (not sole_agent and not focused)}
         workspace_names = info.get("workspace_names")
         if isinstance(workspace_names, dict):
             workspace_name = workspace_names.get(str(workspace))

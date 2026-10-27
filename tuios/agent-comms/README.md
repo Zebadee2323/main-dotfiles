@@ -90,11 +90,11 @@ handles SIGTERM for clean shutdown where the OS delivers it.
 
 `context` checks the current tuios focus and pane geometry on every call:
 
-- Caller is the only agent pane in its workspace: no required prefix, even when
-  another terminal is focused, another workspace is current, or the session is
-  detached. Agents in other workspaces do not count. Idle agents still count;
+- Caller is the only agent pane in the currently visible workspace: no required
+  prefix, even when another terminal is focused. A hidden workspace or detached
+  session still requires attribution. Agents in other workspaces do not count. Idle agents still count;
   unknown peer state conservatively preserves attribution.
-- Caller is focused: no required prefix.
+- Caller is focused in the currently visible workspace: no required prefix.
 - Another pane is focused in the same workspace: `Alice here, to your top-right.`
   Directions are relative to the focused pane, including non-agent panes. Panes
   with overlapping vertical/horizontal spans share that row/column; overlapping
@@ -112,7 +112,7 @@ Copy the exact prefix once at the start of both `--msg` and `--tts`. `send`
 uses the same client-side prefix policy as `context`; the listener handles
 identity allocation, so an older running listener cannot return a stale prefix.
 `send` rechecks focus and geometry, rejecting stale or duplicated introductions before
-queueing. On an identity/prefix mismatch it automatically runs a context lookup and
+queueing. On a missing pane identity or identity/prefix mismatch it automatically runs a context lookup and
 returns `Fresh context: {"id":...,"name":...,"prefix":...}` on stderr, with a nonzero
 exit status. Use that checked result to recompose both message arguments and retry
 once; no separate lookup is needed. The message is never rewritten or automatically
@@ -125,8 +125,10 @@ change for spatial prefixes.
 Identity allocation inside tuios is pane-scoped, independent of the harness or
 conversation. `send` resolves the pane's persisted binding internally and requires
 `--id` to match it. This is an assertion, not an identity selector. A mismatch
-rejects the send and returns a fresh ID, name, and prefix through an automatic
-`context` lookup. See ownership and cleanup below.
+or missing binding rejects the send and returns a fresh ID, name, and prefix through
+an automatic `context` lookup. Missing bindings are allocated by the listener,
+not by the sending client. Corrupt state still fails without recovery or allocation.
+See ownership and cleanup below.
 
 Run `agent-comms context --clear` in the pane whose mapping you want to release.
 It is safe to repeat (`cleared: false`, `id: null` when already unmapped), and

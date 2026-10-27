@@ -97,8 +97,8 @@ class SpatialContextTests(unittest.TestCase):
             self.assertTrue(source["introduce"])
             self.assertNotIn("position", source)
 
-    def test_sole_agent_needs_no_prefix_regardless_of_focus_visibility_or_geometry(self):
-        for options in ({}, {"current": 2}, {"attached": False}, {"geometry": False},
+    def test_visible_sole_agent_needs_no_prefix_regardless_of_focus_or_geometry(self):
+        for options in ({}, {"focused": "own"}, {"geometry": False},
                         {"focused": "missing"}):
             with self.subTest(options=options):
                 source = self.inspect(other_state="none", **options)
@@ -106,6 +106,23 @@ class SpatialContextTests(unittest.TestCase):
                 self.assertNotIn("position", source)
                 self.assertNotIn("position_reference", source)
                 self.assertEqual(app.expected_prefix({"identities": {"a": {"name": "Alice"}}}, "a", source), "")
+
+    def test_hidden_sole_agent_requires_workspace_prefix_even_if_marked_focused(self):
+        for options in ({"current": 2}, {"attached": False},
+                        {"current": 2, "focused": "own"}, {"attached": False, "focused": "own"}):
+            with self.subTest(options=options):
+                source = self.inspect(other_state="none", **options)
+                self.assertTrue(source["introduce"])
+                self.assertEqual(source["position_reference"], "workspace")
+                self.assertEqual(app.expected_prefix({"identities": {"a": {"name": "Alice"}}}, "a", source),
+                                 "Alice here, in the work session, workspace 1, in the top-right.")
+
+    def test_hidden_sole_agent_without_geometry_still_requires_attribution(self):
+        source = self.inspect(other_state="none", current=2, geometry=False)
+        self.assertTrue(source["introduce"])
+        self.assertNotIn("position", source)
+        self.assertEqual(app.expected_prefix({"identities": {"a": {"name": "Alice"}}}, "a", source),
+                         "Alice here, of the work session.")
 
     def test_agents_on_other_workspaces_do_not_require_a_prefix(self):
         self.assertFalse(self.inspect(other_workspace=2)["introduce"])
@@ -122,7 +139,8 @@ class SpatialContextTests(unittest.TestCase):
                                 subprocess.CompletedProcess([], 0, json.dumps(listing))])
         source = context.context("Alice", run=run,
                                  env={"TUIOS_ENV": "1", "TUIOS_SESSION": "work", "TUIOS_PANE_ID": "own"}, strict=True)
-        self.assertFalse(source["introduce"])
+        self.assertTrue(source["introduce"])
+        self.assertEqual(source["position_reference"], "workspace")
 
 
 class SpatialPrefixTests(Fixture):
@@ -166,6 +184,20 @@ class SpatialPrefixTests(Fixture):
             send.assert_awaited_once_with(self.paths, "a", "Ready.", None, source)
         with self.assertRaisesRegex(app.CommsError, "Prefix mismatch"):
             app.validate_message(self.config(), "a", "Alice here, to your top-right. Ready.", source=source)
+
+    def test_hidden_lone_agent_context_and_send_require_the_same_prefix(self):
+        source = SpatialContextTests().inspect(other_state="none", current=2)
+        prefix = "Alice here, in the work session, workspace 1, in the top-right."
+        with patch.object(app, "checked_context", return_value=source), \
+                patch.object(app, "pane_binding", return_value="a"), \
+                patch.object(app.Paths, "resolve", return_value=self.paths), \
+                patch.object(app, "send", new=AsyncMock()) as send:
+            self.assertEqual(app.identify(self.paths, self.config()), {"id": "a", "name": "Alice", "prefix": prefix})
+            text = prefix + " Ready."
+            self.assertEqual(app.main(["send", "--id", "a", "--msg", text, "--tts", text]), 0)
+            send.assert_awaited_once_with(self.paths, "a", text, text, source)
+        with self.assertRaisesRegex(app.CommsError, "Prefix mismatch"):
+            app.validate_message(self.config(), "a", "Ready.", source=source)
 
     def test_duplicate_stale_and_markup_prefixed_introductions_are_rejected(self):
         expected = "Alice here, to your top-right."

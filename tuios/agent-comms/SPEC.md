@@ -31,7 +31,10 @@ all three scopes. None clears pane identities or history.
 prefix, resolving ownership from the tuios environment only (no harness/session
 identity-selection flags). Outside tuios, lookup fails clearly. Agents must insert
 it themselves in both display and TTS text. `send` rechecks context and rejects
-mismatches without queueing or rewriting the message. This supersedes the earlier
+mismatches without queueing or rewriting the message. Missing pane identities also
+reject the send and return fresh context via the listener; they do not trigger an
+automatic resend. Corrupt identity state does not trigger recovery or allocation.
+This supersedes the earlier
 automatic-introduction behavior.
 
 ## Technology and platforms
