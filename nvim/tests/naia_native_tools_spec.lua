@@ -11,11 +11,12 @@ assert(not err, err)
 require('naia.tools').setup()
 vim.wait(20, function() return false end)
 local tools = mcp.list_tools()
-for _, name in ipairs({ 'inform_user', 'execute_neovim_command', 'show_card', 'show_companion',
+for _, name in ipairs({ 'execute_neovim_command', 'show_card', 'show_companion',
     'set_quickfix', 'jump_to_location', 'get_ui_request_status', 'get_working_directory' }) do
     assert(tools[name], name .. ' did not register using upstream args')
 end
-assert(tools.inform_user.args.message.required and tools.show_card.args.title.required)
+assert(not tools.inform_user, 'Retired speech tool must not be exposed over MCP')
+assert(tools.show_card.args.title.required)
 local registry = require('mcp-tools.registry')
 local muted = registry.execute('show_card', { title = 'Native test', content = 'Text result', reason = 'Test policy' })
 assert(muted.done and not muted.error and type(muted.result) == 'string')

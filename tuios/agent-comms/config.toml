@@ -6,7 +6,7 @@ active_groups = ["phonon"] # Groups eligible for NEW random-bag draws.
 # from ELEVENLABS_API_KEY in watcher processes, never from this file.
 [speech]
 mode = "elevenlabs" # "pocket_tts", "phonon", or "elevenlabs".
-model = "eleven_turbo_v2_5"
+model = "eleven_v4_turbo"
 elevenlabs_speed = 1.0
 phonon_speed = 1.0
 pocket_tts_speed = 1.0

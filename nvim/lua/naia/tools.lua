@@ -1,7 +1,6 @@
 local M = {}
 local initialized = false
 local naia_tool_names = {
-  inform_user = "inform_user",
   execute_neovim_command = "execute_neovim_command",
 }
 
@@ -10,46 +9,10 @@ _G.__naia_command_permissions = _G.__naia_command_permissions or {
   allowed_details = {},
 }
 
-local function notify_naia_tool_error(err)
-  vim.schedule(function()
-    vim.notify("Naia tool error: " .. tostring(err), vim.log.levels.WARN)
-  end)
-end
-
 local function notify_naia_tool_registration_error(tool_name, err)
   vim.schedule(function()
     vim.notify("Failed to register Naia `" .. tool_name .. "` tool: " .. tostring(err), vim.log.levels.WARN)
   end)
-end
-
-local function naia_inform_user(args)
-  local message = args and args.message or nil
-
-  if type(message) ~= "string" then
-    message = tostring(message or "")
-  end
-
-  message = vim.trim(message)
-  if message == "" then
-    error("inform_user requires a non-empty message")
-  end
-
-  vim.schedule(function()
-    local ok, err = pcall(vim.api.nvim_cmd, {
-      cmd = "AIVoice",
-      args = { message },
-    }, {})
-
-    if not ok then
-      notify_naia_tool_error(err)
-    end
-  end)
-
-  local seconds = require("features.voice.captions").estimate_talk_seconds(message)
-  return string.format(
-    "Message queued for speech. Estimated talk time: %.1f seconds (approximate; excludes synthesis and playback startup).",
-    seconds
-  )
 end
 
 local function normalize_command_line(command_line)
@@ -233,24 +196,11 @@ local function register_naia_tools()
     return
   end
 
+  -- Remove the retired speech tool if setup is reloaded in an existing session.
+  pcall(naia.deregister_tool, "inform_user")
+
   for _, tool_name in pairs(naia_tool_names) do
     pcall(naia.deregister_tool, tool_name)
-  end
-
-  local inform_registered, inform_err = naia.register_tool(naia_tool_names.inform_user, {
-    description = "Notify the user in Neovim and speak the message aloud. Returns an approximate talk time in seconds, excluding synthesis and playback startup.",
-    args = {
-      message = {
-        type = "string",
-        required = true,
-        description = "The user-facing message to announce.",
-      },
-    },
-    callback = naia_inform_user,
-  })
-
-  if not inform_registered then
-    notify_naia_tool_registration_error(naia_tool_names.inform_user, inform_err)
   end
 
   local command_registered, command_err = naia.register_tool(naia_tool_names.execute_neovim_command, {

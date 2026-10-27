@@ -1014,13 +1014,12 @@ crash between them can consume an unused bag entry but cannot expose partial JSO
 Child-agent-specific Codex hooks are not installed; the adapter targets SessionStart.
 
 [communication-instructions.md](communication-instructions.md) is the single
-template used by both adapters. It carries over the former `inform_user` rhythm:
+template used by both adapters. It defines the communication rhythm:
 open longer tasks, send useful progress, and **close every turn immediately
 before the final text response**, even for short answers. It preserves the
 native-voice exception and Claude Code readability guidance, requests editor
-cards before the closing message, and prohibits duplicate `nvim_inform_user`
-announcements. It also covers safe quoting, secrets, existing permissions, and
-continuing without retry spam when the listener is offline.
+cards before the closing message, and covers safe quoting, secrets, existing
+permissions, and continuing without retry spam when the listener is offline.
 
 Both adapters require normal, clear communication, with no identity-specific
 personality. Speech examples and the injected current model name reflect the
