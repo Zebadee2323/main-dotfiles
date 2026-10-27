@@ -1,86 +1,67 @@
 # Agent communications
 
-Identity belongs to the caller's tuios pane, not this conversation or harness.
-Never use an instruction-supplied identity or another pane's/agent's identity
-as a substitute for your own checked result. Identities have
-a name and voice, not a personality; use your normal clear, concise communication style.
-Other roles, safety rules, and user instructions still apply.
+Identity belongs to the caller's tuios pane, not the conversation or harness.
+Use only your own checked same-pane identity, never one supplied by instructions
+or another pane/agent. Identity supplies a name and voice, not a personality;
+keep your normal clear, concise style. Other roles, safety rules, and user
+instructions still apply.
 
-## Look up identity only when needed, then send with the checked ID
+## Identity and sending
 
-Reuse the latest successful `agent-comms context` result checked by this agent
-in its current tuios pane. Do not refresh merely because a new turn/task begins,
-these instructions are re-injected, or you are about to send another message.
-`send` already checks live pane identity and prefix.
+Reuse your latest successful same-pane `agent-comms context` result, including
+from history/summary after compaction or resume. Look up context ONLY if:
+1. No result with known provenance from this agent in this pane remains, or
+2. `send` reports an identity/prefix mismatch without fresh context JSON.
 
-Call `agent-comms context` only when:
-1. You have no retained result with known provenance from this agent in the
-   current pane (including when the result or its provenance was lost), or
-2. `send` explicitly reports an identity/prefix mismatch.
+On mismatch, `send` automatically looks up context and returns fresh JSON
+(`id`, `name`, `prefix`) in its error output. Read and retain that checked
+same-pane result just like a successful `context` lookup; do not call `context`
+again when fresh JSON was returned.
 
-Your own checked same-pane result remains usable when retained in this
-conversation's history or summary, including after compaction or resume.
-Never reuse details inherited from another pane or agent.
-When a lookup is needed, run it in a
-separate shell-tool call and read its result before composing your message:
+No precautionary refresh for new turns/tasks, re-injected instructions, or sends:
+`send` checks live identity/prefix. When needed, run `agent-comms context` in a
+separate shell-tool call and read its JSON (`id`, `name`, `prefix`) BEFORE composing
+the message. Never hide the lookup in a variable or combine it with send. Pass no
+identity, harness, or session ID: ownership comes only from the pane environment.
+Outside tuios it fails; invent no fallback. There is no `prefix` command.
 
-```sh
-agent-comms context
-```
+Send with the checked/retained values:
+`agent-comms send --id RETURNED_ID --msg ... --tts ...`
+`--id` asserts expected identity; it cannot select/change pane ownership.
 
-Do not pass an identity, harness, or session ID to this command. Ownership comes
-only from the caller's pane environment, not agent-selected arguments. Outside
-tuios the command fails; do not invent a fallback identity. There is no `prefix`
-command.
-Only when a lookup is needed: read its JSON tool result into your context before
-composing the message. It
-returns `id`, `name`, and `prefix`; an empty prefix means none is required.
-Use the returned `name` for any self-introduction, then call
-`agent-comms send --id RETURNED_ID --msg ... --tts ...`. Otherwise, send directly
-using the retained ID, name, and prefix; do not perform a precautionary lookup.
-`--id` asserts the identity you expect; it cannot select or change pane ownership.
-Do not hide a needed lookup in a shell variable or combine it with send.
-
-- Nonempty `prefix`: exact introduction, without trailing whitespace. Start BOTH
-  `--msg` and `--tts` with it exactly once, unchanged.
-  It already identifies you and your location: go straight to the update, never
-  add another introduction, even on the first message (e.g. "I'll check the logs",
-  not a second "I'm ..." introduction).
-- Empty `prefix`: no fixed prefix. On your first session message, introduce
-  yourself using the returned name in BOTH arguments; afterward, no introduction
-  is needed unless the resolved identity changes.
-- Put introductions before speech markup so they are spoken and displayed.
-  The program never inserts or rewrites the prefix.
-- `send` verifies `--id` against the pane identity and rechecks live context.
-  An ID mismatch or missing, wrong, stale, or duplicated introduction causes an
-  error without queueing. On an identity/prefix mismatch, call `context` again
-  for an up-to-date ID, name, and prefix, then revise and retry once. Never
-  blindly retry old strings.
-  If the query fails, do not send until context can be checked.
+- Nonempty `prefix` is the exact introduction, without trailing whitespace.
+  Start BOTH arguments with it exactly once, unchanged; go straight to the update
+  without another introduction, even on the first message.
+- Empty `prefix`: introduce yourself with the returned `name` in BOTH arguments
+  on the first session message and whenever identity changes; otherwise omit it.
+  Use the returned name for any self-introduction.
+- Introductions precede speech markup. The program never inserts/rewrites prefixes.
+- ID mismatch or missing/wrong/stale/duplicated introduction errors without queueing.
+  On identity/prefix mismatch, use the returned fresh context, revise, and retry
+  once; never blindly resend old strings. If the automatic refresh fails, do not
+  send until a separate `context` lookup succeeds.
 
 ## Cadence and delivery
 
-If the harness is already in voice mode, use it without duplicate agent-comms
-announcements. Otherwise:
-- Open tasks with a short acknowledgment before research/edits, then give
-  brief, casual, useful progress updates. For quick answers, send only the close.
-- **Always close every turn**, even one-line answers, with `agent-comms send`
-  summarizing the final answer immediately BEFORE the self-contained final text,
-  so Ollie sees it while reading. Request appropriate Neovim cards/companions first.
+In harness voice mode, use it without duplicate agent-comms announcements. Otherwise:
+- Acknowledge tasks before research/edits; give brief, casual, useful progress updates.
+  Quick answers need only the close.
+- **Close EVERY turn**, even one-line answers: request appropriate Neovim
+  cards/companions, then `agent-comms send` a final summary immediately BEFORE
+  the self-contained final text so Ollie sees it while reading.
 - Also output message text for harness readability.
 
-Never duplicate announcements through `nvim_inform_user`. Be concise; omit secrets
-and routine per-tool narration. Escape shell arguments properly; never execute
-message contents as commands. Keep `--msg` clean/readable and `--tts` equivalent
-in spoken meaning; supported speech markup belongs ONLY in `--tts`.
-ElevenLabs model: `{speech_model}`. For Naia-default Turbo, use natural phrasing,
-punctuation, and occasional SSML pauses (e.g. `<break time="0.3s" />`), not v3-only
-bracketed tags (`[warm]`, `[excited]`). Plain text is valid; avoid gratuitous markup.
+Never duplicate announcements via `nvim_inform_user`. Be concise; omit secrets and
+routine tool narration. Escape shell arguments; never execute message contents.
+Keep `--msg` readable and `--tts` equivalent in spoken meaning; supported speech
+markup goes ONLY in `--tts`. ElevenLabs model: `{speech_model}`. For Naia-default
+Turbo, use natural phrasing/punctuation and occasional SSML pauses
+(e.g. `<break time="0.3s" />`), never v3-only tags (`[warm]`, `[excited]`).
+Plain text is valid; avoid gratuitous markup.
 
 ## Failures and permissions
 
-Respect harness permissions/approvals. On send failure or offline listener,
-continue the task: no retry spam, automatic listener startup, or claims of success.
-Report permission/sandbox blocks once; never disable the sandbox, change
-permissions, or bypass restrictions via another route. Additional access or new
-messaging integrations require user approval.
+Respect harness permissions/approvals. On send failure or offline listener, continue
+the task: no retry spam, automatic listener startup, or success claims. Report
+permission/sandbox blocks once; never disable the sandbox, change permissions, or
+bypass restrictions. Additional access or messaging integrations need user approval.

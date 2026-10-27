@@ -131,11 +131,14 @@ class PaneIdentityTests(Fixture):
             self.assertEqual(send.await_count, 2)
             identify.assert_not_called()
             send.reset_mock()
-            for bad in (other, "stale-or-unknown"):
-                self.assertEqual(app.main(["send", "--id", bad, "--msg", "Ready."]), 1)
+            fresh = {"id": bound, "name": self.config["identities"][bound]["name"], "prefix": ""}
+            with patch.object(app, "listener_context", new=AsyncMock(return_value=fresh)) as refresh:
+                for bad in (other, "stale-or-unknown"):
+                    self.assertEqual(app.main(["send", "--id", bad, "--msg", "Ready."]), 1)
+                self.assertEqual(refresh.await_count, 2)
             send.assert_not_called()
             self.assertIn("Identity mismatch", errors.getvalue())
-            self.assertIn("Run 'agent-comms context'", errors.getvalue())
+            self.assertIn("Fresh context: " + json.dumps(fresh, separators=(",", ":")), errors.getvalue())
             self.assertIn("up-to-date ID, name, and prefix", errors.getvalue())
             self.assertIn("Message was not queued", errors.getvalue())
 

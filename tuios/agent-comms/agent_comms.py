@@ -48,6 +48,10 @@ class CommsError(Exception):
     """An actionable error safe to display without transport secrets."""
 
 
+class ContextMismatch(CommsError):
+    """A rejected send recoverable by recomposing with fresh context."""
+
+
 def private_dir(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     if path.is_symlink():
@@ -570,10 +574,8 @@ def check_prefix(identity, prefix, message, tts):
             valid = not introduction.match(after_markup(text))
         if not valid:
             wanted = json.dumps(prefix, ensure_ascii=True) if prefix else '"" (no introduction)'
-            raise CommsError(
+            raise ContextMismatch(
                 f"Prefix mismatch in {field}. Expected prefix: {wanted}. "
-                "Run 'agent-comms context' to refresh your ID, name, and prefix; "
-                "use that prefix exactly once at the start of both --msg and --tts. "
                 "Focus or workspace may have changed. Message was not queued."
             )
 
@@ -1401,10 +1403,9 @@ def main(argv=None):
                 if identity is None:
                     raise CommsError("Cannot resolve sender outside a tuios pane. Run 'agent-comms context' in the caller pane before sending.")
                 if args.id != identity:
-                    raise CommsError(
+                    raise ContextMismatch(
                         "Identity mismatch: --id does not match the caller pane's current identity. "
-                        "Run 'agent-comms context' to get an up-to-date ID, name, and prefix, "
-                        "then compose the message again and send with --id. Message was not queued."
+                        "Message was not queued."
                     )
                 validate_message(config, identity, args.msg, args.tts, source)
                 asyncio.run(send(paths, identity, args.msg, args.tts, source))
@@ -1433,6 +1434,20 @@ def main(argv=None):
         with suppress(OSError):
             sys.stdout = open(os.devnull, "w")
         return 0
+    except ContextMismatch as exc:
+        print(f"agent-comms: {exc}", file=sys.stderr)
+        try:
+            context = asyncio.run(listener_context(paths))
+        except (CommsError, OSError, asyncio.TimeoutError) as refresh_error:
+            print(f"agent-comms: Context refresh failed: {refresh_error}. "
+                  "Run 'agent-comms context' before sending again.", file=sys.stderr)
+        else:
+            print("agent-comms: Fresh context: " + json.dumps(context, ensure_ascii=True, separators=(",", ":")),
+                  file=sys.stderr)
+            print("agent-comms: Use this up-to-date ID, name, and prefix; recompose both --msg and --tts "
+                  "and retry once with --id. No separate context lookup is needed. "
+                  "Use a nonempty prefix exactly once at the start of both arguments.", file=sys.stderr)
+        return 1
     except (CommsError, service_manager.ServiceError, OSError, asyncio.TimeoutError) as exc:
         print(f"agent-comms: {exc}", file=sys.stderr)
         return 1

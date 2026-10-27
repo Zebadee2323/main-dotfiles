@@ -54,7 +54,7 @@ $message = if ($prefix) { "$prefix Hello from Windows!" } else { "Hello from Win
 
 | Command | Behavior |
 | --- | --- |
-| `context` | Resolve pane identity; print `id`, `name`, and `prefix` as JSON. Reuse until a send reports a mismatch. |
+| `context` | Resolve pane identity; print `id`, `name`, and `prefix` as JSON. Reuse until a send returns fresh context on mismatch. |
 | `context --refill` | Replace remaining entries with a new shuffled bag; no draw/output. |
 | `context --clear` | Release only the caller pane's mapped ID; print `cleared` and the previous `id` as JSON. No replacement is allocated. |
 | `voice-review` | Audition each non-approved voice, then save a yes/no approval in the config. |
@@ -110,7 +110,12 @@ Copy the exact prefix once at the start of both `--msg` and `--tts`. `send`
 uses the same client-side prefix policy as `context`; the listener handles
 identity allocation, so an older running listener cannot return a stale prefix.
 `send` rechecks focus and geometry, rejecting stale or duplicated introductions before
-queueing. Run `context` again if the layout changes. Restart an existing listener
+queueing. On an identity/prefix mismatch it automatically runs a context lookup and
+returns `Fresh context: {"id":...,"name":...,"prefix":...}` on stderr, with a nonzero
+exit status. Use that checked result to recompose both message arguments and retry
+once; no separate lookup is needed. The message is never rewritten or automatically
+resent. If the refresh fails, the original rejection and refresh error are reported;
+run `context` successfully before retrying. Restart an existing listener
 after upgrading: discovery advertises `spatial_prefix: true`, and spatial sends
 to older listeners fail with a restart instruction. Watchers need no protocol
 change for spatial prefixes.
@@ -118,8 +123,8 @@ change for spatial prefixes.
 Identity allocation inside tuios is pane-scoped, independent of the harness or
 conversation. `send` resolves the pane's persisted binding internally and requires
 `--id` to match it. This is an assertion, not an identity selector. A mismatch
-rejects the send and directs the agent to refresh its ID, name, and prefix through
-`context`. See ownership and cleanup below.
+rejects the send and returns a fresh ID, name, and prefix through an automatic
+`context` lookup. See ownership and cleanup below.
 
 Run `agent-comms context --clear` in the pane whose mapping you want to release.
 It is safe to repeat (`cleared: false`, `id: null` when already unmapped), and

@@ -86,6 +86,9 @@ sys.exit(app.main(sys.argv[2:]))
         wrong = self.restricted_cli('send', '--id', 'stale', '--msg', 'Wrong.')
         self.assertEqual(wrong.returncode, 1)
         self.assertIn('Identity mismatch', wrong.stderr)
+        line = next(line for line in wrong.stderr.splitlines() if line.startswith('agent-comms: Fresh context: '))
+        self.assertEqual(json.loads(line.removeprefix('agent-comms: Fresh context: ')), identity)
+        self.assertEqual(len(json.loads(self.cli('history', '--json').stdout)), 1)
 
     def test_server_rejects_arbitrary_environment_and_unknown_pane_without_allocation(self):
         for env in ({**{k: self.env[k] for k in app.PANE_ENV_KEYS if k in self.env}, 'PATH': '/bad'},

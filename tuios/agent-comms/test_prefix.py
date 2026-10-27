@@ -72,7 +72,7 @@ class PrefixTests(Fixture):
                     app.validate_message(self.config(), "a", bad if field == "--msg" else good,
                                          bad if field == "--tts" else good, self.source)
                 self.assertIn(field, str(error.exception))
-                self.assertIn("agent-comms context", str(error.exception))
+                self.assertIsInstance(error.exception, app.ContextMismatch)
                 self.assertIn("Message was not queued", str(error.exception))
 
     def test_no_required_prefix_rejects_stale_introductions(self):
