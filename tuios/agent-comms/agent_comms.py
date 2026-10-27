@@ -271,6 +271,10 @@ def load_config(path: Path) -> dict:
                 raise CommsError(f"Identity {identity}: {key} must be text.")
         if type(metadata.get("voice_approved", False)) is not bool:
             raise CommsError(f"Identity {identity}: voice_approved must be a boolean.")
+        if "speed" in metadata:
+            speed = metadata["speed"]
+            if type(speed) not in (int, float) or not math.isfinite(speed) or not 0.7 <= speed <= 1.2:
+                raise CommsError(f"Identity {identity}: speed must be between 0.7 and 1.2.")
     return config
 
 
@@ -396,7 +400,8 @@ def voice_review(paths: Paths, config: dict) -> None:
                     "How does this voice sound to you?")
             try:
                 audio = speech.synthesize(directory, voice_id, text, api_key,
-                                          settings.get("model", speech.DEFAULT_MODEL), settings.get("speed", 1.0))
+                                          settings.get("model", speech.DEFAULT_MODEL),
+                                          metadata.get("speed", settings.get("speed", 1.0)))
                 try:
                     approved = asyncio.run(voice_review_decision(audio, executable, name))
                 finally:
@@ -596,6 +601,8 @@ def validate_message(config: dict, identity, message, tts=None, source=None) -> 
     metadata = config["identities"][identity]
     result = {"id": identity, "name": clean_text(metadata["name"]), "msg": message,
               "tts": tts, "voice_id": metadata.get("eleven_labs_voice_id", "").strip()}
+    if "speed" in metadata:
+        result["voice_speed"] = metadata["speed"]
     if isinstance(source, dict) and isinstance(source.get("session_name"), str):
         session = clean_text(source["session_name"])[:128]
         result["session_name"] = session
@@ -771,7 +778,8 @@ async def watcher_speech(paths, state, settings, muted):
 
         def generate():
             generated = speech.synthesize(directory, message["voice_id"], message["tts"], key,
-                                          settings.get("model", speech.DEFAULT_MODEL), settings.get("speed", 1.0))
+                                          settings.get("model", speech.DEFAULT_MODEL),
+                                          message.get("voice_speed", settings.get("speed", 1.0)))
             result["audio"] = generated
             if cancelled.is_set():
                 generated.remove()

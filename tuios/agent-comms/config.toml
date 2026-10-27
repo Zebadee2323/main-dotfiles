@@ -23,6 +23,7 @@ ids = ["h1K1TprdvtRaF85PAeFm", "coGBjiDSBfC2iRSxO4Nx", "xZOJqW4KGiIUDbmeUtiQ", "
 # not a surcharge by itself. Standard model/plan usage charges still apply.
 
 # Stable opaque identity codes; display names and voices remain human-readable.
+# Optional speed = 0.7–1.2 in any identity table overrides [speech].speed.
 # Original crew: retain their existing display names and voices.
 [identities.ag_376b7d0a]
 voice_approved = true
@@ -81,6 +82,7 @@ eleven_labs_voice_id = "IXa3pM2v3YjF2UVeGPGR"
 voice_approved = true
 name = "Tarquin"
 eleven_labs_voice_id = "h9CKu0pq1LSjIPhJEGCv"
+speed = 1.2
 
 # ElevenLabs: Henry - Deep, Professional, and Soothing
 [identities.ag_af82eafa]

@@ -126,7 +126,7 @@ Edit [config.toml](config.toml) in this directory. It is the default on all
 platforms, resolved relative to the program rather than your working directory
 (including when launched through a symlink). Restart the server after changing it.
 An explicitly selected missing config is an error; it is not silently generated.
-Watchers receive voice IDs from the listener's message metadata and read optional
+Watchers receive voice IDs and per-identity speed overrides from the listener's message metadata and read optional
 speech model/speed settings from this file; restart watchers after changing those
 settings. Missing local config falls back to the Naia speech defaults.
 
@@ -165,7 +165,13 @@ robot_mode = true
 name = "Naia"
 eleven_labs_voice_id = ""
 voice_approved = false
+speed = 1.1 # Optional override of [speech].speed for this identity.
 ```
+
+Identity `speed` applies to both `watch` playback and `voice-review`. It must be
+a number from 0.7 to 1.2; omit it to use `[speech].speed` (default 1.0).
+Restart the server after changing identity overrides; restart watchers too when
+first upgrading to a version that supports them.
 
 `watch` normalizes speech volume across voices by default using optional `ffmpeg`
 preprocessing (−16 LUFS target, −1 dBTP peak ceiling). Processing finishes before timed captions begin;

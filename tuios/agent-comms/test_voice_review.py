@@ -61,6 +61,11 @@ class VoiceReviewTests(unittest.TestCase):
         self.assertTrue(app.load_config(self.paths.config)["identities"]["a"]["voice_approved"])
         self.assertFalse(app.load_config(self.paths.config)["identities"]["c"]["voice_approved"])
 
+    def test_identity_speed_overrides_global_speed_for_auditions(self):
+        self.paths.config.write_text(self.source.replace('name = "Alice"', 'name = "Alice"\nspeed = 1.2'))
+        synthesize, _, _ = self.review(["yes", "yes"])
+        self.assertEqual([call.args[5] for call in synthesize.call_args_list], [1.2, 0.9])
+
     def test_no_explicit_answer_leaves_config_unchanged(self):
         self.review([EOFError])
         self.assertEqual(self.paths.config.read_text(), self.source)
