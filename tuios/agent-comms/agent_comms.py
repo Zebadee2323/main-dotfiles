@@ -30,6 +30,7 @@ import uuid
 
 import message_history
 import pane_identity
+import shell_identity
 import speech
 import service_manager
 import tuios_context
@@ -612,8 +613,6 @@ def identify(paths, config, env=None):
     # Verify pane presence/focus before persisting any allocation.
     source = checked_context(env) if env is not None else checked_context()
     identity = pane_binding(paths, config, **({"env": env} if env is not None else {}))
-    if identity is None:
-        raise CommsError("Cannot resolve identity outside a tuios pane. No caller-selected identity or session fallback is allowed.")
     prefix = expected_prefix(config, identity, source)
     name = clean_text(config["identities"][identity]["name"])
     update_pane_title(paths, config, identity, source, env)
@@ -645,25 +644,61 @@ def request_pane_env(value):
     return {**env, **value}
 
 
+def request_owner_env(request):
+    """Validate the standalone process owner, or retain strict tuios verification."""
+    if "shell_pid" not in request:
+        return request_pane_env(request.get("pane_env"))
+    if request.get("pane_env"):
+        raise CommsError("Cannot submit both shell and tuios ownership.")
+    try:
+        pid = request["shell_pid"]
+        if type(pid) is not int or not 1 < pid <= 2 ** 32 - 1:
+            raise ValueError("Invalid caller process ID.")
+        owner = shell_identity.discover(pid)
+    except ValueError as exc:
+        raise CommsError(str(exc)) from None
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("TUIOS_") and k != shell_identity.ENV_KEY}
+    return {**env, shell_identity.ENV_KEY: owner}
+
+
 async def listener_context(paths, *, clear=False):
     env = {k: os.environ[k] for k in PANE_ENV_KEYS if k in os.environ}
-    request_pane_env(env)  # Fail locally when the caller has no pane; never guess.
+    standalone = env.get("TUIOS_ENV") != "1"
+    if standalone:
+        payload = {"shell_pid": os.getpid()}
+    else:
+        request_pane_env(env)
+        payload = {"pane_env": env}
     try:
         source = checked_context()  # Respect local context-query denials before contacting the listener.
     except CommsError as exc:
         raise CommsError(f"Client pane check failed: {exc}") from None
-    if endpoint(paths).get("pane_identity") is not True:
+    info = endpoint(paths)
+    if standalone and info.get("shell_identity") is not True:
+        raise CommsError("Listener predates standalone shell identities; restart 'agent-comms serve'.")
+    if info.get("pane_identity") is not True:
         raise CommsError("Listener predates sandbox-compatible identity lookup; restart 'agent-comms serve'.")
     if clear:
-        if endpoint(paths).get("pane_identity_clear") is not True:
+        if info.get("pane_identity_clear") is not True:
             raise CommsError("Listener predates pane identity clearing; restart 'agent-comms serve'.")
-        return (await rpc(paths, "clear-context", pane_env=env))["result"]
-    identity = (await rpc(paths, "context", pane_env=env))["identity"]
+        return (await rpc(paths, "clear-context", **payload))["result"]
+    identity = (await rpc(paths, "context", **payload))["identity"]
     # The listener owns persistent identity allocation, but may still have an
     # older prefix implementation loaded after an update. Use the same local
     # context and policy as send validation, not the listener's cached code.
     prefix = expected_prefix(load_config(paths.config), identity["id"], source)
     return {**identity, "prefix": prefix}
+
+
+async def shell_binding(paths):
+    """Read an existing shell binding through the listener, without client ps/state writes."""
+    if endpoint(paths).get("shell_identity") is not True:
+        raise CommsError("Listener predates standalone shell identities; restart 'agent-comms serve'.")
+    result = await rpc(paths, "shell-binding", shell_pid=os.getpid())
+    if result["id"] is None:
+        raise ContextMismatch("Shell has no current identity. Message was not queued.")
+    return result["id"]
 
 
 def expected_prefix(config, identity, source):
@@ -1416,18 +1451,27 @@ class Server:
                 await write_frame(writer, {"ok": True, "protocol_version": VERSION, "pid": os.getpid(),
                                            "service_id": os.environ.get("AGENT_COMMS_SERVICE_ID")})
             elif request.get("command") == "clear-context":
-                env = request_pane_env(request.get("pane_env"))
+                env = await asyncio.to_thread(request_owner_env, request)
                 await asyncio.to_thread(checked_context, env)
                 result = await asyncio.to_thread(pane_binding, self.paths, self.config, clear=True, env=env)
                 await write_frame(writer, {"ok": True, "protocol_version": VERSION, "result": result})
             elif request.get("command") == "context":
-                env = request_pane_env(request.get("pane_env"))
+                env = await asyncio.to_thread(request_owner_env, request)
                 # File locks and tuios queries must not stall speech/watch clients.
                 try:
                     identity = await asyncio.to_thread(identify, self.paths, self.config, env)
                 except (CommsError, OSError) as exc:
                     raise CommsError(f"Listener identity lookup failed: {exc}") from None
                 await write_frame(writer, {"ok": True, "protocol_version": VERSION, "identity": identity})
+            elif request.get("command") == "shell-binding":
+                if "shell_pid" not in request:
+                    raise CommsError("Missing caller process ID.")
+                env = await asyncio.to_thread(request_owner_env, request)
+                try:
+                    identity = await asyncio.to_thread(pane_binding, self.paths, self.config, allocate=False, env=env)
+                except ContextMismatch:
+                    identity = None
+                await write_frame(writer, {"ok": True, "protocol_version": VERSION, "id": identity})
             elif request.get("command") == "send":
                 message = validate_message(self.config, request.get("id"), request.get("msg"), request.get("tts"), request.get("source"))
                 if self.queue.full():
@@ -1510,6 +1554,7 @@ class Server:
             try:
                 atomic_json(discovery, {"protocol_version": VERSION, "prefix_policy": PREFIX_POLICY, "spatial_prefix": True,
                                         "audio_control": True, "pane_identity": True, "pane_identity_clear": True,
+                                        "shell_identity": True,
                                         "port": listener.sockets[0].getsockname()[1], "token": self.token})
                 with TerminalDisplay(self.quiet) as self.display, stop_signals(self.stop):
                     self.publish(None)
@@ -1560,8 +1605,8 @@ def parser():
     identity = subs.add_parser("context", help="Return caller ID, name, and required message prefix as JSON")
     identity_actions = identity.add_mutually_exclusive_group()
     identity_actions.add_argument("--refill", action="store_true", help="Reshuffle without drawing")
-    identity_actions.add_argument("--clear", action="store_true", help="Release the current pane's identity without allocating another")
-    identity_actions.add_argument("--clear-all", action="store_true", help="Release all pane identities in this state directory; agents must run context again")
+    identity_actions.add_argument("--clear", action="store_true", help="Release the current pane or shell's identity without allocating another")
+    identity_actions.add_argument("--clear-all", action="store_true", help="Release all pane and shell identities in this state directory; agents must run context again")
     review = subs.add_parser("voice-review", help="Audition non-approved voices and save approval decisions")
     review.add_argument("--all", action="store_true", help="Audition all identities, including approved voices")
     serve_parser = subs.add_parser("serve", help="Run the single per-user listener")
@@ -1579,7 +1624,7 @@ def parser():
             target.add_argument("--lines", type=int, default=100)
             target.add_argument("--follow", action="store_true")
     send_parser = subs.add_parser("send", help="Queue a named message")
-    send_parser.add_argument("--id", required=True, help="Expected pane identity ID returned by context")
+    send_parser.add_argument("--id", required=True, help="Expected caller identity ID returned by context")
     send_parser.add_argument("--msg", required=True)
     send_parser.add_argument("--tts", help="Speech text including optional ElevenLabs tags; defaults to --msg")
     watcher = subs.add_parser("watch", help="Stream current messages as tuios push lines")
@@ -1720,12 +1765,11 @@ def main(argv=None):
                 voice_review(paths, config, all_voices=args.all)
             elif args.command == "send":
                 source = checked_context()
-                identity = pane_binding(paths, config, allocate=False)
-                if identity is None:
-                    raise CommsError("Cannot resolve sender outside a tuios pane. Run 'agent-comms context' in the caller pane before sending.")
+                identity = (pane_binding(paths, config, allocate=False) if os.environ.get("TUIOS_ENV") == "1"
+                            else asyncio.run(shell_binding(paths)))
                 if args.id != identity:
                     raise ContextMismatch(
-                        "Identity mismatch: --id does not match the caller pane's current identity. "
+                        "Identity mismatch: --id does not match the caller pane or shell's current identity. "
                         "Message was not queued."
                     )
                 validate_message(config, identity, args.msg, args.tts, source)

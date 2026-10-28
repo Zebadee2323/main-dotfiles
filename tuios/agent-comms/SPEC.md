@@ -28,8 +28,9 @@ restarts the installed listener service, then signals watchers (only on service
 success). `service restart` affects only the listener. The tuios palette exposes
 all three scopes. None clears pane identities or history.
 `context` now returns the caller's ID, name, and exact introduction or empty
-prefix, resolving ownership from the tuios environment only (no harness/session
-identity-selection flags). Outside tuios, lookup fails clearly. Agents must insert
+prefix, resolving ownership from the tuios environment or persistent parent shell
+(no harness/session identity-selection flags). Outside tuios, the listener derives
+the shell from the caller process ancestry; no tuios executable is needed. Agents must insert
 it themselves in both display and TTS text. `send` rechecks context and rejects
 mismatches without queueing or rewriting the message. Missing pane identities also
 reject the send and return fresh context via the listener; they do not trigger an
@@ -58,7 +59,7 @@ automatic-introduction behavior.
 
 ### `agent-comms context`
 
-Resolve the caller pane's stable identity and return JSON with `id`, `name`,
+Resolve the caller pane or shell's stable identity and return JSON with `id`, `name`,
 and `prefix`. Agents call this initially in a separate tool call, then reuse
 these details in the same pane until a send reports an identity/prefix mismatch.
 Never inherit identity details from another pane or conversation.
@@ -67,8 +68,15 @@ The CLI performs a live local pane check, then requests identity allocation via
 the running listener's authenticated `context` RPC. It forwards only allowlisted
 tuios addressing variables. The listener verifies the pane with that environment,
 persists the binding, and updates the pane title. Routine `context` and `send`
-commands perform no client-side state writes. Send verification reads an atomic
-binding snapshot without a write lock. An older listener requires a restart;
+commands perform no client-side state writes. Pane send verification reads an atomic binding snapshot without a write lock.
+Standalone clients forward their process ID; the listener discovers the nearest
+persistent ancestor shell, skipping transient command shells, and keys ownership
+by host, PID, and process creation time. Standalone sends use a read-only
+`shell-binding` RPC. Discovery advertises `shell_identity: true`. Shell process
+inspection uses POSIX ps or Windows PowerShell CIM in the listener; clients need
+no process-query permission. Without a shell ancestor, lookup fails explicitly.
+Tuios remains authoritative when its environment is present, including errors.
+Standalone prefixes are empty and pane-title updates are skipped. An older listener requires a restart;
 there is no fallback to writing application state from inside the agent sandbox.
 
 Allocation uses the original Tetris-style bag internally, but repeated lookup
@@ -247,6 +255,10 @@ persisted by stable daemon namespace + pane UUID under a shared OS lock. Confirm
 missing panes are pruned after a seven-day grace period; failed/incomplete listings
 never prune. See README.md for lifecycle and migration details. This is attribution,
 not authentication; the local connection token provides transport authentication.
+Shell bindings share the mapping and lock in a separate host namespace. Complete
+process inventories reclaim confirmed exited shells using the same grace and
+pressure policy; tuios records and live shells are retained. Clear commands apply
+to both types of ownership.
 
 ## Server discovery and authentication
 

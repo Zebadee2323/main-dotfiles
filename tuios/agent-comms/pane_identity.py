@@ -1,4 +1,4 @@
-"""Durable pane bindings and conservative, daemon-scoped garbage collection."""
+"""Durable pane/shell bindings and conservative, owner-scoped garbage collection."""
 import hashlib
 import json
 import logging
@@ -8,6 +8,7 @@ import subprocess
 import time
 
 import tuios_context
+import shell_identity
 
 GRACE_SECONDS = 7 * 24 * 3600
 SCAN_INTERVAL = 3600
@@ -18,9 +19,10 @@ class MissingIdentityError(ValueError):
 
 
 def owner(env=None):
+    explicit_env = env is not None
     env = os.environ if env is None else env
     if env.get("TUIOS_ENV") != "1":
-        return None
+        return shell_identity.owner(env.get(shell_identity.ENV_KEY) if explicit_env else None)
     pane = env.get("TUIOS_PANE_ID") or env.get("TUIOS_WINDOW_ID")
     if not pane:
         raise ValueError("tuios pane ID is missing")
@@ -115,11 +117,13 @@ def clear_all(paths, *, private_dir, lock, atomic_json, error):
 def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, allocate=True, clear=False, env=None,
             eligible_ids=None):
     identity = owner(env)
-    if identity is None:
-        if clear:
-            raise error("Cannot clear identity outside a tuios pane.")
-        return None
     key, daemon, pane = identity
+
+    def live_owners():
+        if daemon.startswith("shell:"):
+            return shell_identity.inventory()
+        return inventory(env=env) if env is not None else inventory()
+
     # Atomic replacement makes a lock-free read safe. Sending must never mkdir,
     # chmod, or open a lock file in the listener's private state directory.
     directory = private_dir(paths.state) if allocate else paths.state
@@ -142,7 +146,7 @@ def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, al
         scanned = False
         live = None
         if now - state["scanned"].get(daemon, 0) >= SCAN_INTERVAL:
-            live = inventory(env=env) if env is not None else inventory()
+            live = live_owners()
             scanned = True
             prune(state, daemon, pane, live, now)
             # Throttle failures too; never retry a forbidden query via another route.
@@ -154,7 +158,7 @@ def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, al
                 # Bypass the hourly cache only for allocation pressure. Never
                 # retry a failed/forbidden inventory within the same lookup.
                 if not scanned:
-                    live = inventory(env=env) if env is not None else inventory()
+                    live = live_owners()
                     prune(state, daemon, pane, live, now)
                     state["scanned"][daemon] = now
                 reclaim_absent(state, daemon, pane, live, eligible)
@@ -194,9 +198,9 @@ def prefixed_title(title, prefix, previous=None, names=()):
 def update_title(paths, name, source, *, private_dir, lock, atomic_json, run=None, env=None, names=()):
     """Best-effort identity prefix over the pane's live terminal title."""
     env = os.environ if env is None else env
-    identity = owner(env)
-    if identity is None or "pane_title" not in source:
+    if env.get("TUIOS_ENV") != "1" or "pane_title" not in source:
         return
+    identity = owner(env)
     run = subprocess.run if run is None else run
     key, _, pane = identity
     directory = private_dir(paths.state)

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import agent_comms as app
 import pane_identity
+import shell_identity
 import tuios_context
 from test_agent_comms import Fixture, SCRIPT
 
@@ -119,9 +120,10 @@ class PaneIdentityTests(Fixture):
         self.assertEqual(self.bind("other", allocate=False), other)
         self.assertIn(self.bind(), self.config["identities"])
 
-    def test_clear_rejects_outside_pane_and_corrupt_mapping(self):
-        with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(app.CommsError, "outside a tuios pane"):
+    def test_clear_rejects_unresolved_shell_and_corrupt_mapping(self):
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(shell_identity, "discover", side_effect=ValueError("No persistent parent shell found")):
+            with self.assertRaisesRegex(app.CommsError, "No persistent parent shell"):
                 app.pane_binding(self.paths, self.config, clear=True)
         self.assertFalse(self.paths.state.exists())
         self.bind()
@@ -234,10 +236,10 @@ class PaneIdentityTests(Fixture):
                 app.identify(self.paths, self.config)
         self.assertFalse(self.paths.state.exists())
 
-    def test_outside_tuios_and_caller_selected_identity_flags_are_rejected(self):
+    def test_offline_standalone_and_caller_selected_identity_flags_are_rejected(self):
         result = self.cli("context")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("outside a tuios pane", result.stderr)
+        self.assertIn("Listener is offline", result.stderr)
         self.assertFalse(self.paths.state.exists())
         with self.paths.config.open("a") as stream:
             stream.write('personality = "Obsolete personality that must not be returned"\n')

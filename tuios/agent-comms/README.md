@@ -17,7 +17,7 @@ For a persistent macOS listener, prefer the per-user launchd service below.
 `serve` is a foreground/debugging command; do not use an agent's background
 shell tool to host a global listener.
 
-In another tuios pane:
+In another terminal shell or tuios pane:
 
 ```sh
 # Inspect the JSON first, then use its ID and exact name/prefix in a separate call.
@@ -54,16 +54,16 @@ $message = if ($prefix) { "$prefix Hello from Windows!" } else { "Hello from Win
 
 | Command | Behavior |
 | --- | --- |
-| `context` | Resolve pane identity; print `id`, `name`, and `prefix` as JSON. Reuse until a send returns fresh context on mismatch. |
+| `context` | Resolve pane or shell identity; print `id`, `name`, and `prefix` as JSON. Reuse until a send returns fresh context on mismatch. |
 | `context --refill` | Replace remaining entries with a new shuffled bag; no draw/output. |
-| `context --clear` | Release only the caller pane's mapped ID; print `cleared` and the previous `id` as JSON. No replacement is allocated. |
-| `context --clear-all` | Release every pane mapping in the selected state directory; print the number cleared as JSON. Works outside tuios and with the listener offline. |
+| `context --clear` | Release only the caller pane or shell's mapped ID; print `cleared` and the previous `id` as JSON. No replacement is allocated. |
+| `context --clear-all` | Release every pane and shell mapping in the selected state directory; print the number cleared as JSON. Works outside tuios and with the listener offline. |
 | `voice-review` | Audition non-approved voices using the configured TTS mode; approve, reject, skip unchanged, replay, or quit. |
 | `voice-review --all` | Audition every configured voice, including already-approved ones. |
 | `serve` | Own the singleton listener, timed FIFO queue, and terminal display. |
 | `serve --quiet` | Same listener without terminal display. |
 | `service install/start/stop/restart/status/logs/uninstall` | Manage the per-user macOS LaunchAgent or experimental Windows scheduled task; see below. |
-| `send --id ID --msg TEXT --tts SPEECH` | Verify the expected ID against the pane binding, save and queue text; print approximate total time until completion. |
+| `send --id ID --msg TEXT --tts SPEECH` | Verify the expected ID against the pane or shell binding, save and queue text; print approximate total time until completion. |
 | `history` | Show readable, wrapped history with timestamps and sender/session headings, even offline. Colors appear only in a terminal (respecting `NO_COLOR` / `--no-color`). |
 | `history --raw` | Print unstyled, one-line timestamp/name/message records. |
 | `history --json` | Print full machine-readable records, including speech text. Mutually exclusive with `--raw`. |
@@ -733,8 +733,9 @@ exact prefix and send with `--id RETURNED_ID`. Reuse these details for later sen
 in the same pane, refreshing on an identity/prefix mismatch. Never inherit an ID
 from another pane or conversation or hide the initial lookup in a shell variable.
 Never pass `--harness`, `--session-id`, or an identity to `context`: those
-flags are rejected. Ownership is derived only from the caller's pane environment.
-Outside tuios, lookup fails clearly rather than accepting an agent-selected owner.
+flags are rejected. Inside tuios, ownership is derived from the caller's pane environment.
+Outside tuios, the listener derives ownership from the persistent parent shell.
+The CLI supplies its process ID, never a chosen identity or conversation ID.
 
 ```json
 {"id":"ag_example","name":"Veda","prefix":"Veda here, to your top-right."}
@@ -751,10 +752,13 @@ authenticated localhost API. The CLI checks its own live pane context first and
 forwards only tuios pane/session/host/socket addressing, never arbitrary environment
 variables or credentials. The listener verifies that pane again before allocating
 or updating its title. Neither `context` nor `send` writes the client's state files:
-`send` reads the atomically replaced binding without creating directories, changing
+`send` reads the atomically replaced pane binding (or requests the shell binding
+from the listener) without creating directories, changing
 permissions, or opening lock files. This supports Codex's workspace-write sandbox
 without adding the application state directory to its writable roots. Localhost
-access must still be permitted, and the caller must retain its `TUIOS_*` environment.
+access must still be permitted. Inside tuios the caller must retain its `TUIOS_*`
+environment. Outside tuios the listener checks the caller’s parent shell; the CLI
+needs no process-inspection permission.
 
 After upgrading, restart the agent-comms listener once. Older listeners produce
 an explicit restart message; there is no fallback to client-side state writes.
@@ -1024,8 +1028,32 @@ outside the active roster are never reclaimed this way. If no safe candidate
 exists, allocation still reports exhaustion. A pane returning after its binding
 was reclaimed must look up its context again and may receive a different identity.
 
-There is no harness/session fallback. `context` outside tuios errors instead of
-drawing a new identity or accepting caller-selected identity arguments.
+Outside tuios, the same mapping stores **host + shell PID + process creation time**
+under a separate shell namespace. The listener walks the calling process's ancestry
+to the nearest persistent shell, skipping temporary `sh -c` / `zsh -lc` tool shells.
+Repeated CLI calls and agent restarts under that shell reuse the identity. Different
+shells, nested interactive shells, and reused PIDs with a new start time have distinct
+owners. No shell profile changes, tuios installation, or caller-selected identity
+arguments are needed. Standalone context returns an empty spatial prefix; introduce
+yourself with the returned name on your first announcement.
+
+Shell discovery runs in the listener using `ps` on macOS/Linux or PowerShell CIM on
+Windows. Clients only submit their process ID over the authenticated localhost API;
+they do not inspect processes or write state. Standalone sends read the existing
+binding through a `shell-binding` RPC without allocating. A listener without the
+`shell_identity` capability must be restarted after upgrading.
+
+The listener must be allowed to inspect process ancestry. Missing parent shells or
+failed/denied process queries produce explicit errors; GUI launches with no shell
+ancestor must instead launch the agent from a terminal. No harness/session fallback
+is invented. Shell inventories use the same grace period and pressure reclamation
+as pane inventories, scoped to the local shell namespace. Live shell bindings and
+tuios bindings are never reclaimed by a shell inventory. `context --clear` releases
+the current shell binding; `--clear-all` clears both shell and tuios bindings.
+
+When `TUIOS_ENV=1`, tuios ownership, live spatial prefixes, and pane-title features
+retain precedence. Incomplete or failed tuios context checks remain errors; they
+never silently switch to a shell identity.
 `context --refill` reshuffles the allocation bag without changing existing bindings.
 
 The first pane lookup creates a new pane binding; legacy session mappings are
