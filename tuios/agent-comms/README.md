@@ -796,9 +796,15 @@ center = ["custom/agent-comms", "windows"]
 
 [dock.custom.agent-comms]
 command = 'exec "$HOME/.local/bin/agent-comms" watch --width 80 --flash --vfx'
+on-click = 'exec "$HOME/.local/bin/agent-comms" audio mute --seconds 15'
 refresh = "push"
 max-width = 80
 ```
+
+Click the agent-comms dock component to mute speech across all watchers for
+15 seconds. Change `--seconds 15` in `on-click` to configure the duration
+(up to 86400 seconds). Each click restarts the countdown; captions continue,
+and speech resumes automatically without replaying skipped announcements.
 
 The existing dock remains at the bottom. Each stdout line replaces the component
 text; SGR colors survive, but cursor movement and clearing do not. This is not an

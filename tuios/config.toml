@@ -122,6 +122,8 @@ center = ["custom/agent-comms", "windows"]
 
 [dock.custom.agent-comms]
 command = 'exec "$HOME/.local/bin/agent-comms" watch --width 80 --flash --vfx'
+# Click to mute speech; change --seconds to set the duration.
+on-click = 'exec "$HOME/.local/bin/agent-comms" audio mute --seconds 15'
 refresh = "push"
 max-width = 80
 
