@@ -2,6 +2,9 @@ import json
 import os
 from pathlib import Path
 import runpy
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -18,6 +21,34 @@ PANES = [
 
 
 class ShimTests(unittest.TestCase):
+    def codex_shim_args(self, *args):
+        # Exercise the real shell shim and Python launcher without starting Codex.
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "codex"
+            binary.write_text(
+                f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n"
+            )
+            binary.chmod(0o755)
+            env = {"PATH": os.pathsep.join([
+                directory, str(Path(shutil.which("python3")).parent), "/usr/bin", "/bin"
+            ])}
+            result = subprocess.run(
+                [str(MODULE["BIN"] / "codex"), *args], env=env,
+                capture_output=True, text=True, check=True,
+            )
+            return json.loads(result.stdout)
+
+    def test_codex_session_defaults_reach_real_cli(self):
+        self.assertEqual(self.codex_shim_args("hello world"), [
+            "--no-daemon", "-c", 'sandbox_mode="workspace-write"',
+            "-c", "sandbox_workspace_write.network_access=true", "hello world",
+        ])
+
+    def test_codex_caller_overrides_follow_defaults(self):
+        overrides = ["--sandbox", "read-only", "-c",
+                     "sandbox_workspace_write.network_access=false"]
+        self.assertEqual(self.codex_shim_args(*overrides)[-len(overrides):], overrides)
+
     def test_workspace_is_callers_not_focused(self):
         run = Mock(return_value=json.dumps({"current_workspace": 1, "windows": PANES}))
         with patch.dict(G, run=run):

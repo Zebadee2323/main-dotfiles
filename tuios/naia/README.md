@@ -18,6 +18,15 @@ Or invoke `./bin/opencode`, `./bin/codex`, or `./bin/claude` directly.
 All arguments are forwarded.
 The Codex shim adds `--no-daemon` so its tools inherit the launching terminal's
 environment, including tuios pane identity, whether or not an editor is found.
+It also defaults each spawned Codex session to `workspace-write` with
+`sandbox_workspace_write.network_access = true`, so shell commands can reach
+the tuios daemon and agent-comms listener. These are command-line defaults, not
+global config changes; caller options come afterward and can override them
+(for example, `codex-t --sandbox read-only` or
+`codex-t -c sandbox_workspace_write.network_access=false`). This enables general
+command network access, not only localhost. Approval policy is unchanged.
+Relaunch existing sessions to pick up these defaults. Managed restrictions still
+apply and can reject settings they do not allow.
 Explicit remote-server launches and `codex agents` are incompatible with this
 shim; invoke the real Codex executable for those commands.
 No shell configuration is changed automatically. Keep the scripts together in
@@ -42,8 +51,9 @@ skill-only plugin for this session. Codex creates a missing symlink at
 `$CODEX_HOME/skills/naia` (default `~/.codex/skills/naia`) to the Neovim-owned skill,
 or reuses the correct existing link. Conflicting entries are left untouched and
 cancel attachment. That link persists and is visible to other Codex sessions.
-Tokens stay in the launch environment, not arguments or files. Existing harness
-permissions remain in force. No global/project config is written.
+Tokens stay in the launch environment, not arguments or files. Except for the
+Codex session defaults above, existing harness permissions remain in force.
+No global/project config is written.
 OpenCode administrative commands are handled by the upstream launcher without
 Naia config; explicit `--server` conversation launches are rejected upstream.
 

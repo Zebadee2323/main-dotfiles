@@ -60,6 +60,45 @@ class PaneIdentityTests(Fixture):
         self.assertEqual(len(json.loads((self.paths.state / "bag.json").read_text())["remaining"]), 2)
         self.assertEqual(len(json.loads((self.paths.state / "pane-identities.json").read_text())["bindings"]), 1)
 
+    def test_exhaustion_refreshes_inventory_and_reuses_only_absent_binding(self):
+        bound = {pane: self.bind(pane) for pane in ("own", "other", "third")}
+        with patch.dict(os.environ, {**self.pane_env, "TUIOS_PANE_ID": "fourth"}), \
+             patch.object(pane_identity, "inventory", return_value={"own", "other", "fourth"}) as inventory:
+            self.assertEqual(app.pane_binding(self.paths, self.config), bound["third"])
+        inventory.assert_called_once()
+        self.assertEqual(self.bind("own", allocate=False), bound["own"])
+        self.assertEqual(self.bind("other", allocate=False), bound["other"])
+        with self.assertRaisesRegex(app.CommsError, "no current identity"):
+            self.bind("third", allocate=False)
+
+    def test_exhaustion_never_retries_failed_inventory_or_changes_bindings(self):
+        for pane in ("own", "other", "third"):
+            self.bind(pane)
+        filename = self.paths.state / "pane-identities.json"
+        original = json.loads(filename.read_text())
+        # Cover both the hourly scan and pressure-only scan paths.
+        for scan_time in (0, original["scanned"][next(iter(original["scanned"]))]):
+            state = json.loads(filename.read_text())
+            state["scanned"] = {daemon: scan_time for daemon in state["scanned"]}
+            app.atomic_json(filename, state)
+            with patch.dict(os.environ, {**self.pane_env, "TUIOS_PANE_ID": "fourth"}), \
+                 patch.object(pane_identity, "inventory", return_value=None) as inventory:
+                with self.assertRaisesRegex(app.CommsError, "No unassigned"):
+                    app.pane_binding(self.paths, self.config)
+            inventory.assert_called_once()
+            self.assertEqual(json.loads(filename.read_text())["bindings"], original["bindings"])
+
+    def test_exhaustion_reuses_successful_hourly_inventory(self):
+        bound = {pane: self.bind(pane) for pane in ("own", "other", "third")}
+        filename = self.paths.state / "pane-identities.json"
+        state = json.loads(filename.read_text())
+        state["scanned"] = {}
+        app.atomic_json(filename, state)
+        with patch.dict(os.environ, {**self.pane_env, "TUIOS_PANE_ID": "fourth"}), \
+             patch.object(pane_identity, "inventory", return_value={"own", "other", "fourth"}) as inventory:
+            self.assertEqual(app.pane_binding(self.paths, self.config), bound["third"])
+        inventory.assert_called_once()
+
     def test_clear_only_removes_current_pane_and_does_not_draw(self):
         bound = self.bind()
         other = self.bind("other")
@@ -237,6 +276,22 @@ class GarbageCollectionTests(Fixture):
         self.assertIn("gone", state["bindings"])
         pane_identity.prune(state, "d", "own", {"own"}, 100 + pane_identity.GRACE_SECONDS)
         self.assertEqual(set(state["bindings"]), {"own", "other-daemon"})
+
+    def test_pressure_reclaims_one_oldest_eligible_absent_binding(self):
+        state = self.state()
+        state["bindings"]["gone"]["missing_since"] = 10
+        state["bindings"]["newer"] = {"daemon": "d", "pane_id": "newer", "id": "x",
+                                      "missing_since": 20}
+        self.assertTrue(pane_identity.reclaim_absent(state, "d", "own", {"own"}, {"a", "b", "c", "x"}))
+        self.assertEqual(set(state["bindings"]), {"own", "other-daemon", "newer"})
+
+    def test_pressure_preserves_live_other_daemons_ineligible_and_unverified_panes(self):
+        for live, eligible in ((None, {"a", "b", "c"}), (set(), {"a", "b", "c"}),
+                               ({"another"}, {"a", "b", "c"}),
+                               ({"own", "gone"}, {"a", "b", "c"}), ({"own"}, {"a", "c"})):
+            state = self.state()
+            self.assertFalse(pane_identity.reclaim_absent(state, "d", "own", live, eligible))
+            self.assertEqual(state, self.state())
 
     def test_returning_or_detached_panes_are_retained_and_clear_absence(self):
         state = self.state()

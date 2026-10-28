@@ -90,6 +90,27 @@ sys.exit(app.main(sys.argv[2:]))
         self.assertEqual(json.loads(line.removeprefix('agent-comms: Fresh context: ')), identity)
         self.assertEqual(len(json.loads(self.cli('history', '--json').stdout)), 1)
 
+    def test_exhausted_listener_reclaims_absent_pane_without_client_state_writes(self):
+        identities = []
+        for pane in ('one', 'two', 'three'):
+            self.env['TUIOS_PANE_ID'] = pane
+            result = self.restricted_cli('context')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            identities.append(json.loads(result.stdout)['id'])
+        self.assertEqual(len(set(identities)), 3)
+        # Fake tuios reports only the current pane in its full inventory.
+        self.env['TUIOS_PANE_ID'] = 'four'
+        result = self.restricted_cli('context')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        identity = json.loads(result.stdout)
+        self.assertIn(identity['id'], identities)
+        saved = json.loads((self.paths.state / 'pane-identities.json').read_text())
+        self.assertEqual(len(saved['bindings']), 3)
+        self.assertIn('four', {record['pane_id'] for record in saved['bindings'].values()})
+        repeat = self.restricted_cli('context')
+        self.assertEqual(repeat.returncode, 0, repeat.stderr)
+        self.assertEqual(json.loads(repeat.stdout), identity)
+
     def test_server_rejects_arbitrary_environment_and_unknown_pane_without_allocation(self):
         for env in ({**{k: self.env[k] for k in app.PANE_ENV_KEYS if k in self.env}, 'PATH': '/bad'},
                     {'TUIOS_ENV': '1', 'TUIOS_SESSION': 'test'}):

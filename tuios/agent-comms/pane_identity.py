@@ -1,6 +1,7 @@
 """Durable pane bindings and conservative, daemon-scoped garbage collection."""
 import hashlib
 import json
+import logging
 import math
 import os
 import subprocess
@@ -64,6 +65,24 @@ def timestamp(value):
     return type(value) in (int, float) and math.isfinite(value) and value >= 0
 
 
+def reclaim_absent(state, daemon, own, live, eligible):
+    """Under roster pressure, release one absent pane from a fresh full inventory."""
+    if live is None or own not in live:
+        return False
+    candidates = [(record.get("missing_since", float("inf")), key)
+                  for key, record in state["bindings"].items()
+                  if record["daemon"] == daemon and record["pane_id"] not in live
+                  and record["id"] in eligible]
+    if not candidates:
+        return False
+    _, key = min(candidates)
+    record = state["bindings"].pop(key)
+    logging.getLogger("agent-comms").info(
+        "Reclaimed identity %s from absent pane %s because the roster was full",
+        record["id"], record["pane_id"])
+    return True
+
+
 def read_state(filename, error):
     try:
         state = json.loads(filename.read_text(encoding="utf-8"))
@@ -120,14 +139,26 @@ def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, al
             return {"cleared": saved is not None, "id": saved["id"] if saved else None}
         saved = state["bindings"].get(key)
         now = time.time()
+        scanned = False
+        live = None
         if now - state["scanned"].get(daemon, 0) >= SCAN_INTERVAL:
             live = inventory(env=env) if env is not None else inventory()
+            scanned = True
             prune(state, daemon, pane, live, now)
             # Throttle failures too; never retry a forbidden query via another route.
             state["scanned"][daemon] = now
         if saved is None or saved["id"] not in config["identities"]:
             eligible = set(config["identities"]) if eligible_ids is None else set(eligible_ids)
             used = {r["id"] for k, r in state["bindings"].items() if k != key}
+            if not eligible - used:
+                # Bypass the hourly cache only for allocation pressure. Never
+                # retry a failed/forbidden inventory within the same lookup.
+                if not scanned:
+                    live = inventory(env=env) if env is not None else inventory()
+                    prune(state, daemon, pane, live, now)
+                    state["scanned"][daemon] = now
+                reclaim_absent(state, daemon, pane, live, eligible)
+                used = {r["id"] for k, r in state["bindings"].items() if k != key}
             if not eligible - used:
                 atomic_json(filename, state)
                 raise error("No unassigned pane identities remain. Add identities or wait for confirmed stale bindings to be pruned.")

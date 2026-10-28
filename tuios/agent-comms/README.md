@@ -1001,6 +1001,16 @@ never remove anything. Only records for the currently queried daemon are pruned;
 records for an unreachable/decommissioned daemon are retained for manual review.
 One shared lock file avoids accumulating a lock file for every retired pane.
 
+If a new pane needs an identity and the eligible roster is full, allocation
+checks a fresh complete inventory even within the hourly interval. It releases
+one absent pane's eligible identity early, preferring the oldest missing binding,
+then allocates normally under the same lock. A successful inventory already taken
+during that lookup is reused; a failed inventory is never retried in the same
+lookup. Live panes (including detached sessions), other daemons, and identities
+outside the active roster are never reclaimed this way. If no safe candidate
+exists, allocation still reports exhaustion. A pane returning after its binding
+was reclaimed must look up its context again and may receive a different identity.
+
 There is no harness/session fallback. `context` outside tuios errors instead of
 drawing a new identity or accepting caller-selected identity arguments.
 `context --refill` reshuffles the allocation bag without changing existing bindings.
