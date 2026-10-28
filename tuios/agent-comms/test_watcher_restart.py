@@ -84,7 +84,8 @@ class AsyncWatcherRestartTests(Fixture, unittest.IsolatedAsyncioTestCase):
                     patch("sys.stdout", new_callable=io.StringIO) as output:
                 with self.assertRaises(asyncio.CancelledError):
                     await app.watch_stream(self.paths, color=False, width=80, muted=True, settings={"mode": mode})
-                self.assertIn(f"[Muted] {badge} comms: idle", output.getvalue())
+                credits = "[?] " if mode == "elevenlabs" else ""
+                self.assertIn(f"[Muted] {credits}{badge} comms: idle", output.getvalue())
 
     async def test_real_offline_watcher_reexecutes_on_explicit_signal(self):
         process = await asyncio.create_subprocess_exec(

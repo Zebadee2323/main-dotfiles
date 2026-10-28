@@ -656,6 +656,19 @@ included in diagnostics. Providing the key enables external ElevenLabs requests
 for identities with a configured voice ID and an available local audio player.
 The TTS text is sent to ElevenLabs; keep sensitive content out of announcements.
 
+In ElevenLabs mode, the watcher shows `[12,345 | 42]` beside
+the caption. The balance is the subscription's `character_limit` minus
+`character_count` (floored at zero), refreshed in the background on startup,
+every 60 seconds, and after a reported generation. It shows `?` if
+the key is absent or subscription access fails; restricted keys need permission
+to read subscription information. Usage checks never delay speech playback.
+Per-message credits come from ElevenLabs' `character-cost` response header,
+shared with all watchers through the speech lease; missing cost headers are
+omitted rather than estimated. These are credits, not currency charges or an
+overage spending allowance. Muted watchers can still show the balance. Other
+speech modes make no billing requests and show no credit badge.
+Restart the listener and watchers with `agent-comms restart all` to load this change.
+
 `eleven_turbo_v2_5` matches `nvim/lua/features/voice/runtime.lua`'s Naia default.
 Use `--tts` for speech-friendly spelling, punctuation, and supported markup such
 as `<break time="0.3s" />`. Turbo does **not** support v3-only `[warm]`/`[excited]`

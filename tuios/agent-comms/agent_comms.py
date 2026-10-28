@@ -997,6 +997,7 @@ async def watcher_speech(paths, state, settings, muted):
                     task.result().remove()
             generation.add_done_callback(cleanup)
             raise
+        credit_cost = audio.credit_cost if mode == "elevenlabs" else None
         # Effects first, then normalize their final output across voices. Each
         # optional stage falls back independently without interrupting captions.
         for enabled, process, label in (
@@ -1012,7 +1013,8 @@ async def watcher_speech(paths, state, settings, muted):
             else:
                 audio.remove()
                 audio = processed
-        await rpc(paths, "speech-ready", uid=message["uid"], lease=lease, duration=audio.duration)
+        billing = {"credit_cost": credit_cost} if type(credit_cost) in (int, float) else {}
+        await rpc(paths, "speech-ready", uid=message["uid"], lease=lease, duration=audio.duration, **billing)
         while state["message"].get("phase") != "displaying":
             state["changed"].clear()
             await state["changed"].wait()
@@ -1049,7 +1051,8 @@ async def present_message(paths, state, settings, emit, width, muted, flash, vfx
                 voice.cancel()  # Never restart this message's speech on unmute.
                 await asyncio.gather(voice, return_exceptions=True)
             message = state["message"]
-            captions = speech.pages(clean_text(message["msg"]), max(2, available - state.get("audio_badge_width", 0)))
+            captions = speech.pages(clean_text(message["msg"]), max(2, available - state.get("audio_badge_width", 0)
+                                                                  - state.get("credit_badge_width", lambda: 0)()))
             elapsed = time.monotonic() - message.get("started_at", time.monotonic())
             text = speech.page_at(captions, elapsed, message.get("duration", 1))
             since_arrival = time.monotonic() - state["arrived"]
@@ -1100,6 +1103,32 @@ async def watch_stream(paths: Paths, *, color: bool, width: int, muted=False, fl
     last, delay = None, 0.25
     audio = {}
     mode = (settings or {}).get("mode", "elevenlabs")
+    credits, refresh, rendered = {}, asyncio.Event(), {}
+    billed_uid = None
+
+    def credit_badge(message):
+        if mode != "elevenlabs":
+            return ""
+        balance = credits.get("remaining")
+        left = f"{balance:,.10g}" if balance is not None else "?"
+        cost = (message or {}).get("credit_cost")
+        charge = f" | {cost:,.10g}" if type(cost) in (int, float) else ""
+        return f"[{left}{charge}] "
+
+    async def poll_credits():
+        key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+        if mode != "elevenlabs" or not key:
+            return
+        while True:
+            refresh.clear()
+            try:
+                credits["remaining"] = await asyncio.to_thread(speech.remaining_credits, key)
+            except speech.SpeechError:
+                credits.pop("remaining", None)
+            if rendered:
+                emit(**rendered)
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(refresh.wait(), 60)
 
     def mute_badge():
         if not (muted or audio.get("muted")):
@@ -1109,65 +1138,77 @@ async def watch_stream(paths: Paths, *, color: bool, width: int, muted=False, fl
 
     def emit(message=None, offline=False, highlight=False, frame=None):
         nonlocal last
-        line = dock_line(message, color=color, width=width, offline=offline, highlight=highlight, frame=frame, mode=mode)
-        if not offline and (badge := mute_badge()):
-            line = badge + dock_line(message, color=color, width=max(1, width - len(badge)),
-                                     highlight=highlight, frame=frame, mode=mode)
+        rendered.update(message=message, offline=offline, highlight=highlight, frame=frame)
+        badge = "" if offline else mute_badge() + credit_badge(message)
+        # Reserve caption space for billing; truncate even on very narrow docks.
+        badge = truncate(badge, max(0, width - 12)) if badge else ""
+        line = badge + dock_line(message, color=color, width=max(1, width - cell_width(badge)),
+                                 offline=offline, highlight=highlight, frame=frame, mode=mode)
         if line != last:
             print(line, flush=True)
             last = line
 
-    while True:
-        writer, presentation, state = None, None, None
-        try:
-            reader, writer, response = await connect(paths, "watch")
-            delay = 0.25
-            while True:
-                if response.get("event") != "state":
-                    raise CommsError("Unexpected listener response.")
-                audio = response.get("audio", {})
-                if state is not None:
-                    state["audio_badge_width"] = len(mute_badge())
-                    state["audio_muted"] = bool(audio.get("muted"))
-                    if audio.get("muted"):
-                        state["speech_suppressed"] = True
-                message = response.get("message")
-                if message is not None and (
-                    not isinstance(message, dict)
-                    or any(not isinstance(message.get(k), str) for k in ("id", "name", "msg"))
-                ):
-                    raise CommsError("Invalid listener display state.")
-                if message is None:
-                    if presentation:
-                        presentation.cancel()
-                        await asyncio.gather(presentation, return_exceptions=True)
-                        presentation, state = None, None
-                    emit()
-                elif not isinstance(message.get("uid"), str) or message.get("phase") not in ("preparing", "displaying"):
-                    raise CommsError("Invalid listener presentation state.")
-                elif state is not None and state["message"]["uid"] == message["uid"]:
-                    state["message"] = message
-                    state["changed"].set()
-                else:
-                    if presentation:
-                        presentation.cancel()
-                        await asyncio.gather(presentation, return_exceptions=True)
-                    state = {"message": message, "changed": asyncio.Event(), "arrived": time.monotonic(),
-                             "pocket_worker": pocket_worker,
-                             "audio_muted": bool(audio.get("muted")), "speech_suppressed": bool(audio.get("muted")),
-                             "audio_badge_width": len(mute_badge())}
-                    presentation = asyncio.create_task(present_message(paths, state, settings or {}, emit, width, muted, flash, vfx and color))
-                response = await read_frame(reader, timeout=False)
-        except (CommsError, OSError, asyncio.TimeoutError):
-            emit(offline=True)
-        finally:
-            if presentation:
-                presentation.cancel()
-                await asyncio.gather(presentation, return_exceptions=True)
-            if writer is not None:
-                await close_writer(writer)
-        await asyncio.sleep(delay)
-        delay = min(delay * 2, 5)
+    billing_task = asyncio.create_task(poll_credits())
+    try:
+        while True:
+            writer, presentation, state = None, None, None
+            try:
+                reader, writer, response = await connect(paths, "watch")
+                delay = 0.25
+                while True:
+                    if response.get("event") != "state":
+                        raise CommsError("Unexpected listener response.")
+                    audio = response.get("audio", {})
+                    if state is not None:
+                        state["audio_badge_width"] = len(mute_badge())
+                        state["audio_muted"] = bool(audio.get("muted"))
+                        if audio.get("muted"):
+                            state["speech_suppressed"] = True
+                    message = response.get("message")
+                    if (mode == "elevenlabs" and isinstance(message, dict) and "credit_cost" in message
+                            and message.get("uid") != billed_uid):
+                        billed_uid = message.get("uid")
+                        refresh.set()
+                    if message is not None and (
+                        not isinstance(message, dict)
+                        or any(not isinstance(message.get(k), str) for k in ("id", "name", "msg"))
+                    ):
+                        raise CommsError("Invalid listener display state.")
+                    if message is None:
+                        if presentation:
+                            presentation.cancel()
+                            await asyncio.gather(presentation, return_exceptions=True)
+                            presentation, state = None, None
+                        emit()
+                    elif not isinstance(message.get("uid"), str) or message.get("phase") not in ("preparing", "displaying"):
+                        raise CommsError("Invalid listener presentation state.")
+                    elif state is not None and state["message"]["uid"] == message["uid"]:
+                        state["message"] = message
+                        state["changed"].set()
+                    else:
+                        if presentation:
+                            presentation.cancel()
+                            await asyncio.gather(presentation, return_exceptions=True)
+                        state = {"message": message, "changed": asyncio.Event(), "arrived": time.monotonic(),
+                                 "pocket_worker": pocket_worker,
+                                 "audio_muted": bool(audio.get("muted")), "speech_suppressed": bool(audio.get("muted")),
+                                 "audio_badge_width": len(mute_badge()),
+                                 "credit_badge_width": lambda: cell_width(credit_badge(state["message"]))}
+                        presentation = asyncio.create_task(present_message(paths, state, settings or {}, emit, width, muted, flash, vfx and color))
+                    response = await read_frame(reader, timeout=False)
+            except (CommsError, OSError, asyncio.TimeoutError):
+                emit(offline=True)
+            finally:
+                if presentation:
+                    presentation.cancel()
+                    await asyncio.gather(presentation, return_exceptions=True)
+                if writer is not None:
+                    await close_writer(writer)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 5)
+    finally:
+        billing_task.cancel()
+        await asyncio.gather(billing_task, return_exceptions=True)
 
 
 class TerminalDisplay:
@@ -1352,7 +1393,7 @@ class Server:
                     await asyncio.wait_for(self.ready.wait(), speech.REQUEST_TIMEOUT + 10)
             duration = self.audio_duration or max(self.config.get("display_seconds", 5), speech.estimate_seconds(message["msg"]))
             delay = 0.2 if self.audio_duration else 0
-            self.publish({**message, "phase": "displaying", "started_at": time.monotonic() + delay, "duration": duration})
+            self.publish({**self.current, "phase": "displaying", "started_at": time.monotonic() + delay, "duration": duration})
             await asyncio.sleep(duration + delay + (0.15 if self.audio_duration else 0))
             self.queue.task_done()
             if self.queue.empty():
@@ -1423,6 +1464,9 @@ class Server:
                 if duration is not None and (type(duration) not in (int, float) or not math.isfinite(duration) or not 0 < duration <= speech.MAX_SECONDS):
                     raise CommsError("Invalid speech duration.")
                 self.audio_duration = duration
+                cost = request.get("credit_cost")
+                if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0:
+                    self.current["credit_cost"] = cost
                 self.ready.set()
                 await write_frame(writer, {"ok": True, "protocol_version": VERSION})
             elif request.get("command") == "watch":

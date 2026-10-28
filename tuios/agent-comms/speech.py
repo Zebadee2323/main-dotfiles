@@ -13,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import json
+import math
 import wave
 
 SAMPLE_RATE = 24000
@@ -105,9 +106,35 @@ def page_at(prepared, elapsed, duration):
 class Audio:
     path: Path
     duration: float
+    credit_cost: float | None = None
 
     def remove(self):
         self.path.unlink(missing_ok=True)
+
+
+def credit_number(value):
+    """Billing metadata is optional; invalid values must never break speech."""
+    try:
+        number = float(value) if not isinstance(value, bool) else -1
+        return number if math.isfinite(number) and number >= 0 else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def remaining_credits(api_key):
+    request = urllib.request.Request(
+        "https://api.elevenlabs.io/v1/user/subscription",
+        headers={"xi-api-key": api_key, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            data = json.loads(response.read(65537))
+        used = credit_number(data.get("character_count"))
+        limit = credit_number(data.get("character_limit"))
+        if used is None or limit is None:
+            raise ValueError
+        return max(0, limit - used)
+    except (OSError, ValueError, TypeError, AttributeError):
+        raise SpeechError("ElevenLabs credit balance unavailable.") from None
 
 
 def synthesize(directory, voice_id, text, api_key, model=DEFAULT_MODEL, speed=1.0):
@@ -121,6 +148,7 @@ def synthesize(directory, voice_id, text, api_key, model=DEFAULT_MODEL, speed=1.
     try:
         with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
             pcm = response.read(MAX_AUDIO_BYTES + 1)
+            cost = credit_number(getattr(response, "headers", {}).get("character-cost"))
     except urllib.error.HTTPError as exc:
         # Do not log request headers, API keys, response bodies, or spoken text.
         raise SpeechError(f"ElevenLabs returned HTTP {exc.code}.") from None
@@ -140,7 +168,7 @@ def synthesize(directory, voice_id, text, api_key, model=DEFAULT_MODEL, speed=1.
     except BaseException:
         path.unlink(missing_ok=True)
         raise
-    return Audio(path, len(pcm) / (SAMPLE_RATE * 2))
+    return Audio(path, len(pcm) / (SAMPLE_RATE * 2), cost)
 
 
 async def synthesize_phonon(directory, voice, text, settings=None, speed=1.0):

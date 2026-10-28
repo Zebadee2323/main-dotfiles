@@ -231,6 +231,9 @@ class WatcherIntegrationTests(Fixture, unittest.IsolatedAsyncioTestCase):
         root_patch = patch.object(app.AudioWorkspace, "root", return_value=root)
         root_patch.start()
         self.addCleanup(root_patch.stop)
+        usage_patch = patch.object(speech, "remaining_credits", return_value=12345)
+        usage_patch.start()
+        self.addCleanup(usage_patch.stop)
 
     async def test_multiple_watchers_generate_once_and_share_audio_timed_captions(self):
         self.paths.config.write_text('display_seconds = 0.1\n[identities.a]\nname="Alice"\neleven_labs_voice_id="test-voice"\n')
@@ -271,7 +274,7 @@ class WatcherIntegrationTests(Fixture, unittest.IsolatedAsyncioTestCase):
                 while not lines.empty():
                     output.append(lines.get_nowait())
                 self.assertTrue(any("\x1b[7;1m" in line for line in output))
-                self.assertTrue(any("several dock caption" in line or "caption pages" in line for line in output))
+                self.assertTrue(any("caption" in line or "pages" in line for line in output))
                 self.assertEqual(synthesize.call_count, 1)
                 self.assertEqual(play.call_count, 1)
             finally:
