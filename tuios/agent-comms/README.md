@@ -743,6 +743,65 @@ The flash occurs once per new message ID, not on every caption/state update.
 `--no-flash`, `--no-color`, or `NO_COLOR` disables the visual flash. Idle watchers
 do not tick/redraw; only active messages animate caption/attention frames.
 
+## Message prefix rules
+
+Configure each situation independently in `config.toml`:
+
+| Table | Situation | Default fields |
+| --- | --- | --- |
+| `[prefix.focused]` | Sender is the focused pane in the viewed workspace | None |
+| `[prefix.same_workspace]` | Another pane in the viewed workspace | Name and relative position; suppressed if it is the sole agent |
+| `[prefix.different_workspace]` | Sender is in another workspace of the viewed session | Name, session, workspace, and absolute position |
+| `[prefix.different_session]` | Sender's session has no attached/viewing client | Name, session, workspace, and absolute position |
+
+Classification checks session visibility before workspace and focus, so a pane
+remembered as focused in a hidden workspace does not count as currently focused.
+It uses tuios's `tui_attached` and current-workspace information. With multiple
+clients, this reflects the view tuios reports for the sender's session; it does
+not independently track which physical terminal the user is looking at.
+
+Each table accepts:
+
+- `fields`: any unique subset of `name`, `session`, `workspace`, `position`.
+  Fields render in that fixed order. An empty array disables the prefix.
+- `fallback_fields`: replacement fields when `position` was requested but
+  usable geometry is unavailable. Defaults to name and session, except for the
+  focused case, where it is empty. Unavailable values are omitted.
+- `only_when_multiple_agents`: suppress the prefix when this is the only agent
+  in its workspace. Defaults to true only for `same_workspace`.
+- `omit_single_workspace`: omit the workspace label when tuios reports only one
+  workspace in use. Defaults to true; false always includes a requested label.
+
+Workspace labels use the workspace name when available, otherwise its number.
+Position is relative to the focused pane for `same_workspace`, and absolute
+within the sender's workspace for other situations. No geometry is fabricated.
+Standalone agents outside tuios still have no required prefix.
+
+For example, use name-only prefixes for other visible panes and name/session
+prefixes for other sessions, omitting all workspace and position information:
+
+```toml
+[prefix.same_workspace]
+fields = ["name"]
+only_when_multiple_agents = false
+
+[prefix.different_session]
+fields = ["name", "session"]
+```
+
+These produce `Alice here.` and `Alice here, of the work session.` respectively.
+To require a prefix even for the focused pane, set
+`prefix.focused.fields = ["name"]`. Missing tables/keys use the defaults shown
+in the shipped config. Unknown situations, keys, fields, duplicate fields, and
+non-boolean flags are rejected. The earlier `[prefix] spatial = false` switch
+remains supported as name/session defaults for non-focused cases; explicit
+per-situation fields take precedence.
+
+Restart the listener after changing these settings so context lookups and send
+validation agree. Agents with a retained prefix receive fresh context through
+the usual mismatch response and must use it on their retry. Prefix rules do not
+change pane names or stored source metadata.
+
 ## Checked identity on sends
 
 Agents must initially call `agent-comms context` in a **separate tool call**,

@@ -165,6 +165,45 @@ class SpatialPrefixTests(Fixture):
             self.assertEqual(app.expected_prefix(self.config(), "a", source),
                              f"Alice here, in the work session, workspace 2, {phrase}.")
 
+    def test_spatial_disabled_keeps_session_attribution_without_workspace_or_direction(self):
+        config = {**self.config(), "prefix": {"spatial": False}}
+        for reference in ("focused-pane", "workspace"):
+            with self.subTest(reference=reference):
+                source = {**self.source, "position_reference": reference, "workspace_name": "main"}
+                with patch.object(app, "checked_context", return_value=source), \
+                     patch.object(app, "pane_binding", return_value="a"):
+                    identity = app.identify(self.paths, config)
+                self.assertEqual(identity["prefix"], "Alice here, of the work session.")
+                message = identity["prefix"] + " Ready."
+                app.validate_message(config, "a", message, message, source)
+                with self.assertRaises(app.ContextMismatch):
+                    app.validate_message(config, "a", "Alice here, to your top-right. Ready.", source=source)
+        self.assertEqual(app.expected_prefix(config, "a", {**self.source, "introduce": False}), "")
+        self.assertEqual(app.expected_prefix(config, "a", {}), "")
+
+    def test_prefix_config_requires_table_and_boolean(self):
+        original = self.paths.config.read_text()
+        for content in ('prefix = false\n' + original,
+                        original + '\n[prefix]\nspatial = "false"\n',
+                        original + '\n[prefix]\nspatial = 0\n'):
+            with self.subTest(content=content):
+                self.paths.config.write_text(content)
+                with self.assertRaisesRegex(app.CommsError, "prefix.*must be"):
+                    self.config()
+        self.paths.config.write_text(original + '\n[prefix]\nspatial = false\n')
+        self.assertFalse(self.config()["prefix"]["spatial"])
+
+    def test_listener_accepts_nonspatial_prefix_and_rejects_old_spatial_prefix(self):
+        original = self.paths.config.read_text()
+        self.paths.config.write_text(original + '\n[prefix]\nspatial = false\n')
+        self.start_server()
+        text = "Alice here, of the work session. Ready."
+        _, stream = self.request("send", id="a", msg=text, tts=text, source=self.source)
+        self.assertTrue(json.loads(stream.readline())["ok"])
+        _, stream = self.request("send", id="a", msg="Alice here, to your top-right. Ready.", source=self.source)
+        self.assertFalse(json.loads(stream.readline())["ok"])
+        self.assertEqual(json.loads(self.cli("history", "--json").stdout)[0]["msg"], text)
+
     def test_named_workspace_and_duplicate_introduction(self):
         source = {**self.source, "position_reference": "workspace", "workspace_name": "main"}
         prefix = "Alice here, in the work session, the main workspace, in the top-right."

@@ -104,6 +104,19 @@ def context(name, run=subprocess.run, env=None, strict=False):
         source = {"session_name": session_name, "pane_id": pane, "workspace": workspace,
                    # Being alone only removes ambiguity in the workspace the user can see.
                    "introduce": not visible or (not sole_agent and not focused)}
+        source["situation"] = ("different_session" if not info["tui_attached"] else
+                               "different_workspace" if not visible else
+                               "focused" if focused else "same_workspace")
+        source["sole_agent"] = sole_agent
+        # Keep geometry available even when the default policy suppresses an
+        # introduction: a configured rule may choose to include one instead.
+        absolute = workspace_position(own, windows)
+        if absolute:
+            source["absolute_position"] = absolute
+        if visible and not focused and focused_pane is not None and focused_pane.get("workspace") == workspace:
+            relative = relative_position(own, focused_pane)
+            if relative:
+                source["relative_position"] = relative
         # Empty slots are available by default, not additional workspaces in use.
         # Include the current workspace even when empty: the sender can be hidden.
         workspaces = [window.get("workspace") for window in windows if not window.get("scratch")]
@@ -118,13 +131,13 @@ def context(name, run=subprocess.run, env=None, strict=False):
         if isinstance(own.get("display_name"), str):
             source["pane_title"] = own["display_name"]
         if source["introduce"] and visible and not focused and focused_pane is not None and focused_pane.get("workspace") == workspace:
-            position = relative_position(own, focused_pane)
+            position = source.get("relative_position")
             if position:
                 source.update(position=position, position_reference="focused-pane")
         elif source["introduce"] and not visible:
             # Detached sessions retain their layout. Describe that workspace,
             # never a direction relative to a pane the user cannot see.
-            position = workspace_position(own, windows)
+            position = absolute
             if position:
                 source.update(position=position, position_reference="workspace")
         return source

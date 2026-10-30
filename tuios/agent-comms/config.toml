@@ -2,6 +2,34 @@
 display_seconds = 5
 active_groups = ["phonon"] # Groups eligible for NEW random-bag draws.
 
+# Required message introductions by the sender's relation to the viewed pane.
+# Available fields: name, session, workspace, position. [] disables the prefix.
+# Fields render in that fixed order. Fallback replaces fields if position is
+# requested but geometry is unavailable. Restart the listener after edits.
+[prefix.focused]
+fields = []
+fallback_fields = []
+only_when_multiple_agents = false
+omit_single_workspace = true
+
+[prefix.same_workspace]
+fields = ["name", "position"]
+fallback_fields = ["name", "session"]
+only_when_multiple_agents = true
+omit_single_workspace = true
+
+[prefix.different_workspace]
+fields = ["name", "workspace"]
+fallback_fields = ["name", "session"]
+only_when_multiple_agents = false
+omit_single_workspace = true
+
+[prefix.different_session]
+fields = ["name", "session"]
+fallback_fields = ["name", "session"]
+only_when_multiple_agents = false
+omit_single_workspace = true
+
 # Human identity injected by the harness plugins, separate from agent identities.
 [user]
 name = "Oli" # Written responses and --msg.

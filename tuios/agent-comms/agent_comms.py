@@ -45,6 +45,19 @@ QUEUE_LIMIT = 256
 CLIENT_LIMIT = 128
 IO_TIMEOUT = 5
 LOG = logging.getLogger("agent-comms")
+PREFIX_FIELDS = {"name", "session", "workspace", "position"}
+PREFIX_RULES = {
+    "focused": {"fields": [], "fallback_fields": [], "only_when_multiple_agents": False,
+                "omit_single_workspace": True},
+    "same_workspace": {"fields": ["name", "position"], "fallback_fields": ["name", "session"],
+                       "only_when_multiple_agents": True, "omit_single_workspace": True},
+    "different_workspace": {"fields": ["name", "session", "workspace", "position"],
+                            "fallback_fields": ["name", "session"],
+                            "only_when_multiple_agents": False, "omit_single_workspace": True},
+    "different_session": {"fields": ["name", "session", "workspace", "position"],
+                          "fallback_fields": ["name", "session"],
+                          "only_when_multiple_agents": False, "omit_single_workspace": True},
+}
 
 
 class CommsError(Exception):
@@ -298,6 +311,24 @@ def load_config(path: Path) -> dict:
             raise CommsError(f"user.{key} must be nonempty text.")
     if "tts_name" in user and "name" not in user:
         raise CommsError("user.tts_name requires user.name.")
+    prefix = config.get("prefix", {})
+    if not isinstance(prefix, dict):
+        raise CommsError("prefix must be a table.")
+    if type(prefix.get("spatial", True)) is not bool:
+        raise CommsError("prefix.spatial must be a boolean.")
+    if set(prefix) - {"spatial", *PREFIX_RULES}:
+        raise CommsError("Unknown prefix situation; use focused, same_workspace, different_workspace, or different_session.")
+    for situation, defaults in PREFIX_RULES.items():
+        rule = prefix.get(situation, {})
+        if not isinstance(rule, dict) or set(rule) - set(defaults):
+            raise CommsError(f"prefix.{situation} must be a table containing only {', '.join(defaults)}.")
+        for key, value in rule.items():
+            if key in ("fields", "fallback_fields"):
+                if (not isinstance(value, list) or any(not isinstance(field, str) or field not in PREFIX_FIELDS for field in value)
+                        or len(value) != len(set(value))):
+                    raise CommsError(f"prefix.{situation}.{key} must be an array of unique name, session, workspace, or position fields.")
+            elif type(value) is not bool:
+                raise CommsError(f"prefix.{situation}.{key} must be a boolean.")
     duration = config.get("display_seconds", 5)
     if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration) or not 0 < duration <= 3600:
         raise CommsError("display_seconds must be a number greater than 0 and at most 3600.")
@@ -706,24 +737,60 @@ async def shell_binding(paths):
 def expected_prefix(config, identity, source):
     if identity not in config["identities"]:
         raise CommsError("Unknown identity; use an ID from the identity configuration.")
-    if isinstance(source, dict) and source.get("introduce") is True and isinstance(source.get("session_name"), str):
-        session = clean_text(source["session_name"])[:128]
-        if session:
-            name = clean_text(config['identities'][identity]['name'])
-            position = source.get("position")
-            directions = {"top", "bottom", "left", "right", "top-left", "top-right", "bottom-left", "bottom-right", "center"}
-            if isinstance(position, str) and position in directions:
-                if source.get("position_reference") == "focused-pane" and position != "center":
-                    return f"{name} here, to your {position}."
-                if source.get("position_reference") == "workspace" and type(source.get("workspace")) is int:
-                    preposition = "at" if position in ("top", "bottom") else "on" if position in ("left", "right") else "in"
-                    workspace_name = source.get("workspace_name")
-                    workspace_name = clean_text(workspace_name)[:128] if isinstance(workspace_name, str) else ""
-                    workspace = f"the {workspace_name} workspace" if workspace_name else f"workspace {source['workspace']}"
-                    location = "" if type(source.get("workspace_count")) is int and source["workspace_count"] == 1 else f"{workspace}, "
-                    return f"{name} here, in the {session} session, {location}{preposition} the {position}."
-            return f"{name} here, of the {session} session."
-    return ""
+    if not isinstance(source, dict) or not isinstance(source.get("session_name"), str):
+        return ""
+    session = clean_text(source["session_name"])[:128]
+    if not session:
+        return ""
+    situation = source.get("situation")
+    if situation not in PREFIX_RULES:
+        # Older context providers exposed only the default introduction decision.
+        if source.get("introduce") is not True:
+            return ""
+        situation = "same_workspace" if source.get("position_reference") == "focused-pane" else "different_session"
+    settings = config.get("prefix", {})
+    rule = dict(PREFIX_RULES[situation])
+    if settings.get("spatial", True) is False and situation != "focused":
+        # Compatibility with the earlier global switch; explicit rules win.
+        rule.update(fields=["name", "session"], fallback_fields=["name", "session"])
+    rule.update(settings.get(situation, {}))
+    if rule["only_when_multiple_agents"] and source.get("sole_agent") is True:
+        return ""
+    relative = situation == "same_workspace"
+    position = source.get("relative_position" if relative else "absolute_position", source.get("position"))
+    directions = {"top", "bottom", "left", "right", "top-left", "top-right", "bottom-left", "bottom-right", "center"}
+    valid_position = isinstance(position, str) and position in directions
+    if relative and position == "center":
+        valid_position = False
+    fields = rule["fields"]
+    if "position" in fields and not valid_position:
+        fields = rule["fallback_fields"]
+    parts = []
+    if "name" in fields:
+        parts.append(clean_text(config["identities"][identity]["name"]) + " here")
+    workspace = None
+    if ("workspace" in fields and type(source.get("workspace")) is int
+            and not (rule["omit_single_workspace"] and source.get("workspace_count") == 1
+                     and type(source.get("workspace_count")) is int)):
+        label = source.get("workspace_name")
+        label = clean_text(label)[:128] if isinstance(label, str) else ""
+        workspace = f"the {label} workspace" if label else f"workspace {source['workspace']}"
+    has_position = "position" in fields and valid_position
+    if "session" in fields:
+        preposition = "in" if workspace or has_position else "of"
+        parts.append(f"{preposition} the {session} session")
+    if workspace:
+        parts.append(workspace)
+    if has_position:
+        if relative:
+            parts.append(f"to your {position}")
+        else:
+            preposition = "at" if position in ("top", "bottom") else "on" if position in ("left", "right") else "in"
+            parts.append(f"{preposition} the {position}")
+    if not parts:
+        return ""
+    prefix = ", ".join(parts) + "."
+    return prefix if "name" in fields else prefix[0].upper() + prefix[1:]
 
 
 def prefix_context(config, identity):
@@ -736,20 +803,27 @@ def prefix_context(config, identity):
 def check_prefix(identity, prefix, message, tts):
     direction = r"(?:top-left|top-right|bottom-left|bottom-right|top|bottom|left|right|center)"
     introduction = re.compile(
-        rf"^[^\n]{{1,128}} here, (?:of the [^\n]{{1,128}} session\.|to your {direction}\."
+        rf"^[^\n]{{1,128}} here(?:\.|, (?:of the [^\n]{{1,128}} session\.|to your {direction}\."
         rf"|(?:in|at|on) the {direction} of workspace \d+, in the [^\n]{{1,128}} session\."
-        rf"|in the [^\n]{{1,128}} session, (?:(?:workspace \d+|the [^\n]{{1,128}} workspace), )?(?:in|at|on) the {direction}\.)")
+        rf"|in the [^\n]{{1,128}} session, (?:(?:workspace \d+|the [^\n]{{1,128}} workspace), )?(?:in|at|on) the {direction}\.))")
+    component = (rf"(?:[^\n]{{1,128}} here|(?:in|of) the [^\n]{{1,128}} session"
+                 rf"|workspace \d+|the [^\n]{{1,128}} workspace|to your {direction}|(?:in|at|on) the {direction})")
+    configurable_introduction = re.compile(rf"^{component}(?:, {component}){{0,3}}\.", re.IGNORECASE)
 
     def after_markup(text):
         return re.sub(r"^(?:(?:<[^>\n]+>|\[[^\]\n]+\])\s*)+", "", text)
+
+    def has_introduction(text):
+        text = after_markup(text)
+        return introduction.match(text) or configurable_introduction.match(text)
 
     for field, text in (("--msg", message), ("--tts", tts)):
         if prefix:
             matches = text.startswith(prefix) and (len(text) == len(prefix) or text[len(prefix)].isspace())
             remainder = text[len(prefix):].lstrip() if matches else ""
-            valid = matches and bool(remainder) and not introduction.match(after_markup(remainder))
+            valid = matches and bool(remainder) and not has_introduction(remainder)
         else:
-            valid = not introduction.match(after_markup(text))
+            valid = not has_introduction(text)
         if not valid:
             wanted = json.dumps(prefix, ensure_ascii=True) if prefix else '"" (no introduction)'
             raise ContextMismatch(

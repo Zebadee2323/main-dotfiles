@@ -213,7 +213,8 @@ def update_title(paths, name, source, *, private_dir, lock, atomic_json, run=Non
             result = run([tuios_context.executable(env), "get-window", pane, "-s", env["TUIOS_SESSION"], "--json"],
                          capture_output=True, encoding="utf-8", timeout=2, check=True, env=env)
             window = json.loads(result.stdout)
-            if window.get("success") is not True or window.get("id") != pane:
+            identifiers = [window[field] for field in ("id", "window_id") if field in window]
+            if window.get("success") is not True or not identifiers or any(value != pane for value in identifiers):
                 raise ValueError("Cannot verify the caller pane's current name.")
             title = window.get("title")
             if not isinstance(title, str):

@@ -230,6 +230,37 @@ class PaneTitleTests(Fixture):
             self.assertEqual(run.call_count, 2)
             self.assertEqual(run.call_args_list[-1].args[0][-1], "[Alice] OC | Task")
 
+    def test_both_window_identifier_formats_allow_naming_only_the_owner(self):
+        with patch.dict(os.environ, self.pane_env), patch.object(pane_identity, "inventory", return_value={"own"}):
+            app.pane_binding(self.paths, app.load_config(self.paths.config))
+            for identifiers in ({"id": "own"}, {"window_id": "own"}, {"id": "own", "window_id": "own"}):
+                with self.subTest(identifiers=identifiers):
+                    run = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps({
+                        "success": True, "title": "Worker task", **identifiers})))
+                    pane_identity.update_title(self.paths, "Alice", {"pane_title": "Worker task"},
+                                               private_dir=app.private_dir, lock=app.FileLock,
+                                               atomic_json=app.atomic_json, run=run)
+                    self.assertEqual(run.call_count, 2)
+                    command = run.call_args_list[-1].args[0]
+                    self.assertEqual(command[1], "set-window")
+                    self.assertEqual(command[command.index("-w") + 1], "own")
+                    self.assertEqual(command[-1], "[Alice] Worker task")
+
+    def test_missing_wrong_or_conflicting_window_identifiers_block_naming(self):
+        with patch.dict(os.environ, self.pane_env), patch.object(pane_identity, "inventory", return_value={"own"}):
+            app.pane_binding(self.paths, app.load_config(self.paths.config))
+            for identifiers in ({}, {"id": "other"}, {"window_id": "other"},
+                                {"id": "own", "window_id": "other"},
+                                {"id": "other", "window_id": "own"}):
+                with self.subTest(identifiers=identifiers):
+                    run = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps({
+                        "success": True, "title": "Task", **identifiers})))
+                    with self.assertRaisesRegex(ValueError, "Cannot verify"):
+                        pane_identity.update_title(self.paths, "Alice", {"pane_title": "Task"},
+                                                   private_dir=app.private_dir, lock=app.FileLock,
+                                                   atomic_json=app.atomic_json, run=run)
+                    self.assertEqual(run.call_count, 1)
+
     def test_naming_failure_does_not_break_context_json_or_retry(self):
         source = {"pane_id": "own", "pane_title": "Task", "introduce": False}
         with patch.dict(os.environ, self.pane_env), patch.object(pane_identity, "inventory", return_value={"own"}), \
