@@ -69,6 +69,11 @@ class SpatialContextTests(unittest.TestCase):
         self.assertEqual(source["position"], "top-right")
         self.assertEqual(source["position_reference"], "focused-pane")
 
+    def test_counts_populated_and_current_workspaces(self):
+        self.assertEqual(self.inspect()["workspace_count"], 1)
+        self.assertEqual(self.inspect(current=2)["workspace_count"], 2)
+        self.assertEqual(self.inspect(other_workspace=2)["workspace_count"], 2)
+
     def test_workspace_name_comes_from_sender_workspace(self):
         source = self.inspect(current=2, workspace_names={"1": "main", "2": "other"})
         self.assertEqual(source["workspace_name"], "main")
@@ -88,7 +93,8 @@ class SpatialContextTests(unittest.TestCase):
                 self.assertEqual(source["position"], "top-right")
                 self.assertEqual(source["position_reference"], "workspace")
                 self.assertEqual(app.expected_prefix({"identities": {"a": {"name": "Alice"}}}, "a", source),
-                                 "Alice here, in the work session, workspace 1, in the top-right.")
+                                 "Alice here, in the work session, "
+                                 + ("workspace 1, " if current == 2 else "") + "in the top-right.")
 
     def test_focused_has_no_introduction_and_unavailable_geometry_falls_back(self):
         self.assertFalse(self.inspect(focused="own")["introduce"])
@@ -115,7 +121,8 @@ class SpatialContextTests(unittest.TestCase):
                 self.assertTrue(source["introduce"])
                 self.assertEqual(source["position_reference"], "workspace")
                 self.assertEqual(app.expected_prefix({"identities": {"a": {"name": "Alice"}}}, "a", source),
-                                 "Alice here, in the work session, workspace 1, in the top-right.")
+                                 "Alice here, in the work session, "
+                                 + ("workspace 1, " if options.get("current") == 2 else "") + "in the top-right.")
 
     def test_hidden_sole_agent_without_geometry_still_requires_attribution(self):
         source = self.inspect(other_state="none", current=2, geometry=False)
@@ -168,6 +175,24 @@ class SpatialPrefixTests(Fixture):
                 app.check_prefix("a", expected, (expected + " " if expected else "") + prefix + " Ready.",
                                  prefix + " Ready.")
 
+    def test_single_workspace_omits_name_and_number_only(self):
+        for workspace_name in (None, "main"):
+            source = {**self.source, "position_reference": "workspace", "workspace_name": workspace_name}
+            for count in (1, 2, None, True, "1"):
+                with self.subTest(workspace_name=workspace_name, count=count):
+                    prefix = app.expected_prefix(self.config(), "a", {**source, "workspace_count": count})
+                    if type(count) is int and count == 1:
+                        self.assertEqual(prefix, "Alice here, in the work session, in the top-right.")
+                    else:
+                        self.assertIn("the main workspace" if workspace_name else "workspace 2", prefix)
+
+    def test_single_workspace_listener_accepts_short_prefix(self):
+        self.start_server()
+        source = {**self.source, "position_reference": "workspace", "workspace_count": 1}
+        text = "Alice here, in the work session, in the top-right. Ready."
+        _, stream = self.request("send", id="a", msg=text, tts=text, source=source)
+        self.assertTrue(json.loads(stream.readline())["ok"])
+
     def test_invalid_position_falls_back_without_injecting_text(self):
         self.assertEqual(app.expected_prefix(self.config(), "a", {**self.source, "position": "bad\ntext"}),
                           "Alice here, of the work session.")
@@ -202,6 +227,7 @@ class SpatialPrefixTests(Fixture):
     def test_duplicate_stale_and_markup_prefixed_introductions_are_rejected(self):
         expected = "Alice here, to your top-right."
         stale = ("Alice here, to your bottom-left.", "Alice here, at the bottom of workspace 3, in the work session.",
+                 "Alice here, in the work session, on the right.",
                  "Alice here, of the work session.")
         for introduction in (expected, *stale):
             for text, prefix in ((introduction + " Ready.", ""),

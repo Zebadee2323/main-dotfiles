@@ -21,7 +21,8 @@ class AudioControlTests(Fixture):
     def test_toggle_indefinite_mute_and_status_without_config(self):
         self.start_server()
         self.assertFalse(self.audio("status")["muted"])
-        self.assertEqual(self.audio("toggle"), {"muted": True, "remaining_seconds": None})
+        self.assertEqual(self.audio("toggle"), {"muted": True, "remaining_seconds": None,
+                                                "volume": 100, "volume_notice_until": 0})
         self.assertFalse(self.audio("toggle")["muted"])
         self.assertTrue(self.audio("mute")["muted"])
         self.assertFalse(self.audio("unmute")["muted"])
@@ -39,6 +40,50 @@ class AudioControlTests(Fixture):
         for stream in watchers:
             self.assertTrue(json.loads(stream.readline())["audio"]["muted"])
             self.assertFalse(json.loads(stream.readline())["audio"]["muted"])
+
+    def test_volume_cycles_for_all_watchers_and_preserves_timed_mute(self):
+        self.start_server()
+        watchers = [self.request("watch")[1] for _ in range(2)]
+        for stream in watchers:
+            self.assertEqual(json.loads(stream.readline())["audio"]["volume"], 100)
+        self.audio("mute", seconds=0.2)
+        for stream in watchers:
+            stream.readline()
+        for expected in (10, 25, 50, 100, 10):
+            status = self.audio("cycle-volume")
+            self.assertEqual(status["volume"], expected)
+            self.assertTrue(status["muted"])
+            for stream in watchers:
+                self.assertEqual(json.loads(stream.readline())["audio"], status)
+        for stream in watchers:
+            resumed = json.loads(stream.readline())["audio"]
+            self.assertFalse(resumed["muted"])
+            self.assertEqual(resumed["volume"], 10)
+
+    def test_dock_click_routes_mouse_buttons(self):
+        self.start_server()
+        cases = (("3", False, 100, False), ("2", False, 100, False),
+                 ("1", True, 10, False), ("1", False, 10, True),
+                 ("1", True, 25, True), ("3", True, 25, True))
+        for button, ctrl, volume, muted in cases:
+            with patch.dict(os.environ, {**self.env, "TUIOS_CLICK_BUTTON": button}), \
+                 patch.object(app, "control_pressed", return_value=ctrl), \
+                 patch("sys.stdout", new_callable=io.StringIO):
+                result = app.main(["audio", "dock-click"])
+            self.assertEqual(result, 0)
+            status = self.audio("status")
+            self.assertEqual(status["volume"], volume)
+            self.assertEqual(status["muted"], muted)
+
+    def test_macos_control_modifier_mask(self):
+        quartz = Mock()
+        with patch.object(app.sys, "platform", "darwin"), \
+             patch("ctypes.CDLL", return_value=quartz):
+            for flags, expected in ((0, False), (1 << 17, False), (1 << 18, True),
+                                    ((1 << 18) | (1 << 17), True)):
+                quartz.CGEventSourceFlagsState.return_value = flags
+                self.assertEqual(app.control_pressed(), expected)
+                quartz.CGEventSourceFlagsState.assert_called_with(0)
 
     def test_unmute_cancels_old_timer_and_muting_releases_a_speech_lease(self):
         self.start_server()

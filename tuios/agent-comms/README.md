@@ -112,6 +112,9 @@ handles SIGTERM for clean shutdown where the OS delivers it.
   workspace 2, in the top-left.` Named workspaces use `the main workspace` instead
   of `workspace 2`. Single-axis positions use `at the bottom`, `at the top`,
   `on the left`, or `on the right`; a central pane uses `in the center`.
+  When only one workspace is in use, omit its name/number:
+  `Alice here, in the work session, in the top-left.` Count workspaces containing
+  non-scratch panes plus the current workspace; unused empty slots do not count.
   Positions use the pane center within thirds of its workspace's pane bounds,
   excluding minimized, unplaced, and scratch panes.
 - Unavailable geometry: fall back to the session-only
@@ -533,6 +536,7 @@ agent-comms audio mute --seconds 60
 agent-comms audio mute           # until explicitly unmuted
 agent-comms audio unmute
 agent-comms audio status         # JSON; no identity/config needed
+agent-comms audio cycle-volume   # 10% → 25% → 50% → 100% → 10%
 ```
 
 These commands control the shared listener, so every connected watcher honors
@@ -547,8 +551,14 @@ Repeating timed mute resets the countdown from now; toggle/unmute cancels it.
 The dock shows `[Muted 43s]` or `[Muted]` ahead of the normal captions. Mute state
 is in memory: restarting the listener resets it to unmuted.
 
-The checked-in tuios config binds **Ctrl+A, Alt+M** to toggle and
-**Ctrl+A, Alt+Q** to mute for 15 seconds. Edit `--seconds 15` in its
+Voice volume starts at 100% and is shared across watchers. `cycle-volume`
+changes only speech playback gain, including ongoing speech, and briefly shows
+`[Volume 25%]` for two seconds. It preserves any mute countdown and does not
+change system volume. Restarting the listener resets voice volume to 100%.
+
+The checked-in tuios config binds **Ctrl+A, Shift+M** to
+toggle mute indefinitely and **Ctrl+A, Alt+M** to mute for 15 seconds.
+Edit `--seconds 15` in its
 `[[keybindings.command]]` entry to change that shortcut's duration. Commands run
 in a temporary popup and never type into the focused agent or shell.
 
@@ -796,15 +806,20 @@ center = ["custom/agent-comms", "windows"]
 
 [dock.custom.agent-comms]
 command = 'exec "$HOME/.local/bin/agent-comms" watch --width 80 --flash --vfx'
-on-click = 'exec "$HOME/.local/bin/agent-comms" audio mute --seconds 15'
+on-click = 'exec "$HOME/.local/bin/agent-comms" audio dock-click'
 refresh = "push"
 max-width = 80
 ```
 
-Click the agent-comms dock component to mute speech across all watchers for
-15 seconds. Change `--seconds 15` in `on-click` to configure the duration
-(up to 86400 seconds). Each click restarts the countdown; captions continue,
-and speech resumes automatically without replaying skipped announcements.
+Left-click the agent-comms dock component to mute speech across all watchers for
+15 seconds. Each left-click restarts the countdown; captions continue, and speech
+resumes automatically without replaying skipped announcements. Ctrl+left-click to
+cycle voice volume through 10%, 25%, 50%, and 100%; the new value appears for two
+seconds. `dock-click` uses tuios's `TUIOS_CLICK_BUTTON` (1 left) and ignores other
+buttons. Tuios does not forward modifiers, so on macOS and Windows the command
+checks whether Ctrl is held when it runs; keep Ctrl held through the click.
+Other platforms retain plain left-click mute only. Reload tuios config with
+`tuios config apply` after updating the hook.
 
 The existing dock remains at the bottom. Each stdout line replaces the component
 text; SGR colors survive, but cursor movement and clearing do not. This is not an

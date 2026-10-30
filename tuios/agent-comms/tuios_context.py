@@ -104,6 +104,12 @@ def context(name, run=subprocess.run, env=None, strict=False):
         source = {"session_name": session_name, "pane_id": pane, "workspace": workspace,
                    # Being alone only removes ambiguity in the workspace the user can see.
                    "introduce": not visible or (not sole_agent and not focused)}
+        # Empty slots are available by default, not additional workspaces in use.
+        # Include the current workspace even when empty: the sender can be hidden.
+        workspaces = [window.get("workspace") for window in windows if not window.get("scratch")]
+        workspaces.append(listing["current_workspace"])
+        if all(type(value) is int for value in workspaces):
+            source["workspace_count"] = len(set(workspaces))
         workspace_names = info.get("workspace_names")
         if isinstance(workspace_names, dict):
             workspace_name = workspace_names.get(str(workspace))

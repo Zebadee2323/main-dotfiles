@@ -718,7 +718,8 @@ def expected_prefix(config, identity, source):
                     workspace_name = source.get("workspace_name")
                     workspace_name = clean_text(workspace_name)[:128] if isinstance(workspace_name, str) else ""
                     workspace = f"the {workspace_name} workspace" if workspace_name else f"workspace {source['workspace']}"
-                    return f"{name} here, in the {session} session, {workspace}, {preposition} the {position}."
+                    location = "" if type(source.get("workspace_count")) is int and source["workspace_count"] == 1 else f"{workspace}, "
+                    return f"{name} here, in the {session} session, {location}{preposition} the {position}."
             return f"{name} here, of the {session} session."
     return ""
 
@@ -735,7 +736,7 @@ def check_prefix(identity, prefix, message, tts):
     introduction = re.compile(
         rf"^[^\n]{{1,128}} here, (?:of the [^\n]{{1,128}} session\.|to your {direction}\."
         rf"|(?:in|at|on) the {direction} of workspace \d+, in the [^\n]{{1,128}} session\."
-        rf"|in the [^\n]{{1,128}} session, (?:workspace \d+|the [^\n]{{1,128}} workspace), (?:in|at|on) the {direction}\.)")
+        rf"|in the [^\n]{{1,128}} session, (?:(?:workspace \d+|the [^\n]{{1,128}} workspace), )?(?:in|at|on) the {direction}\.)")
 
     def after_markup(text):
         return re.sub(r"^(?:(?:<[^>\n]+>|\[[^\]\n]+\])\s*)+", "", text)
@@ -1054,7 +1055,7 @@ async def watcher_speech(paths, state, settings, muted):
             state["changed"].clear()
             await state["changed"].wait()
         await asyncio.sleep(max(0, state["message"]["started_at"] - time.monotonic()))
-        await speech.play(audio, executable)
+        await speech.play_live(audio, executable, lambda: state.get("audio_volume", 100))
     except (CommsError, speech.SpeechError, OSError, asyncio.TimeoutError):
         if lease:
             with suppress(CommsError, OSError, asyncio.TimeoutError):
@@ -1140,6 +1141,12 @@ async def watch_stream(paths: Paths, *, color: bool, width: int, muted=False, fl
     mode = (settings or {}).get("mode", "elevenlabs")
     credits, refresh, rendered = {}, asyncio.Event(), {}
     billed_uid = None
+    volume_timer = None
+
+    def volume_badge():
+        if audio.get("volume_notice_until", 0) > time.monotonic():
+            return f"[Volume {audio.get('volume', 100)}%] "
+        return ""
 
     def credit_badge(message):
         if mode != "elevenlabs":
@@ -1174,7 +1181,7 @@ async def watch_stream(paths: Paths, *, color: bool, width: int, muted=False, fl
     def emit(message=None, offline=False, highlight=False, frame=None):
         nonlocal last
         rendered.update(message=message, offline=offline, highlight=highlight, frame=frame)
-        badge = "" if offline else mute_badge() + credit_badge(message)
+        badge = "" if offline else volume_badge() + mute_badge() + credit_badge(message)
         # Reserve caption space for billing; truncate even on very narrow docks.
         badge = truncate(badge, max(0, width - 12)) if badge else ""
         line = badge + dock_line(message, color=color, width=max(1, width - cell_width(badge)),
@@ -1194,7 +1201,14 @@ async def watch_stream(paths: Paths, *, color: bool, width: int, muted=False, fl
                     if response.get("event") != "state":
                         raise CommsError("Unexpected listener response.")
                     audio = response.get("audio", {})
+                    if volume_timer is not None:
+                        volume_timer.cancel()
+                    notice_remaining = audio.get("volume_notice_until", 0) - time.monotonic()
+                    if notice_remaining > 0:
+                        volume_timer = asyncio.get_running_loop().call_later(
+                            notice_remaining, lambda: emit(**rendered))
                     if state is not None:
+                        state["audio_volume"] = audio.get("volume", 100)
                         state["audio_badge_width"] = len(mute_badge())
                         state["audio_muted"] = bool(audio.get("muted"))
                         if audio.get("muted"):
@@ -1226,9 +1240,10 @@ async def watch_stream(paths: Paths, *, color: bool, width: int, muted=False, fl
                             await asyncio.gather(presentation, return_exceptions=True)
                         state = {"message": message, "changed": asyncio.Event(), "arrived": time.monotonic(),
                                  "pocket_worker": pocket_worker,
+                                 "audio_volume": audio.get("volume", 100),
                                  "audio_muted": bool(audio.get("muted")), "speech_suppressed": bool(audio.get("muted")),
                                  "audio_badge_width": len(mute_badge()),
-                                 "credit_badge_width": lambda: cell_width(credit_badge(state["message"]))}
+                                 "credit_badge_width": lambda: cell_width(volume_badge() + credit_badge(state["message"]))}
                         presentation = asyncio.create_task(present_message(paths, state, settings or {}, emit, width, muted, flash, vfx and color))
                     response = await read_frame(reader, timeout=False)
             except (CommsError, OSError, asyncio.TimeoutError):
@@ -1242,6 +1257,8 @@ async def watch_stream(paths: Paths, *, color: bool, width: int, muted=False, fl
             await asyncio.sleep(delay)
             delay = min(delay * 2, 5)
     finally:
+        if volume_timer is not None:
+            volume_timer.cancel()
         billing_task.cancel()
         await asyncio.gather(billing_task, return_exceptions=True)
 
@@ -1308,6 +1325,8 @@ class Server:
         self.lease = None
         self.audio_duration = None
         self.audio_muted = False
+        self.audio_volume = 100
+        self.volume_notice_until = 0
         self.muted_until = None
         self.audio_timer = None
 
@@ -1338,15 +1357,23 @@ class Server:
 
     def audio_status(self):
         remaining = max(0, math.ceil(self.muted_until - time.monotonic())) if self.muted_until is not None else None
-        return {"muted": self.audio_muted, "remaining_seconds": remaining}
+        return {"muted": self.audio_muted, "remaining_seconds": remaining,
+                "volume": self.audio_volume,
+                "volume_notice_until": self.volume_notice_until}
 
     def set_audio(self, action, seconds=None):
-        if action not in ("status", "toggle", "mute", "unmute"):
+        if action not in ("status", "toggle", "mute", "unmute", "cycle-volume"):
             raise CommsError("Unknown audio action.")
         if seconds is not None and (action != "mute" or type(seconds) not in (int, float)
                                     or not math.isfinite(seconds) or not 0 < seconds <= 86400):
             raise CommsError("--seconds must be greater than 0 and at most 86400, for mute only.")
         if action == "status":
+            return self.audio_status()
+        if action == "cycle-volume":
+            levels = (10, 25, 50, 100)
+            self.audio_volume = levels[(levels.index(self.audio_volume) + 1) % len(levels)]
+            self.volume_notice_until = time.monotonic() + 2
+            self.broadcast()
             return self.audio_status()
         if self.audio_timer:
             self.audio_timer.cancel()
@@ -1640,7 +1667,7 @@ def parser():
     attention.add_argument("--no-flash", dest="flash", action="store_false", help="Disable the brief attention flash for new messages")
     watcher.set_defaults(flash=True)
     audio = subs.add_parser("audio", help="Control voice live across all watchers; captions stay enabled")
-    audio.add_argument("action", choices=("status", "toggle", "mute", "unmute"))
+    audio.add_argument("action", choices=("status", "toggle", "mute", "unmute", "cycle-volume", "dock-click"))
     audio.add_argument("--seconds", type=float, help="Automatically unmute after this many seconds (mute only)")
     history = subs.add_parser("history", help="Print previous accepted messages, even when the listener is offline")
     history.add_argument("--limit", type=int, default=message_history.MAX_ENTRIES)
@@ -1674,6 +1701,20 @@ def prepare_output():
         handle, mode = kernel.GetStdHandle(-11 & 0xFFFFFFFF), wintypes.DWORD()
         if kernel.GetConsoleMode(handle, ctypes.byref(mode)):
             kernel.SetConsoleMode(handle, mode.value | 0x0004)
+
+
+def control_pressed():
+    """Tuios click hooks omit modifiers; sample the local keyboard state."""
+    import ctypes
+    if sys.platform == "darwin":
+        quartz = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        flags = quartz.CGEventSourceFlagsState
+        flags.argtypes = [ctypes.c_int32]
+        flags.restype = ctypes.c_uint64
+        return bool(flags(0) & (1 << 18))  # Combined session state, Control flag.
+    if os.name == "nt":
+        return bool(ctypes.windll.user32.GetAsyncKeyState(0x11) & 0x8000)
+    return False
 
 
 def main(argv=None):
@@ -1719,6 +1760,12 @@ def main(argv=None):
                                              atomic_json=atomic_json, error=CommsError)
             print(json.dumps(result, ensure_ascii=True, separators=(",", ":")))
         elif args.command == "audio":
+            if args.action == "dock-click":
+                button = os.environ.get("TUIOS_CLICK_BUTTON", "1")
+                if button != "1":
+                    return 0
+                args.action = "cycle-volume" if control_pressed() else "mute"
+                args.seconds = 15 if args.action == "mute" else None
             if args.seconds is not None and (args.action != "mute" or not math.isfinite(args.seconds) or not 0 < args.seconds <= 86400):
                 raise CommsError("--seconds must be greater than 0 and at most 86400, for mute only.")
             if endpoint(paths).get("audio_control") is not True:

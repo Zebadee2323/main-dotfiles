@@ -1,5 +1,6 @@
 """Naia-style captions with ElevenLabs, Phonon, or Pocket TTS speech playback."""
 import asyncio
+from array import array
 from contextlib import suppress
 from dataclasses import dataclass
 import os
@@ -8,6 +9,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import time
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -386,6 +388,63 @@ def player():
     if shutil.which("aplay"):
         return "aplay"
     return None
+
+
+def playback_excerpt(audio, offset, volume):
+    """Private PCM copy: change speech gain without changing system volume."""
+    fd, filename = tempfile.mkstemp(prefix="playback-", suffix=".wav", dir=audio.path.parent)
+    os.close(fd)
+    excerpt = Audio(Path(filename), max(0, audio.duration - offset))
+    try:
+        with wave.open(str(audio.path), "rb") as source:
+            params = source.getparams()
+            source.setpos(min(source.getnframes(), int(offset * source.getframerate())))
+            frames = source.readframes(source.getnframes())
+        if volume != 100:
+            if params.sampwidth != 2:
+                raise SpeechError("Voice volume requires 16-bit PCM speech.")
+            samples = array("h")
+            samples.frombytes(frames)
+            if sys.byteorder != "little":
+                samples.byteswap()
+            samples = array("h", (round(sample * volume / 100) for sample in samples))
+            if sys.byteorder != "little":
+                samples.byteswap()
+            frames = samples.tobytes()
+        with wave.open(filename, "wb") as target:
+            target.setparams(params)
+            target.writeframes(frames)
+        return excerpt
+    except BaseException:
+        excerpt.remove()
+        raise
+
+
+async def play_live(audio, executable, volume):
+    """Apply live gain changes to the remaining speech, without replaying it."""
+    offset = 0
+    while offset < audio.duration:
+        level = volume()
+        excerpt = playback_excerpt(audio, offset, level) if offset or level != 100 else audio
+        playback = asyncio.create_task(play(excerpt, executable))
+        started = time.monotonic()
+        try:
+            while not playback.done():
+                done, _ = await asyncio.wait({playback}, timeout=0.05)
+                if done:
+                    await playback
+                    return
+                if volume() != level:
+                    offset += time.monotonic() - started
+                    break
+            else:
+                await playback
+                return
+        finally:
+            playback.cancel()
+            await asyncio.gather(playback, return_exceptions=True)
+            if excerpt is not audio:
+                excerpt.remove()
 
 
 async def play(audio, executable):

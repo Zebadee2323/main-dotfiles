@@ -122,8 +122,8 @@ center = ["custom/agent-comms", "windows"]
 
 [dock.custom.agent-comms]
 command = 'exec "$HOME/.local/bin/agent-comms" watch --width 80 --flash --vfx'
-# Click to mute speech; change --seconds to set the duration.
-on-click = 'exec "$HOME/.local/bin/agent-comms" audio mute --seconds 15'
+# Left-click: mute for 15 seconds. Ctrl+left-click: cycle voice volume.
+on-click = 'exec "$HOME/.local/bin/agent-comms" audio dock-click'
 refresh = "push"
 max-width = 80
 
@@ -216,13 +216,13 @@ prefix_next_window = ["alt+o"]
 prefix_workspace_switcher = ["alt+w"]
 
 [[keybindings.command]]
-key = "prefix+alt+m"
+key = "prefix+shift+m"
 type = "popup"
 command = 'exec "$HOME/.local/bin/agent-comms" audio toggle'
 description = "Toggle agent voice"
 
 [[keybindings.command]]
-key = "prefix+alt+q"
+key = "prefix+alt+m"
 type = "popup"
 command = 'exec "$HOME/.local/bin/agent-comms" audio mute --seconds 15'
 description = "Mute agent voice for 15 seconds"
