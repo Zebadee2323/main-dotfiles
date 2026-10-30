@@ -75,15 +75,47 @@ worker and supervisor sessions, correlate using the task/revision text, not
 `--reply-to` or `--thread` with an ID from the other session. A queued or read
 message is not acknowledgment; require a response matching the task/revision.
 
-Use tuios agent messages for ongoing coordination:
+Use tuios agent messages for ongoing coordination. **Across sessions, use
+selectors, not direct `send-agent-message -s ... -w ...`.** In the tested tuios
+version, a direct cross-session send looks up the sender pane in the recipient
+session and fails. Selector-based sends were verified in both directions with
+the original sender pane IDs preserved.
+
+Start with a selector for the recorded worker session and inspect its matches:
 
 ```sh
-tuios send-agent-message -s "$WORKER_SESSION" -w "$WORKER_PANE" 'I am agent <checked-supervisor-name>, in tuios pane <supervisor-pane-id>. [task=<id> revision=<n>] <assignment or feedback>'
+WORKER_SELECTOR="session:$WORKER_SESSION"
+tuios list-agents --select "$WORKER_SELECTOR" --json
 ```
 
-Use `ask-agent` when an immediate answer is necessary and the worker is ready;
-use mail for busy workers. Expect completion reports and questions through
-tuios agent messages. Read your inbox with:
+Require `success: true` and exactly one entry in `agents`, whose `session` and
+`window_id` match the recorded `WORKER_SESSION` and `WORKER_PANE`. If multiple
+agents match, refine the selector with a supported filter such as
+`name:*<worker-agent-name>*`, then list again. If no entry matches or the ID is
+wrong, stop and resolve the address; do not send to a replacement by name.
+
+Take the `confirm` token from that verified listing and send using the same
+selector. The token binds delivery to the inspected recipient set:
+
+```sh
+WORKER_CONFIRM='<confirm token from the verified listing>'
+tuios send-agent-message --select "$WORKER_SELECTOR" --confirm "$WORKER_CONFIRM" 'I am agent <checked-supervisor-name>, in tuios pane <supervisor-pane-id>. [task=<id> revision=<n>] <assignment or feedback>'
+```
+
+Do not use `--yes` for these point-to-point messages, because it sends to
+whatever matches at delivery time. Re-list and reverify when a token is rejected
+or the worker is restarted/reassigned. Never strip `TUIOS_PANE_ID`, spoof
+`--from`, or change grants to get a message through. A `forbidden` response is a
+permission decision, not this addressing bug.
+
+For a worker in your own session, direct `send-agent-message -s ... -w ...` is
+supported. Use `ask-agent` only for same-session immediate questions when the
+worker is ready. Across sessions use selector-based mail and bounded message
+waits. Keep read/wait/ship commands' explicit session and pane arguments; the
+selector workaround applies to messaging, not Git targeting.
+
+Expect completion reports and questions through tuios agent messages. Read your
+inbox with:
 
 ```sh
 tuios read-agent-messages -s "$SUPERVISOR_SESSION" -w "$TUIOS_PANE_ID" --unread --json
@@ -182,6 +214,9 @@ without editing. After receiving that acknowledgment, send a matching
 `preflight-confirmed; proceed` message. Require the worker to acknowledge receipt
 before beginning implementation. This verifies communication in both directions
 and the supervisor has confirmed the checkout before edits start.
+Include the selector messaging procedure in the assignment so workers do not
+retry a failing direct cross-session send. Verify that the acknowledgment's
+sender pane is the recorded worker; selector delivery should preserve it.
 
 If acknowledgment is missing, inspect the pane and delivery state; do not keep
 resending assignments or interpret silence as success. If grants block the

@@ -100,11 +100,36 @@ If tuios hooks do not reflect your state correctly, report your own pane as idle
 after the preflight acknowledgment and as working when implementation starts.
 Use `tuios set-agent-state` for your own pane only; never alter another agent's
 state to bypass a readiness or approval check.
-For example, replacing placeholders with actual values:
+Use selector-based mail across sessions. Direct
+`send-agent-message -s <supervisor-session> -w <supervisor-pane>` fails in the
+tested tuios version because it tries to resolve your sender pane inside the
+supervisor's session. Do not remove sender attribution to work around it.
+
+List candidates using the recorded supervisor session:
 
 ```sh
-tuios send-agent-message -s "$SUPERVISOR_SESSION" -w "$SUPERVISOR_PANE" 'I am agent <checked-worker-name>, in tuios pane <worker-pane-id>, session <worker-session-name>. [task=<id> revision=<n>] Preflight ready in <checkout> on <branch>. I understand <assigned task> and <checks>; awaiting proceed.'
+SUPERVISOR_SELECTOR="session:$SUPERVISOR_SESSION"
+tuios list-agents --select "$SUPERVISOR_SELECTOR" --json
 ```
+
+Require `success: true` and exactly one entry in `agents`, whose `session` and
+`window_id` equal `SUPERVISOR_SESSION` and `SUPERVISOR_PANE`. If several agents
+match, refine with a supported filter such as `name:*<supervisor-agent-name>*`
+and list again. Missing or wrong recipients block delivery; do not assume that
+a pane with the same name is the same supervisor.
+
+Use the returned `confirm` token with the exact verified selector:
+
+```sh
+SUPERVISOR_CONFIRM='<confirm token from the verified listing>'
+tuios send-agent-message --select "$SUPERVISOR_SELECTOR" --confirm "$SUPERVISOR_CONFIRM" 'I am agent <checked-worker-name>, in tuios pane <worker-pane-id>, session <worker-session-name>. [task=<id> revision=<n>] Preflight ready in <checkout> on <branch>. I understand <assigned task> and <checks>; awaiting proceed.'
+```
+
+The token protects the inspected recipient set. Do not replace it with `--yes`;
+re-list and verify if it becomes invalid. Never unset `TUIOS_PANE_ID`, spoof
+`--from`, or alter grants to bypass delivery problems. A `forbidden` response
+must be surfaced as a permission block. For a supervisor in your own session,
+direct session/pane mail remains supported.
 
 Use tuios messages for progress, questions, blockers, completion, and revision
 reports. Keep updates useful: report a material finding, changed assumption,
@@ -131,8 +156,9 @@ Read your inbox when notified and before reporting completion:
 tuios read-agent-messages -s "$WORKER_SESSION" -w "$WORKER_PANE" --unread --json
 ```
 
-Prefer mail while the supervisor is busy. Use `ask-agent` only when an immediate
-answer is necessary and the supervisor is ready. Never use `send-text` or
+Prefer mail while the supervisor is busy. Across sessions use the selector
+procedure above for every acknowledgment, question, and report. Use `ask-agent`
+only for same-session immediate questions when the supervisor is ready. Never use `send-text` or
 `send-keys` to talk to an agent, especially a pane in `needs_input`.
 
 Follow active human-facing announcement rules when applicable. Replies to
