@@ -1,5 +1,65 @@
 -- Fugitive commands and buffer-local shortcuts.
 
+-- Opt-in polling for changes made outside Neovim. Only refresh repositories
+-- whose :G summary is visible in the current tab; never open a window.
+local refresh_timer
+local refresh_interval = 5 -- seconds; deliberately disabled at startup
+
+local function stop_refresh()
+  if refresh_timer then
+    vim.fn.timer_stop(refresh_timer)
+    refresh_timer = nil
+  end
+end
+
+local function start_refresh()
+  stop_refresh()
+  refresh_timer = vim.fn.timer_start(refresh_interval * 1000, function(timer)
+    if timer ~= refresh_timer then return end
+    local seen = {}
+    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      local buf = vim.api.nvim_win_get_buf(win)
+      if vim.bo[buf].filetype == "fugitive" and vim.b[buf].fugitive_type == "index" then
+        local dir = vim.fn.FugitiveGitDir(buf)
+        if dir ~= "" and not seen[dir] then
+          seen[dir] = true
+          vim.fn.FugitiveDidChange(buf)
+        end
+      end
+    end
+  end, { ["repeat"] = -1 })
+end
+
+vim.api.nvim_create_user_command("GAutoRefresh", function(opts)
+  local arg = opts.args
+  if arg == "" or arg == "toggle" then
+    if refresh_timer then stop_refresh() else start_refresh() end
+  elseif arg == "off" then
+    stop_refresh()
+  elseif arg == "on" then
+    start_refresh()
+  elseif arg ~= "status" then
+    local seconds = tonumber(arg)
+    if not seconds or seconds < 1 or seconds > 86400 or seconds % 1 ~= 0 then
+      vim.notify("Usage: :GAutoRefresh [on|off|toggle|status|seconds (1–86400)]", vim.log.levels.ERROR)
+      return
+    end
+    refresh_interval = seconds
+    start_refresh()
+  end
+  vim.notify(("Fugitive auto-refresh: %s (every %ds, visible status windows only)")
+    :format(refresh_timer and "on" or "off", refresh_interval))
+end, {
+  nargs = "?",
+  complete = function(lead)
+    return vim.tbl_filter(function(value) return value:sub(1, #lead) == lead end,
+      { "on", "off", "toggle", "status" })
+  end,
+  desc = "Toggle Fugitive status polling, or enable it with an interval in seconds",
+})
+
+vim.api.nvim_create_autocmd("VimLeavePre", { callback = stop_refresh })
+
 local function trim(s)
   return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
