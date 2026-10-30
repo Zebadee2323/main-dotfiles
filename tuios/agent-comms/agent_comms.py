@@ -27,7 +27,9 @@ import time
 import tomllib
 import unicodedata
 import uuid
+import wave
 
+import audio_visualizer
 import message_history
 import pane_identity
 import shell_identity
@@ -909,51 +911,7 @@ def truncate(text: str, width: int) -> str:
     return "".join(result) + "..."
 
 
-def delivery_prefix(text: str, frame: int, ink: str, preparing: bool) -> str:
-    """A five-cell spectrum/scanner and identity shimmer; never animate captions.
-
-    The spectrum is decorative activity, not measured audio amplitude. Only SGR
-    escapes are emitted so the same frames work in tuios push lines and pipes.
-    """
-    themes = {
-        "36": (23, 30, 37, 44, 87, 159),   # cyan / ice
-        "35": (53, 90, 127, 164, 213, 225), # violet / pink
-        "32": (22, 28, 35, 42, 120, 194),  # emerald / mint
-        "34": (17, 25, 33, 69, 117, 153),  # blue / electric
-        "33": (58, 94, 136, 178, 221, 230), # amber / gold
-    }
-    palette = themes.get(ink, themes["36"])
-    output = []
-    for column in range(min(5, cell_width(text))):
-        if preparing:
-            # A bright radar head with a fading trail sweeps back and forth.
-            sweep = frame % 8
-            head = sweep if sweep <= 4 else 8 - sweep
-            distance = abs(column - head)
-            glyph = ("●", "•", "·", "·", "·")[distance]
-            level = max(0, 5 - distance * 2)
-        else:
-            # Independent, smoothly varying bands avoid a short looping preset.
-            energy = (math.sin(frame * 0.48 + column * 1.35)
-                      + 0.55 * math.sin(frame * 0.23 - column * 0.9)) / 1.55
-            height = max(0, min(7, round(3.5 + 3.5 * energy)))
-            glyph = "▁▂▃▄▅▆▇█"[height]
-            level = min(5, 1 + height * 4 // 7)
-        output.append(f"\x1b[38;5;{palette[level]}m{glyph}")
-    # Keep the name in its identity's palette, with a soft traveling highlight.
-    tail = text[5:]
-    head = (frame * 0.65) % (cell_width(tail) + 10) - 5
-    position = 0
-    for char in tail:
-        distance = abs(position - head)
-        style = ("97" if distance < 0.8 else f"38;5;{palette[5]}" if distance < 2
-                 else f"38;5;{palette[4]}" if distance < 3.5 else ink)
-        output.append(f"\x1b[{style}m{char}")
-        position += cell_width(char)
-    return "".join(output) + "\x1b[0m"
-
-
-def dock_line(message: dict | None, *, color: bool = True, width: int = 96, offline: bool = False, highlight=False, frame: int | None = None, mode: str = "elevenlabs") -> str:
+def dock_line(message: dict | None, *, color: bool = True, width: int = 96, offline: bool = False, highlight=False, frame: int | None = None, mode: str = "elevenlabs", lead: str = "") -> str:
     badge = {"elevenlabs": "[ELE]", "phonon": "[PHO]", "pocket_tts": "[POC]"}[mode]
     if offline:
         text, ink = "[! ] comms: offline", "33"
@@ -963,14 +921,16 @@ def dock_line(message: dict | None, *, color: bool = True, width: int = 96, offl
         text = f"{badge} {clean_text(message['name'])}: {clean_text(message['msg'])}"
         palette = ("36", "35", "32", "34", "33")
         ink = palette[hashlib.sha256(message["id"].encode()).digest()[0] % len(palette)]
-    text = truncate(text, width)
+    text = truncate(lead + text, width)
     # Color the identity/prefix; leave the message itself in the dock's text ink.
     if color:
         prefix, separator, body = text.partition(":")
         if frame is not None and message is not None and not offline and not highlight:
-            return delivery_prefix(prefix + separator, frame, ink, message.get("phase") == "preparing") + body
+            return audio_visualizer.render(
+                text, width, ink, audio_visualizer.decode(message.get("visualizer")),
+                message.get("visual_elapsed", -1), message.get("visual_volume", 100))
         line = f"\x1b[{ink}m{prefix}{separator}\x1b[0m{body}"
-        return f"\x1b[7;1m{text}\x1b[0m" if highlight else line
+        return f"\x1b[49;1;97m{text}\x1b[0m" if highlight else line
     return text
 
 
@@ -1049,8 +1009,14 @@ async def watcher_speech(paths, state, settings, muted):
             else:
                 audio.remove()
                 audio = processed
+        # Analyse the post-effects file once; share only its bounded envelope,
+        # so every watcher follows the same speech without reading audio files.
+        try:
+            visualizer = await asyncio.to_thread(audio_visualizer.analyse, audio.path)
+        except (OSError, EOFError, ValueError, wave.Error):
+            visualizer = None
         billing = {"credit_cost": credit_cost} if type(credit_cost) in (int, float) else {}
-        await rpc(paths, "speech-ready", uid=message["uid"], lease=lease, duration=audio.duration, **billing)
+        await rpc(paths, "speech-ready", uid=message["uid"], lease=lease, duration=audio.duration, visualizer=visualizer, **billing)
         while state["message"].get("phase") != "displaying":
             state["changed"].clear()
             await state["changed"].wait()
@@ -1093,8 +1059,10 @@ async def present_message(paths, state, settings, emit, width, muted, flash, vfx
             text = speech.page_at(captions, elapsed, message.get("duration", 1))
             since_arrival = time.monotonic() - state["arrived"]
             highlight = flash and since_arrival < 0.6 and int(since_arrival / 0.15) % 2 == 0
-            frame = int(since_arrival * 10) if vfx else None
-            emit({**message, "name": display_name, "msg": text}, highlight=highlight, frame=frame)
+            frame = int(since_arrival * 20) if vfx else None
+            visual_elapsed = elapsed if not (muted or state.get("audio_muted") or state.get("speech_suppressed")) else -1
+            emit({**message, "name": display_name, "msg": text,
+                  "visual_elapsed": visual_elapsed, "visual_volume": state.get("audio_volume", 100)}, highlight=highlight, frame=frame)
             await asyncio.sleep(0.05)
     finally:
         voice.cancel()
@@ -1184,8 +1152,8 @@ async def watch_stream(paths: Paths, *, color: bool, width: int, muted=False, fl
         badge = "" if offline else volume_badge() + mute_badge() + credit_badge(message)
         # Reserve caption space for billing; truncate even on very narrow docks.
         badge = truncate(badge, max(0, width - 12)) if badge else ""
-        line = badge + dock_line(message, color=color, width=max(1, width - cell_width(badge)),
-                                 offline=offline, highlight=highlight, frame=frame, mode=mode)
+        line = dock_line(message, color=color, width=width, lead=badge,
+                         offline=offline, highlight=highlight, frame=frame, mode=mode)
         if line != last:
             print(line, flush=True)
             last = line
@@ -1534,6 +1502,9 @@ class Server:
                 duration = request.get("duration")
                 if duration is not None and (type(duration) not in (int, float) or not math.isfinite(duration) or not 0 < duration <= speech.MAX_SECONDS):
                     raise CommsError("Invalid speech duration.")
+                visualizer = request.get("visualizer")
+                if duration is not None and audio_visualizer.decode(visualizer):
+                    self.current["visualizer"] = visualizer
                 self.audio_duration = duration
                 cost = request.get("credit_cost")
                 if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0:
@@ -1659,7 +1630,7 @@ def parser():
     watcher.add_argument("--width", type=int, default=96, help="Maximum display cells (default: 96)")
     watcher.add_argument("--mute", action="store_true", help="Display captions without generating or playing speech")
     effects = watcher.add_mutually_exclusive_group()
-    effects.add_argument("--vfx", dest="vfx", action="store_true", help="Animate delivery waveform and identity glow (default)")
+    effects.add_argument("--vfx", dest="vfx", action="store_true", help="Show live audio across the caption background (default)")
     effects.add_argument("--no-vfx", dest="vfx", action="store_false", help="Disable delivery animation; use --no-flash too for no motion")
     watcher.set_defaults(vfx=True)
     attention = watcher.add_mutually_exclusive_group()

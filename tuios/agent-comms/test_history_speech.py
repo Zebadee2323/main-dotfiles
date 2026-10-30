@@ -3,6 +3,7 @@ from contextlib import suppress
 import io
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -188,7 +189,7 @@ class CaptionTests(unittest.TestCase):
     def test_flash_is_ansi_only_and_resets_style(self):
         message = {"id": "a", "name": "Alice", "msg": "new message"}
         flashed = app.dock_line(message, highlight=True)
-        self.assertIn("\x1b[7;1m", flashed)
+        self.assertIn("\x1b[49;1;97m", flashed)
         self.assertTrue(flashed.endswith("\x1b[0m"))
         self.assertNotIn("\x1b", app.dock_line(message, color=False, highlight=True))
 
@@ -243,7 +244,9 @@ class WatcherIntegrationTests(Fixture, unittest.IsolatedAsyncioTestCase):
 
         def generate(directory, *args):
             filename = Path(directory) / "test.wav"
-            filename.write_bytes(b"fake")
+            with wave.open(str(filename), "wb") as output:
+                output.setparams((1, 2, speech.SAMPLE_RATE, 0, "NONE", "not compressed"))
+                output.writeframes(b"\x00\x20" * int(speech.SAMPLE_RATE * 0.7))
             paths.append(filename)
             return speech.Audio(filename, 0.7)
 
@@ -268,13 +271,14 @@ class WatcherIntegrationTests(Fixture, unittest.IsolatedAsyncioTestCase):
                         break
                 self.assertAlmostEqual(message["duration"], 0.7)
                 self.assertEqual(message["tts"], "[warm] A spoken message.")
+                self.assertIsNotNone(app.audio_visualizer.decode(message.get("visualizer")))
                 self.assertEqual((await app.read_frame(reader))["message"], None)
                 await app.close_writer(writer)
                 output = []
                 while not lines.empty():
                     output.append(lines.get_nowait())
-                self.assertTrue(any("\x1b[7;1m" in line for line in output))
-                self.assertTrue(any("caption" in line or "pages" in line for line in output))
+                self.assertTrue(any("\x1b[49;1;97m" in line for line in output))
+                self.assertTrue(any("caption" in re.sub(r"\x1b\[[0-9;]*m", "", line) or "pages" in re.sub(r"\x1b\[[0-9;]*m", "", line) for line in output))
                 self.assertEqual(synthesize.call_count, 1)
                 self.assertEqual(play.call_count, 1)
             finally:

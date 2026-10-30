@@ -590,12 +590,20 @@ without breaking context's three-field JSON or retrying denied requests.
 
 ## Delivery effects
 
-Colored watchers animate at 10 frames per second while a message is active:
-an orbiting dot while speech is preparing, then a decorative pulsing waveform
-with a cyan/white glow sweeping across the identity. This is an activity effect,
-not an audio-level meter. Captions stay in the dock's normal ink, with unchanged
-page timing and width. Idle and offline output remain static; effects use only
-single-line text and ANSI SGR, not cursor movement or terminal-screen commands.
+Colored watchers render at 20 frames per second while a message is active.
+A two-second trail of measured speech energy glows behind steady, bright caption
+text across the entire bar. Only columns with audible energy receive the speaker's
+identity-colored background; quiet columns use the terminal's default transparent
+background. There is no blanket dark fill. Lit cells use solid ANSI colors because
+terminals do not support per-cell background alpha. Caption characters and spaces
+remain intact, with no block bars or added waveform glyphs. The arrival flash uses
+foreground brightness instead of reverse video.
+The envelope combines the measured frequency bands of the final PCM audio after
+robot effects and normalization, and follows playback time and live volume.
+All watchers share the same bounded audio data, without extra synthesis or access
+to temporary audio files. Silence, muted speech, preparation and unavailable
+analysis leave the background transparent. Idle and offline output remain static.
+Rendering uses only single-line text and ANSI SGR.
 
 Effects are enabled by default (`--vfx`); `--no-vfx` disables them independently
 of the existing arrival flash. Use `--no-vfx --no-flash` for no motion.
