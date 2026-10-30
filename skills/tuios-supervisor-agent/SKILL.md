@@ -261,14 +261,29 @@ zsh -ic 'whence -w opencode-t; whence -w codex-t'
 ```
 
 Shell aliases cannot be passed directly as the executable to `start-agent`.
-Use the literal alias in the zsh command string and forward model arguments
-through `"$@"`, preserving their boundaries. `tuios-worker` supplies zsh's `$0`;
-it is not passed to the harness. Start only the selected harness, replacing
-example model IDs with the user's choice:
+Use the literal alias in the zsh command string. `tuios-worker` supplies zsh's
+`$0`; it is not passed to the harness. Start only the selected harness, replacing
+example model IDs with the user's choice.
+
+For OpenCode, keep `mini --model` inside the shell command. `$1` supplies the
+selected model ID and `$2` supplies the initial prompt directly to Mini:
 
 ```sh
-tuios start-agent zsh -s "$WORKER_SESSION" --cwd "$WORKER_WORKTREE" --prompt '<initial prompt>' --json -- -ic 'opencode-t "$@"' tuios-worker mini -m '<model-id>'
+tuios start-agent zsh -s "$WORKER_SESSION" --cwd "$WORKER_WORKTREE" --json -- -ic 'opencode-t mini --model "$1" --prompt "$2"' tuios-worker '<model-id>' '<initial prompt>'
 ```
+
+The installed OpenCode CLI accepts `--model` / `-m` on `mini`, not on the root
+`opencode` command. Never rewrite this as `opencode-t -m ...`, omit `mini`, or
+move the model flag before the subcommand. If it reports an unrecognized model
+flag, inspect the actual launch command and `zsh -ic 'opencode-t mini --help'`;
+do not drop model selection and continue with an unknown default.
+
+Pass the first prompt through Mini's own `--prompt`, as shown, rather than
+adding tuios's `--prompt` to this OpenCode command. An empty Mini prompt can be
+misdetected as working, leaving tuios waiting for readiness before it submits
+anything. Direct prompt delivery was verified with an actual Mini response.
+
+For Codex, `"$@"` forwards the model/config arguments with their boundaries intact:
 
 ```sh
 tuios start-agent zsh -s "$WORKER_SESSION" --cwd "$WORKER_WORKTREE" --prompt '<initial prompt>' --json -- -ic 'codex-t "$@"' tuios-worker -m gpt-6.1-sol -c 'service_tier="fast"'
@@ -302,8 +317,9 @@ result is a session with just the worker; the temporary starter shell is needed
 by this launch sequence to preserve the shim and model selection.
 
 Use the harness's nonblocking execution features for independent startup calls
-so you remain available for mail. `start-agent --prompt` submits the initial
-prompt once ready; do not send it again through `ask-agent`. If startup reaches
+so you remain available for mail. OpenCode receives its initial prompt through
+Mini's CLI; Codex uses `start-agent --prompt` once ready. Do not send either
+prompt again through `ask-agent`. If startup reaches
 a trust/approval prompt, leave it for the user. A timeout can leave a live pane:
 inspect its state and output, retain its ID, and check whether the prompt was
 delivered before retrying. Do not create duplicate workers. Explicit `--cwd`

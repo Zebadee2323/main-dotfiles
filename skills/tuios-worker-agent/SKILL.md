@@ -84,11 +84,22 @@ Send an initial acknowledgment with your checked name, worker session and pane,
 checkout/branch, and a brief understanding of the task. Every message to an
 agent must identify you as an agent and include your checked name and own pane
 ID. Inspect `tuios pane-grants --json` for the assigned operations and report any
-missing communication capability. Send this acknowledgment through tuios mail,
-then end your turn without editing. Wait for a matching
+missing communication capability. Include the active harness/model when
+observable; distinguish a verified model
+from the one merely requested in the assignment. If startup or model selection
+failed, report the error rather than claiming readiness. For OpenCode, the
+model flag belongs to `mini`, not the root command; do not silently retry without
+the selected model.
+
+Send the acknowledgment through tuios mail, then end your turn without editing.
+Wait for a matching
 `preflight-confirmed; proceed` from the supervisor. Acknowledge that message
 through mail before beginning implementation; do not acknowledge acknowledgments
 repeatedly. This confirms communication in both directions and checkout approval.
+If tuios hooks do not reflect your state correctly, report your own pane as idle
+after the preflight acknowledgment and as working when implementation starts.
+Use `tuios set-agent-state` for your own pane only; never alter another agent's
+state to bypass a readiness or approval check.
 For example, replacing placeholders with actual values:
 
 ```sh
@@ -221,6 +232,9 @@ alone is insufficient. End your turn so the supervisor can review and commit
 while you are at rest. Do not keep a foreground wait running indefinitely or
 continue editing after announcing readiness. Stay available for messages and
 later turns; do not exit the harness or remove the session.
+If automatic state reporting still says working after you are ready for review,
+report your own state as idle with `tuios set-agent-state idle -m 'ready for review'`
+before ending the turn. Never leave background edits running while reporting idle.
 
 Freeze the reported revision until a new supervisor request. Stop background
 writers or watchers that could alter reviewable files, and report any you cannot
