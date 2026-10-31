@@ -1,5 +1,7 @@
 # Shared identity configuration. Read by default regardless of working directory.
 display_seconds = 5
+# Accepted messages retained on disk. Positive integer; restart listener after edits.
+history_size = 30
 active_groups = ["phonon"] # Groups eligible for NEW random-bag draws.
 
 # Required message introductions by the sender's relation to the viewed pane.

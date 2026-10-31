@@ -332,6 +332,9 @@ def load_config(path: Path) -> dict:
     duration = config.get("display_seconds", 5)
     if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration) or not 0 < duration <= 3600:
         raise CommsError("display_seconds must be a number greater than 0 and at most 3600.")
+    history_size = config.get("history_size", message_history.MAX_ENTRIES)
+    if type(history_size) is not int or history_size < 1:
+        raise CommsError("history_size must be a positive integer.")
     settings = config.get("speech", {})
     if not isinstance(settings, dict) or not isinstance(settings.get("model", speech.DEFAULT_MODEL), str):
         raise CommsError("speech must be a table with a text model name.")
@@ -1549,7 +1552,8 @@ class Server:
                 private_dir(self.paths.state)
                 try:
                     with FileLock(self.paths.state / "history.lock"):
-                        message_history.append(self.paths.state, message)
+                        message_history.append(self.paths.state, message,
+                                               max_entries=self.config.get("history_size", message_history.MAX_ENTRIES))
                 except (OSError, ValueError):
                     raise CommsError("Could not save message history; message was not accepted.") from None
                 self.pending[message["uid"]] = message
@@ -1715,7 +1719,7 @@ def parser():
     audio.add_argument("action", choices=("status", "toggle", "mute", "unmute", "cycle-volume", "dock-click"))
     audio.add_argument("--seconds", type=float, help="Automatically unmute after this many seconds (mute only)")
     history = subs.add_parser("history", help="Print previous accepted messages, even when the listener is offline")
-    history.add_argument("--limit", type=int, default=message_history.MAX_ENTRIES)
+    history.add_argument("--limit", type=int, help="Number of messages to show (defaults to history_size)")
     history.add_argument("--id", help="Filter by identity ID")
     history.add_argument("--session", help="Filter by tuios session name")
     history_format = history.add_mutually_exclusive_group()
@@ -1818,9 +1822,12 @@ def main(argv=None):
             response = asyncio.run(rpc(paths, "audio", action=args.action, seconds=args.seconds))
             print(json.dumps(response["audio"]))
         elif args.command == "history":
-            if not 1 <= args.limit <= message_history.MAX_ENTRIES:
-                raise CommsError("--limit must be between 1 and 10.")
-            messages = message_history.read(paths.state, args.limit, args.id, args.session)
+            config = load_config(paths.config) if paths.config.exists() else {}
+            history_size = config.get("history_size", message_history.MAX_ENTRIES)
+            limit = history_size if args.limit is None else args.limit
+            if not 1 <= limit <= history_size:
+                raise CommsError(f"--limit must be between 1 and {history_size}.")
+            messages = message_history.read(paths.state, limit, args.id, args.session, max_entries=history_size)
             if args.json:
                 print(json.dumps(messages, ensure_ascii=True))
             elif args.raw:

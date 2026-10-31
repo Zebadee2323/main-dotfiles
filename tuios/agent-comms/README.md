@@ -285,6 +285,7 @@ ids = ["previously-rejected-voice-id"]
 
 ```toml
 display_seconds = 5
+history_size = 10 # Number of accepted messages to retain.
 
 [speech]
 mode = "phonon" # "phonon", "pocket_tts", or "elevenlabs" (legacy default).
@@ -651,13 +652,17 @@ uncertain, and sends have no delivery deduplication.
 ## Message history
 
 `agent-comms history` works from any working directory and does not require a
-running listener or identity config. Default output is the newest 10 messages,
-printed oldest-to-newest with UTC acceptance timestamps and identity names.
-`--limit` accepts 1–10; `--id`, `--session`, and `--json` are optional. Filters apply
-within those ten retained messages, not a separate per-identity/session history.
+running listener. Set the top-level `history_size` in `config.toml` to a positive
+integer (default 10), then restart the listener. This sets both retention and the
+default number shown, printed oldest-to-newest with UTC acceptance timestamps and
+identity names. Without a config file, reading history defaults to 10 messages.
+`--limit` accepts 1 through `history_size`; `--id`, `--session`, and `--json` are
+optional. Filters apply within the retained window, not a separate
+per-identity/session history. Reducing the size trims older messages on the next
+accepted send; increasing it cannot recover messages already dropped.
 
-Private `state/history.jsonl` contains **at most ten entries**. Each acceptance
-atomically replaces it with the newest ten messages, flushing before acknowledging
+Private `state/history.jsonl` contains **at most `history_size` entries**. Each acceptance
+atomically replaces it with the newest retained messages, flushing before acknowledging
 the send. A full queue or failed history write rejects the send. An OS-backed
 lock coordinates writers; readers skip incomplete/corrupt rows. History
 records acceptance, **not proof of display or playback**; a server crash can leave

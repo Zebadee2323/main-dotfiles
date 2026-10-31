@@ -1,4 +1,4 @@
-"""A private rolling JSONL file containing at most ten accepted messages."""
+"""A private rolling JSONL file containing a configurable number of accepted messages."""
 from collections import deque
 import json
 import os
@@ -8,11 +8,13 @@ import tempfile
 MAX_ENTRIES = 10
 
 
-def read(directory: Path, limit=MAX_ENTRIES, identity=None, session=None):
+def read(directory: Path, limit=None, identity=None, session=None, *, max_entries=MAX_ENTRIES):
+    if limit is None:
+        limit = max_entries
     path = directory / "history.jsonl"
     if not path.exists():
         return []
-    recent = deque(maxlen=MAX_ENTRIES)
+    recent = deque(maxlen=max_entries)
     with path.open("rb") as stream:
         for line in stream:
             if not line.endswith(b"\n"):
@@ -29,9 +31,9 @@ def read(directory: Path, limit=MAX_ENTRIES, identity=None, session=None):
     return matching[-limit:]
 
 
-def append(directory: Path, message: dict):
+def append(directory: Path, message: dict, *, max_entries=MAX_ENTRIES):
     """Caller holds history.lock. Replace the data file, never the lock inode."""
-    records = [*read(directory), message][-MAX_ENTRIES:]
+    records = [*read(directory, max_entries=max_entries), message][-max_entries:]
     fd, filename = tempfile.mkstemp(prefix=".history-", suffix=".jsonl", dir=directory)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:

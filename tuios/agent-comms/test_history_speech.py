@@ -134,6 +134,43 @@ class HistoryTests(Fixture):
         self.assertEqual(self.cli("history", "--limit", "11").returncode, 1)
 
 
+    def test_configured_history_size_controls_listener_retention_and_offline_cli(self):
+        self.paths.config.write_text('history_size = 12\n' + self.paths.config.read_text())
+        server, _ = self.start_server()
+        for index in range(15):
+            _, stream = self.request("send", id="a", msg=str(index))
+            self.assertTrue(json.loads(stream.readline())["ok"])
+        server.kill()
+        server.wait(timeout=5)
+        self.assertEqual(len((self.paths.state / "history.jsonl").read_text().splitlines()), 12)
+        result = self.cli("history", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([r["msg"] for r in json.loads(result.stdout)], [str(i) for i in range(3, 15)])
+        self.assertEqual(len(json.loads(self.cli("history", "--limit", "11", "--json").stdout)), 11)
+        self.assertIn("between 1 and 12", self.cli("history", "--limit", "13").stderr)
+
+    def test_smaller_history_size_and_resize_trim_on_append(self):
+        self.paths.state.mkdir()
+        for index in range(15):
+            record = {"id": "a", "name": "Alice", "msg": str(index), "created_at": "now"}
+            message_history.append(self.paths.state, record, max_entries=12)
+        self.assertEqual(len(message_history.read(self.paths.state, max_entries=12)), 12)
+        message_history.append(self.paths.state, {**record, "msg": "last"}, max_entries=2)
+        self.assertEqual([r["msg"] for r in message_history.read(self.paths.state)], ["14", "last"])
+        self.assertEqual(len((self.paths.state / "history.jsonl").read_text().splitlines()), 2)
+
+    def test_history_size_requires_a_positive_integer(self):
+        source = self.paths.config.read_text()
+        for value in ("0", "-1", "true", "1.5", '"large"'):
+            with self.subTest(value=value):
+                self.paths.config.write_text(f"history_size = {value}\n" + source)
+                with self.assertRaisesRegex(app.CommsError, "history_size must be a positive integer"):
+                    app.load_config(self.paths.config)
+                result = self.cli("history", "--json")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("history_size", result.stderr)
+
+
 class ContextTests(unittest.TestCase):
     env = {"TUIOS_ENV": "1", "TUIOS_PANE_ID": "own", "TUIOS_SESSION": "work"}
 
