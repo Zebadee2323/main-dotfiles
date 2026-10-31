@@ -2,6 +2,7 @@
 """Own a TML agent tree; topology comes from a registry, status from tuios events."""
 
 import argparse
+from datetime import datetime, timezone
 import fcntl
 import json
 import os
@@ -44,15 +45,64 @@ def call_patch(surface, ops):
     return call_raw("tml-patch", {"surface": surface, "ops": ops})
 
 
+class TuiosError(RuntimeError):
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
+
+
 def call_raw(verb, params):
     result = subprocess.run(
         ["tuios", "call", verb, json.dumps(params, ensure_ascii=False)], capture_output=True,
-        text=True, timeout=15, check=True,
+        text=True, timeout=15,
     )
-    value = json.loads(result.stdout)
-    if "error" in value:
-        raise RuntimeError(str(value["error"]))
+    try:
+        value = json.loads(result.stdout)
+    except ValueError:
+        value = {}
+    error = value.get("error") if isinstance(value, dict) else None
+    if result.returncode or error:
+        code = error.get("code") if isinstance(error, dict) else None
+        # Include both channels: tuios puts verb failures in stdout, transport
+        # and CLI diagnostics in stderr. Do not log params (which may be large).
+        raise TuiosError(
+            f"tuios {verb} failed (exit {result.returncode}): "
+            f"stdout={result.stdout.strip()!r}; stderr={result.stderr.strip()!r}", code)
+    if not isinstance(value, dict) or not value:
+        raise TuiosError(f"tuios {verb} returned invalid/empty JSON: {result.stdout!r}")
     return value
+
+
+def patch_surface(surface, ops):
+    """Retry idempotent replacements, including partially sent split batches."""
+    ops = list(ops) + [{"op": "replace", "path": "/updated",
+                        "value": datetime.now(timezone.utc).isoformat(timespec="seconds")}]
+    for attempt in range(4):
+        try:
+            return call("tml-patch", surface=surface, ops=ops)
+        except (TuiosError, subprocess.TimeoutExpired) as error:
+            print(f"Patch attempt {attempt + 1} failed: {error}", file=sys.stderr, flush=True)
+            # A denial is final; never retry it through another identity/verb.
+            if isinstance(error, TuiosError) and error.code in {
+                "forbidden", "not_human", "unknown_pane", "no_surface",
+                "invalid_params", "invalid_tml",
+            }:
+                raise
+            if attempt == 3:
+                raise
+            time.sleep(0.25 * (attempt + 1))
+
+
+def verify_owner(registry):
+    actual = call("pane-grants")
+    if (not actual.get("pane") or actual.get("window") != registry["supervisor_pane"]
+            or actual.get("session") != registry["session"]):
+        raise RuntimeError(
+            "detached helper ownership mismatch: expected "
+            f"{registry['session']}/{registry['supervisor_pane']}, got "
+            f"{actual.get('session')}/{actual.get('window')} via {actual.get('via')}; "
+            "no surface opened; use run in a persistent supervisor tool process "
+            "or fix tuios caller resolution")
 
 
 def load_registry(path):
@@ -163,9 +213,9 @@ def box_graph(nodes):
 def document(nodes):
     return {
         "type": "tml", "version": 1, "title": "Agent tree",
-        "state": {"nodes": nodes, "lines": graph_lines(nodes), "monitor": "live"},
+        "state": {"nodes": nodes, "lines": graph_lines(nodes), "monitor": "starting; status unverified", "updated": "startup"},
         "children": [{"type": "col", "pad": 0, "gap": 0, "children": [
-            {"type": "text", "role": "dim", "children": ["Status: {state.monitor}"]},
+            {"type": "text", "role": "dim", "children": ["Status at {state.updated}: {state.monitor}"]},
             {"type": "text", "children": [
                 {"type": "c", "role": role, "children": [kind + "  "]}
                 for kind, role in ROLES.items()
@@ -224,6 +274,7 @@ def run(path):
     with path.with_suffix(".lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         stop.unlink(missing_ok=True)
+        verify_owner(registry)
         windows = call("list-windows", session=registry["session"])["windows"]
         owner = [w for w in windows if w["window_id"] == registry["supervisor_pane"]]
         if len(owner) != 1:
@@ -233,6 +284,7 @@ def run(path):
         stream = subscribe(inbox)  # Subscribe before the initial snapshot.
         surface = None
         reason = "stopped"
+        denied = False
         try:
             first = inbox.get(timeout=15)
             if first.get("type") != "subscribed":
@@ -245,7 +297,11 @@ def run(path):
             surface = opened["surface"]
             info = {"pid": os.getpid(), "surface": surface, "window_id": opened["window_id"],
                     "owner": registry["supervisor_pane"], "session": registry["session"],
-                    "workspace": workspace, "monitor": "live", "subscriber_pid": stream.pid}
+                    "workspace": workspace, "monitor": "starting; status unverified", "subscriber_pid": stream.pid}
+            atomic_json(runtime, info)
+            # All calls, including open and this proof, run after reparenting.
+            patch_surface(surface, [{"op": "replace", "path": "/monitor", "value": "live"}])
+            info["monitor"] = "live"
             atomic_json(runtime, info)
             stamp = path.stat().st_mtime_ns
             failures = 0
@@ -283,7 +339,7 @@ def run(path):
                     failures += 1
                     if failures > 3:
                         raise RuntimeError("event stream unavailable after three reconnects")
-                    call("tml-patch", surface=surface, ops=[{"op": "replace", "path": "/monitor", "value": "reconnecting; status stale"}])
+                    patch_surface(surface, [{"op": "replace", "path": "/monitor", "value": "reconnecting; status stale"}])
                     info["monitor"] = "reconnecting; status stale"
                     atomic_json(runtime, info)
                     end_stream(stream)
@@ -313,20 +369,25 @@ def run(path):
                             ops.append({"op": "replace", "path": "/lines/" + str(index) + "/box", "value": line["box"]})
                 if "subscribed" in kinds:
                     ops.append({"op": "replace", "path": "/monitor", "value": "live"})
+                if ops:
+                    patch_surface(surface, ops)
+                if "subscribed" in kinds:
                     info["monitor"] = "live"
                     atomic_json(runtime, info)
-                if ops:
-                    call("tml-patch", surface=surface, ops=ops)
                 rows, paths = new_rows, new_paths
                 lines = graph_lines(new_nodes)
-        except Exception:
+        except Exception as error:
             reason = "error; status stale (see log)"
+            denied = isinstance(error, TuiosError) and error.code in {"forbidden", "not_human"}
+            if runtime.exists():
+                info["error"] = str(error)
+                atomic_json(runtime, info)
             raise
         finally:
             end_stream(stream)
-            if surface:
+            if surface and not denied:
                 try:
-                    call("tml-patch", surface=surface, ops=[{"op": "replace", "path": "/monitor", "value": reason}])
+                    patch_surface(surface, [{"op": "replace", "path": "/monitor", "value": reason}])
                 except Exception as error:
                     print("Final monitor update failed:", error, file=sys.stderr)
             if runtime.exists():
@@ -339,12 +400,31 @@ def run(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["run", "start", "stop"])
+    parser.add_argument("--detach", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--registry", required=True, type=Path)
     args = parser.parse_args()
     path = args.registry.resolve()
     load_registry(path)
     if args.action == "run":
-        run(path)
+        if args.detach:
+            # The short-lived launcher exits BEFORE the monitor makes any tuios
+            # calls. Otherwise open can resolve via its ancestry and later
+            # patches via a different owner once start has returned.
+            parent = os.getpid()
+            if os.fork():
+                return
+            while os.getppid() == parent:
+                time.sleep(0.01)
+        try:
+            run(path)
+        except BlockingIOError:
+            raise  # Another helper owns the lock; never overwrite its runtime.
+        except Exception as error:
+            runtime = path.with_suffix(".runtime.json")
+            if not runtime.exists():
+                atomic_json(runtime, {"pid": os.getpid(), "monitor": "error; status stale (see log)",
+                                      "error": str(error)})
+            raise
     elif args.action == "stop":
         path.with_suffix(".stop").touch()
     else:
@@ -355,17 +435,23 @@ def main():
             if runtime.exists():
                 raise ValueError("runtime exists; inspect/close the old surface before restarting")
         with path.with_suffix(".log").open("a") as log:
-            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "run", "--registry", str(path)],
+            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "run", "--detach", "--registry", str(path)],
                                        stdout=log, stderr=log, start_new_session=True)
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             if runtime.exists():
-                print(runtime.read_text(), end="")
-                return
-            if process.poll() is not None:
-                raise RuntimeError("monitor failed; inspect " + str(path.with_suffix(".log")))
+                info = json.loads(runtime.read_text())
+                if info["monitor"] == "live":
+                    print(json.dumps(info, ensure_ascii=False, indent=2))
+                    return
+                if info["monitor"].startswith("error"):
+                    raise RuntimeError("monitor failed: " + info.get("error", "see log")
+                                       + "; inspect " + str(path.with_suffix(".log")))
+            if process.poll() not in (None, 0):
+                raise RuntimeError("monitor launcher failed; inspect " + str(path.with_suffix(".log")))
             time.sleep(0.1)
-        raise RuntimeError("monitor startup pending; inspect log/process before retrying")
+        path.with_suffix(".stop").touch()
+        raise RuntimeError("monitor startup timed out; stop requested; inspect log/process before retrying")
 
 
 if __name__ == "__main__":

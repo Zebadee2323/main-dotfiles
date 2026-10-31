@@ -98,5 +98,136 @@ class AgentTreeTests(unittest.TestCase):
         self.assertIn("Justin", tree.box_graph(nodes))
 
 
+class MonitorFailureTests(unittest.TestCase):
+    def test_cli_failure_preserves_both_diagnostic_channels(self):
+        import subprocess
+        result = subprocess.CompletedProcess([], 1, '{"error":{"code":"forbidden"}}', 'wrong owner')
+        with patch.object(tree.subprocess, 'run', return_value=result):
+            with self.assertRaises(tree.TuiosError) as raised:
+                tree.call_raw('tml-patch', {})
+        self.assertEqual(raised.exception.code, 'forbidden')
+        self.assertIn('wrong owner', str(raised.exception))
+        self.assertIn('forbidden', str(raised.exception))
+
+    def test_transient_patch_replays_all_batches(self):
+        ops = [{"op": "replace", "path": "/x", "value": "界" * 10000} for _ in range(3)]
+        with patch.object(tree, 'call_raw', side_effect=[{}, tree.TuiosError('transport'), {}, {}, {}]) as send, \
+                patch.object(tree.time, 'sleep'):
+            tree.patch_surface('surface', ops)
+        self.assertEqual(send.call_count, 5)
+        self.assertEqual(send.call_args_list[0], send.call_args_list[2])
+
+    def test_denied_patch_is_never_retried(self):
+        with patch.object(tree, 'call', side_effect=tree.TuiosError('denied', 'forbidden')) as send:
+            with self.assertRaises(tree.TuiosError):
+                tree.patch_surface('surface', [])
+        self.assertEqual(send.call_count, 1)
+
+    def test_patch_retry_budget_is_bounded(self):
+        with patch.object(tree, 'call', side_effect=tree.TuiosError('transport')) as send, \
+                patch.object(tree.time, 'sleep'):
+            with self.assertRaises(tree.TuiosError):
+                tree.patch_surface('surface', [])
+        self.assertEqual(send.call_count, 4)
+
+    def test_resolved_ownership_must_match_registry(self):
+        registry = {'supervisor_pane': 'expected', 'session': 'project'}
+        for actual in [{'pane': False}, {'pane': True, 'window': 'other', 'session': 'project'},
+                       {'pane': True, 'window': 'expected', 'session': 'other'}]:
+            with patch.object(tree, 'call', return_value=actual):
+                with self.assertRaisesRegex(RuntimeError, 'ownership mismatch'):
+                    tree.verify_owner(registry)
+
+    def test_start_detaches_before_open_and_waits_for_proof(self):
+        self.exercise_start('ok')
+
+    def test_start_reports_detached_ownership_failure(self):
+        self.exercise_start('wrong-owner')
+
+    def test_start_reports_first_patch_denial(self):
+        self.exercise_start('denied')
+
+    def exercise_start(self, mode):
+        """Real double fork/CLI lifecycle against an isolated fake daemon CLI."""
+        import subprocess
+        import sys
+        import time
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = root / 'tree.json'
+            registry.write_text(json.dumps({'version': 1, 'session': 'project',
+                'supervisor_pane': 'supervisor-id', 'nodes': [
+                    {'id': 'supervisor-id', 'kind': 'supervisor', 'label': 'Supervisor',
+                     'session': 'project', 'pane': 'supervisor-id'}]}))
+            fake = root / 'tuios'
+            fake.write_text('''#!PYTHON
+import json, os, pathlib, subprocess, sys, time
+root = pathlib.Path(os.environ['FAKE_ROOT'])
+mode = os.environ['FAKE_MODE']
+if sys.argv[1] == 'subscribe':
+    print('{"type":"subscribed"}', flush=True)
+    time.sleep(30)
+    sys.exit()
+verb = sys.argv[2]
+params = json.loads(sys.argv[3])
+# Each CLI must be invoked by the detached monitor, not start.
+parent = os.getppid()
+with (root / 'calls').open('a') as out:
+    out.write(json.dumps({'verb': verb, 'parent': int(parent), 'params': params}) + '\\n')
+if verb == 'pane-grants':
+    value = {'pane': True, 'session': 'project', 'window': 'other' if mode == 'wrong-owner' else 'supervisor-id'}
+elif verb == 'list-windows':
+    value = {'windows': [{'window_id': 'supervisor-id', 'workspace': 1}]}
+elif verb == 'list-agents':
+    value = {'agents': []}
+elif verb == 'tml-open':
+    value = {'surface': 'test-surface', 'window_id': 'tree-pane'}
+elif verb == 'tml-patch':
+    if mode == 'denied':
+        print('{"error":{"code":"forbidden","message":"wrong owner"}}')
+        sys.exit(1)
+    value = {'version': 1}
+else:
+    raise RuntimeError(verb)
+print(json.dumps(value))
+'''.replace('PYTHON', sys.executable, 1))
+            fake.chmod(0o755)
+            env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'],
+                       TUIOS_SESSION='project', TUIOS_PANE_ID='supervisor-id',
+                       FAKE_ROOT=str(root), FAKE_MODE=mode)
+            runtime = registry.with_suffix('.runtime.json')
+            try:
+                starter = subprocess.Popen([sys.executable, str(Path(tree.__file__).resolve()),
+                    'start', '--registry', str(registry)], env=env, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True)
+                stdout, stderr = starter.communicate(timeout=15)
+                result = subprocess.CompletedProcess(starter.args, starter.returncode, stdout, stderr)
+                self.assertTrue((root / 'calls').exists(), result.stderr + registry.with_suffix('.log').read_text())
+                calls = [json.loads(line) for line in (root / 'calls').read_text().splitlines()]
+                info = json.loads(runtime.read_text())
+                if mode == 'ok':
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(json.loads(result.stdout)['monitor'], 'live')
+                    self.assertTrue(any(c['verb'] == 'tml-patch' for c in calls))
+                    self.assertEqual(info['monitor'], 'live')
+                    self.assertTrue(all(c['parent'] == info['pid'] and c['parent'] != starter.pid for c in calls))
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertTrue(info['monitor'].startswith('error'))
+                    self.assertNotIn('"monitor": "live"', result.stdout)
+                    if mode == 'wrong-owner':
+                        self.assertEqual([c['verb'] for c in calls], ['pane-grants'])
+                    else:
+                        self.assertEqual(sum(c['verb'] == 'tml-patch' for c in calls), 1)
+                        self.assertIn('forbidden', registry.with_suffix('.log').read_text())
+            finally:
+                registry.with_suffix('.stop').touch()
+                deadline = time.monotonic() + 5
+                while runtime.exists() and time.monotonic() < deadline:
+                    if json.loads(runtime.read_text())['monitor'] != 'live':
+                        break
+                    time.sleep(0.05)
+
+
 if __name__ == "__main__":
     unittest.main()

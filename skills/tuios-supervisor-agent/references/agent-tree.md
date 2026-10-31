@@ -93,9 +93,17 @@ TREE_REGISTRY='<absolute-run-artifact-directory>/agent-tree.json'
 python3 "$TREE_SCRIPT" start --registry "$TREE_REGISTRY"
 ```
 
-`start` detaches the helper, returns after its runtime file is ready, and prints
+`start` detaches and reparents the helper before any daemon calls. The helper
+checks `pane-grants` against the exact supervisor session/pane before opening a
+surface, then proves it can patch that surface. Only after that patch succeeds
+does `start` report `live` and print
 the PID, surface ID, UI pane ID, owner, session, workspace and monitor state.
-Record these with the supervision run. The helper holds a process-lifetime
+Record these with the supervision run. An ownership mismatch fails startup
+without opening a misleading tree. No caller IDs or tokens are overridden.
+For a harness whose detached processes cannot resolve to the supervisor, use
+`run` in a persistent supervisor tool process (keeping that process alive for
+the supervision run), or fix tuios caller resolution; repeated `start` calls
+cannot repair ownership. The helper holds a process-lifetime
 lock and refuses a duplicate start. Do not retry a pending start blindly.
 Its sibling files are `agent-tree.runtime.json`, `agent-tree.log`,
 `agent-tree.lock` and a transient `agent-tree.stop` request.
@@ -115,7 +123,17 @@ states, or makes acceptance decisions.
 
 On a stream gap or reconnect, it reads a fresh canonical snapshot. A disconnect
 shows `reconnecting; status stale`; at most three reconnects per helper run are allowed before
-stopping with a visible stale banner and a log error. A closed/dismissed surface
+stopping with a stale banner and a log error. Patch transport failures receive
+at most three retries, replaying idempotent replacements even if an earlier
+split batch succeeded. Ownership/grant denials and closed surfaces are final,
+with no retry through a different identity. CLI errors retain stdout and stderr
+in the log, and failures are also recorded in the runtime file.
+
+The header shows the UTC time of its last patch. If tuios refuses further
+writes, the helper cannot mark that surface stale: its last timestamp/status
+remain a snapshot. A final banner is best effort, never a guarantee after loss
+of ownership or write access. `start` fails loudly if the initial proof fails;
+a startup timeout requests a stop. A closed/dismissed surface
 stops the helper instead of reopening the pane. Do not claim monitoring is live
 if the runtime/log says otherwise. Inspect only when there is a failure or a
 structural change, rather than continuously checking the monitor yourself.
