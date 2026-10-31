@@ -17,6 +17,8 @@ Each task record contains:
 - Frozen snapshot path/id, completion-message id, reviewer approval-message id,
   assessed integration target, validation evidence paths, unresolved findings.
 - Review checkpoint budget, elapsed rounds, escalation/decision and release state.
+- Fresh-conversation identity or reason for related-task context reuse; shared-cache
+  plan/evidence path, owner, consumers and cleanup state when caching is used.
 
 Use these states: `preflight`, `implementing`, `ready_for_review`, `reviewing`,
 `revising`, `approved`, `integrating`, `integrated`, `released`, `blocked`,

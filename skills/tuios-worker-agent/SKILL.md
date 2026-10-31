@@ -161,6 +161,17 @@ assignment does not authorize branch changes or feature fixes in another
 checkout. Report failures for scoped repair assignment and keep user-reserved
 checks with the user. Remain available until combined acceptance and release.
 
+### Shared caches
+
+Use only the supervisor's documented cache arrangement. Keep outputs and mutable
+build state local unless the exact tool supports the approved sharing mode. Do
+not independently symlink dependency/build directories, change global cache
+settings or clear shared caches. Report cache failures, unexpected shared writes,
+and observed hits/timings. When assigned a cache trial, validate the configured
+path and relevant correctness/invalidation behavior with focused checks; report
+uncertainty before relying on reuse. A source snapshot does not cover external
+cache contents. Respect user-reserved build restrictions.
+
 ### Git boundaries
 
 **You must not commit.** Do not run `git commit`, `tuios ship commit`, or an

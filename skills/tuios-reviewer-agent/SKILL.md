@@ -123,6 +123,13 @@ needed without rerunning adequate unchanged checks by habit. Request meaningful
 new tests only for uncovered behavior or plausible regressions. Respect mandatory
 checks, Unity/build restrictions, and intentionally unhydrated LFS assets.
 
+When tests use a shared cache, inspect the supervisor's recorded stack/version,
+keying and concurrency evidence and the worker's focused validation. Check that
+mutable outputs remain isolated and cache links are excluded from commits.
+Do not infer cache correctness from a matching source snapshot or a single warm
+build. Request isolated-cache validation only when a plausible stale-result risk
+warrants it; escalate unsupported sharing rather than approving uncertain results.
+
 If code or testing is inadequate, send the worker a concrete batch of findings:
 location, behavior/requirement affected, expected correction, and minimal evidence
 needed to verify it. Authorize the worker to unfreeze for those scoped revisions,

@@ -185,6 +185,21 @@ Do not assume a worker will infer constraints or assess project-wide impact as
 well as you can. Adjust guidance from its actual results rather than model size
 alone.
 
+### Use fresh contexts between independent tasks
+
+Default to a fresh worker conversation and a fresh reviewer conversation for each
+independent unit of work. Give them a concise assignment and relevant artifacts,
+not the previous pair's full transcript. Retain the same pair through that unit's
+review revisions, conflict resolution and combined integration validation; finish
+acceptance and release before moving on. Bundle small related changes into one
+unit when that avoids needless startup overhead.
+
+A new task ID, branch or worktree does not clear an agent's conversation. Launch
+a fresh agent, or use a supported new-conversation mechanism and verify it before
+assignment. Reuse a previous task's context only for a closely related continuation
+with a concrete benefit; record that reason and supply the current contract.
+Respect existing limits on creating agents and preserve user-provided agents.
+
 ### Choose proportionate validation
 
 Own the validation plan and the final judgment of whether the evidence is
@@ -224,7 +239,8 @@ work. Account for shared services, generated outputs, and dependencies even when
 files are isolated. When work cannot be parallelized safely, or worktrees are
 unnecessary or disallowed, use the current worktree with one active worker.
 Avoid editing files concurrently with that worker. Existing workers must also
-have their checkout, harness/model, and assignment checked before reuse. If an
+have their checkout, harness/model, assignment and conversation history checked
+before reuse under the fresh-context policy above. If an
 existing worker does not match the selected harness/model, ask the user how to
 proceed rather than silently reconfiguring or replacing it.
 
@@ -236,6 +252,17 @@ actual supervisor checkout and branch before workers begin.
 Ensure `tuios-worker-agent` and `tuios-reviewer-agent` are available to their
 respective agents before assignments. Report missing skills as prerequisites.
 Reviewers use the worker checkout; do not create a separate reviewer worktree.
+
+### Reuse caches only when safe for the stack
+
+When setup or compilation costs matter, inspect existing cache behavior and read
+[safe shared-cache guidance](references/shared-caches.md). Prefer supported cache
+configuration; consider symlinks only after verifying tool/version compatibility,
+concurrent access, cache key correctness and worktree isolation. Keep mutable
+build outputs local by default. Record the sharing plan, delegate a focused check
+to a worker, and have its reviewer assess the evidence. Keep build concurrency
+within machine capacity; retain caches until all consumers stop. User-reserved
+builds and checks stay with the user.
 
 ### Verify communication before implementation
 
