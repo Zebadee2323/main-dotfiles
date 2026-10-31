@@ -277,7 +277,8 @@ def validate_state(state, filename):
                 or generated_name(record["base_name"], record["name_generation"]) != record["name"]
                 or record["name_generation"] > names["generation"]
                 or ("missing_since" in record and not timestamp(record["missing_since"]))
-                or ("title_prefix" in record and not isinstance(record["title_prefix"], str))):
+                or ("title_prefix" in record and not isinstance(record["title_prefix"], str))
+                or ("session_name" in record and not isinstance(record["session_name"], str))):
             bad("invalid binding")
         try:
             validate_profile("Voice snapshot", record.get("voice_profile"))

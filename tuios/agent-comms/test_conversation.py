@@ -11,6 +11,7 @@ import conversation
 from test_agent_comms import Fixture, write_config
 
 EPOCH = "0123456789abcdef"
+FACE_ROW, NAME_ROW, SESSION_ROW = 3, 5, 6
 
 
 def resolve(request, sender="Alice", agents=("Alice", "Ben"), messages=None, user="Oli", uid="a" * 32):
@@ -104,25 +105,25 @@ class RenderTests(unittest.TestCase):
         view = conversation.ConversationView(color=False, animate=False)
         view.update(self.message(), 100.0)
         lines = self.text(view)
-        self.assertLess(lines[3].index("Alice"), lines[3].index("Ben"))
-        self.assertIn("(?_?)", lines[2][:12])
-        self.assertIn("[query]", lines[0])
+        self.assertLess(lines[NAME_ROW].index("Alice"), lines[NAME_ROW].index("Ben"))
+        self.assertIn("(?_?)", lines[FACE_ROW][:14])
+        self.assertIn("QUERY", lines[0])
         box = next(line for line in lines if "Could you review" in line)
         view.update(self.message(uid="2", name="Ben", msg="Looks good.", speaker_role="responder",
                                  emotion="happy", kind="statement"), 101.0)
         lines = self.text(view, now=101.5)
-        self.assertLess(lines[3].index("Alice"), lines[3].index("Ben"))
-        self.assertIn("(^_^)", lines[2][-12:])
+        self.assertLess(lines[NAME_ROW].index("Alice"), lines[NAME_ROW].index("Ben"))
+        self.assertIn("(^_^)", lines[FACE_ROW][-14:])
         reply = next(line for line in lines if "Looks good." in line)
         self.assertGreater(reply.index("│"), box.index("│"), "text sits nearer the right-hand speaker")
-        self.assertEqual(sum("╭" in line for line in lines), 1)
+        self.assertEqual(sum("╰" in line and "╯" in line and "─" * 20 in line for line in lines), 1)
 
     def test_slide_in_happens_once_per_exchange_and_respects_reduced_motion(self):
         view = conversation.ConversationView(color=False, animate=True)
         view.update(self.message(), 100.0)
         self.assertTrue(view.animating(100.1))
-        self.assertNotIn("Alice", self.text(view, now=100.01)[3])
-        self.assertIn("Alice", self.text(view, now=100.0 + conversation.SLIDE_SECONDS)[3])
+        self.assertNotIn("Alice", self.text(view, now=100.01)[NAME_ROW])
+        self.assertIn("Alice", self.text(view, now=100.0 + conversation.SLIDE_SECONDS)[NAME_ROW])
         view.update(self.message(uid="2", name="Ben", speaker_role="responder"), 103.0)
         self.assertFalse(view.animating(103.0), "same exchange: no re-entry animation")
         view.update(self.message(uid="3", exchange={**self.exchange, "id": "y"}), 104.0)
@@ -130,7 +131,7 @@ class RenderTests(unittest.TestCase):
         still = conversation.ConversationView(color=False, animate=False)
         still.update(self.message(), 100.0)
         self.assertFalse(still.animating(100.0))
-        self.assertIn("Alice", self.text(still, now=100.0)[3])
+        self.assertIn("Alice", self.text(still, now=100.0)[NAME_ROW])
 
     def test_captions_follow_the_shared_timeline(self):
         view = conversation.ConversationView(color=False, animate=False)
@@ -143,6 +144,23 @@ class RenderTests(unittest.TestCase):
         self.assertIn("word0", early)
         self.assertNotIn("word79", early)
         self.assertIn("word79", late)
+
+    def test_sessions_show_for_agents_and_human_for_the_user(self):
+        view = conversation.ConversationView(color=False, animate=False)
+        exchange = {"id": "s", "requester": {"kind": "user", "name": "Oli"},
+                    "responder": {"kind": "agent", "name": "Ben", "session": "valkyrie"}}
+        view.update(self.message(name="Ben", speaker_role="responder", exchange=exchange), 100.0)
+        lines = self.text(view)
+        self.assertIn("◆ human", lines[SESSION_ROW])
+        self.assertIn("◆ valkyrie", lines[SESSION_ROW])
+        # Without a snapshot, the latest session seen from that agent's own messages is used.
+        exchange = {"id": "t", "requester": {"kind": "agent", "name": "Alice"},
+                    "responder": {"kind": "agent", "name": "Ben"}}
+        view.update(self.message(session_name="dotfiles", exchange=exchange), 101.0)
+        lines = self.text(view, now=101.5)
+        self.assertIn("◆ dotfiles", lines[SESSION_ROW])
+        self.assertIn("◆ valkyrie", lines[SESSION_ROW])
+        self.assertIn("◆ dotfiles", view.render(30, 6, 101.5)[1])
 
     def test_narrow_panes_idle_offline_and_sanitization(self):
         view = conversation.ConversationView(color=True, animate=False)

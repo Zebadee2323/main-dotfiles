@@ -550,7 +550,13 @@ def communication_instructions(config):
     return re.sub(r"\{(speech_guidance|user_guidance)\}", lambda m: values[m[1]], template)
 
 
-def pane_binding(paths, config, *, allocate=True, clear=False, env=None):
+def source_session(source):
+    if isinstance(source, dict) and isinstance(source.get("session_name"), str):
+        return clean_text(source["session_name"])[:128] or None
+    return None
+
+
+def pane_binding(paths, config, *, allocate=True, clear=False, env=None, session=None):
     """Return (epoch, binding) for the verified owner, or a clear result.
 
     Without allocation, read the store lock-free: sending must never mkdir,
@@ -563,7 +569,7 @@ def pane_binding(paths, config, *, allocate=True, clear=False, env=None):
         if not allocate:
             return pane_identity.lookup(paths, env)
         return pane_identity.resolve(paths, config, private_dir=private_dir, lock=FileLock,
-                                     atomic_json=atomic_json, error=CommsError, env=env)
+                                     atomic_json=atomic_json, error=CommsError, env=env, session=session)
     except allocation.MissingBinding as exc:
         raise ContextMismatch(f"{exc} Message was not queued.") from None
     except ValueError as exc:
@@ -580,7 +586,8 @@ def checked_context(env=None):
 def identify(paths, config, env=None):
     # Verify pane presence/focus before persisting any allocation.
     source = checked_context(env) if env is not None else checked_context()
-    epoch, binding = pane_binding(paths, config, **({"env": env} if env is not None else {}))
+    epoch, binding = pane_binding(paths, config, session=source_session(source),
+                                  **({"env": env} if env is not None else {}))
     name = binding["name"]
     prefix = expected_prefix(config, name, source)
     update_pane_title(paths, config, name, source, env)
@@ -1488,6 +1495,23 @@ class Server:
                 raise CommsError(f"{exc} Message was not queued.") from None
             message.update(uid=uid, message_id=uid, created_at=datetime.now(timezone.utc).isoformat(),
                            epoch=state["epoch"], voice_profile_id=binding["voice_profile_id"], **fields)
+            session = message.get("session_name")
+            if session:
+                binding["session_name"] = session
+            if request.get("reply_to") is None and isinstance(fields.get("exchange"), dict):
+                # Snapshot each agent participant's last known session with the new exchange.
+                for participant in (fields["exchange"]["requester"], fields["exchange"]["responder"]):
+                    if participant.get("kind") != "agent":
+                        continue
+                    other = binding if participant["name"] == binding["name"] else allocation.find_agent(
+                        state, participant["name"])
+                    known = session if other is binding else (other or {}).get("session_name")
+                    if known:
+                        participant["session"] = known
+                if fields["recipient"].get("kind") == "agent":
+                    peer = allocation.find_agent(state, fields["recipient"]["name"])
+                    if peer and peer.get("session_name"):
+                        fields["recipient"]["session"] = peer["session_name"]
             private_dir(self.paths.state)
             try:
                 with FileLock(self.paths.state / "history.lock"):

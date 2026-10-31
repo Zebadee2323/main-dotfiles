@@ -961,12 +961,20 @@ Run it in its own tuios pane: for example, split a narrow pane beside your agent
 - **Late join.** A newly opened view shows the current message and its progress,
   then future events. It does not replay history. After a listener restart it
   resynchronizes to the new timeline.
-- **Layout.** The requester stays on the left and the responder on the right; the
-  current speaker is highlighted with an ASCII face, an arrow, and a speech box
-  on their side. Participants slide in when a new exchange starts
-  (`--no-animation` keeps the sides and emphasis without sliding). The message
-  `kind` is shown as a small label. Narrow (under about 45 columns) or short
-  (under 10 rows) panes use a compact `Alice ▸ Ben [query]` layout.
+- **Layout.** A header bar shows the live status (`● speaking`, `◌ preparing`,
+  `○ idle`) and a colored chip for the message `kind`. The requester stays on the
+  left and the responder on the right, each in a framed avatar with their ASCII
+  face, name, `◆ session` (the tuios session they last spoke from, or `human` for
+  the user), and role. While someone speaks, a pulse travels along the connector
+  toward the listener, and a speech bubble with a pointer opens on the speaker's
+  side. A footer shows the exchange ID, its message count, the emotion, and a
+  progress bar for the shared timeline. Participants slide in when a new exchange
+  starts (`--no-animation` keeps the sides and emphasis without sliding). Narrow
+  (under 48 columns) or short (under 14 rows) panes use a compact
+  `Alice ▸ Ben  QUERY` layout with the speaker's face and session.
+- **Sessions.** Each binding remembers the verified tuios session from its latest
+  `context` or `send`, and new exchanges snapshot every agent participant's
+  session, so the view never resolves sessions against live state.
 - **Terminal.** It requires a terminal (it fails when stdout is redirected), draws
   on the alternate screen without clearing scrollback, redraws only on change or
   resize, and restores the terminal on exit. All text is sanitized.

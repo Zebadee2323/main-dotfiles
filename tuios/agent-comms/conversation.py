@@ -223,6 +223,11 @@ def caption_frames(text, columns, rows):
     return frames
 
 
+KIND_STYLES = {"instruction": "1;30;43", "query": "1;30;46", "statement": "1;30;42"}
+HEADER = "48;5;236;97"
+AVATAR_WIDTH = 9
+
+
 class ConversationView:
     """Pure renderer state; the listener timeline drives every message transition."""
 
@@ -230,25 +235,31 @@ class ConversationView:
         self.color, self.animate = color, animate
         self.exchange, self.entered, self.message = None, None, None
         self.offline, self.notice = True, None
+        self.sessions, self.counts = {}, {}
 
     def update(self, message, now, *, offline=False):
         self.offline = offline
         if offline:
             return
         self.message = message
+        if message and isinstance(message.get("session_name"), str) and isinstance(message.get("name"), str):
+            self.sessions[message["name"].lower()] = clean(message["session_name"])
         exchange = (message or {}).get("exchange")
+        if not isinstance(exchange, dict) and message is not None:
+            # Messages without metadata (older senders) still show sender -> user.
+            exchange = {"id": message.get("uid"), "requester": {"kind": "agent", "name": clean(message.get("name", "?"))},
+                        "responder": {"kind": "user", "name": "user"}}
         if isinstance(exchange, dict):
+            for participant in (exchange.get("requester"), exchange.get("responder")):
+                if isinstance(participant, dict) and isinstance(participant.get("session"), str):
+                    self.sessions[str(participant.get("name", "")).lower()] = clean(participant["session"])
             if self.exchange is None or exchange.get("id") != self.exchange.get("id"):
                 self.entered = now if self.animate else None
             self.exchange = exchange
-        elif message is not None:
-            # Messages without metadata (older senders) still show sender -> user.
-            name = clean(message.get("name", "?"))
-            synthetic = {"id": message.get("uid"), "requester": {"kind": "agent", "name": name},
-                         "responder": {"kind": "user", "name": "user"}}
-            if self.exchange is None or self.exchange.get("id") != synthetic["id"]:
-                self.entered = now if self.animate else None
-            self.exchange = synthetic
+            seen = self.counts.setdefault(exchange.get("id"), set())
+            seen.add(message.get("uid"))
+            if len(self.counts) > 64:
+                self.counts.pop(next(iter(self.counts)))
 
     def animating(self, now):
         return self.entered is not None and now - self.entered < SLIDE_SECONDS
@@ -258,93 +269,154 @@ class ConversationView:
         if not message or not self.exchange:
             return None
         role = message.get("speaker_role")
-        if role in ROLES:
-            return role
-        return "requester"
+        return role if role in ROLES else "requester"
+
+    def session_label(self, participant):
+        if participant.get("kind") == "user":
+            return "human"
+        session = participant.get("session") or self.sessions.get(str(participant.get("name", "")).lower())
+        return session or "session unknown"
 
     def caption(self, columns, rows, now):
         message = self.message
-        if not message:
-            return ()
-        if message.get("phase") != "displaying":
+        if not message or message.get("phase") != "displaying":
             return ()
         frames = caption_frames(message.get("msg", ""), columns, rows)
         started = message.get("started_at", now)
         return speech.page_at(frames, now - started, message.get("duration", 1))
 
+    def timeline(self, now):
+        message = self.message
+        if not message or message.get("phase") != "displaying":
+            return 0.0
+        return max(0.0, min(1.0, (now - message.get("started_at", now)) / max(message.get("duration", 1), 0.01)))
+
+    def header(self, canvas, width, message):
+        canvas.put(0, 0, " " * width, HEADER)
+        canvas.put(1, 0, "◉ agent-comms", f"1;{HEADER}")
+        canvas.put(15, 0, "conversation", f"2;{HEADER}")
+        if self.offline:
+            status, style = f"✕ {self.notice or 'offline'}", f"1;33;{HEADER.split(';', 2)[0]};5;236"
+        elif message:
+            status, style = ("● speaking", f"1;32;48;5;236") if message.get("phase") == "displaying" \
+                else ("◌ preparing", "1;33;48;5;236")
+        else:
+            status, style = "○ idle", f"2;{HEADER}"
+        right = width - 1
+        kind = message.get("kind") if message else None
+        if kind in KINDS:
+            chip = f" {kind.upper()} "
+            right -= text_width(chip)
+            canvas.put(right, 0, chip, KIND_STYLES[kind])
+            right -= 2
+        status = fit(status, max(0, right - 29))
+        canvas.put(right - text_width(status), 0, status, style)
+
     def render(self, width, height, now):
         width, height = max(1, width), max(1, height)
-        if width < 44 or height < 10:
+        if width < 48 or height < 14:
             return self.compact(width, height, now)
         canvas = Canvas(width, height)
-        dim, bold = "2", "1"
-        status = self.notice or ("offline" if self.offline else ("idle" if not self.message else ""))
-        header = "comms · conversation" + (f" · {status}" if status else "")
-        canvas.put(1, 0, fit(header, width - 2), "33" if self.offline else dim)
         message = self.message if not self.offline else None
-        if message and message.get("kind") in KINDS:
-            label = f"[{message['kind']}]"
-            canvas.put(width - 1 - text_width(label), 0, label, "1;36")
+        self.header(canvas, width, message)
         if not self.exchange:
-            canvas.put(1, 2, "Waiting for messages…", dim)
+            canvas.put(3, 3, "Waiting for the first message…", "2;3")
+            canvas.put(3, 4, "Agents appear here as they talk; nothing is spoken by this view.", "2")
             return canvas.lines(self.color)
         progress = 1.0
         if self.animating(now):
             t = (now - self.entered) / SLIDE_SECONDS
             progress = 1 - (1 - t) ** 3
         speaking = self.speaker_side() if message else None
-        figure_width = max(12, min(24, width // 3))
+        label_width = max(AVATAR_WIDTH, min(24, width // 3))
         top = 2
+        centers = {}
         for side in ROLES:
             participant = self.exchange[side]
-            name = fit(participant.get("name", "?"), figure_width)
             active = side == speaking
+            ink_style = ink(str(participant.get("name", "")))
             expression = face(message.get("emotion")) if active else FACES["neutral"]
-            role_label = side
+            name = fit(participant.get("name", "?"), label_width)
+            session = fit("◆ " + self.session_label(participant), label_width)
             if side == "requester":
-                anchor = 2
-                x = round(-figure_width + (anchor + figure_width) * progress)
-                align = lambda text, x=x: x
+                left = round(-label_width + (2 + label_width) * progress)
+                place = lambda text, left=left: left
             else:
-                anchor = width - 2
-                right = round(width + figure_width - (width + figure_width - anchor) * progress)
-                align = lambda text, right=right: right - text_width(text)
-            name_style = (f"1;{ink(participant.get('name', ''))}" if active else dim)
-            canvas.put(align(expression), top, expression, bold if active else dim)
-            canvas.put(align(name), top + 1, name, name_style)
-            canvas.put(align(role_label), top + 2, role_label, dim)
-        if speaking and progress >= 1:
-            arrow = "──▶" if speaking == "requester" else "◀──"
-            canvas.put((width - text_width(arrow)) // 2, top + 1, arrow, "1")
-        # Stable reserved text region: same height on both sides, offset toward the speaker.
-        box_top = top + 4
-        rows = max(1, min(6, height - box_top - 3))
-        box_width = max(20, min(width - 4, int(width * 0.72)))
-        left = 2 if speaking != "responder" else width - 2 - box_width
-        if speaking:
-            tail_x = left + 2 if speaking == "requester" else left + box_width - 3
-            canvas.put(tail_x, box_top, "╲" if speaking == "requester" else "╱", dim)
-        border = "2" if not speaking else ink(message.get("name", ""))
-        canvas.put(left, box_top + 1, "╭" + "─" * (box_width - 2) + "╮", border)
-        lines = self.caption(box_width - 4, rows, now) if speaking else ()
+                right = round(width + label_width - (label_width + 2) * progress)
+                place = lambda text, right=right: right - text_width(text)
+            box = ("╭" + "─" * (AVATAR_WIDTH - 2) + "╮", f"│ {expression} │", "╰" + "─" * (AVATAR_WIDTH - 2) + "╯")
+            border = f"1;{ink_style}" if active else "2"
+            for row, line in enumerate(box):
+                x = place(line)
+                canvas.put(x, top + row, line, border)
+                if row == 1:
+                    canvas.put(x + 2, top + 1, expression, "1;97" if active else "2")
+            centers[side] = place(box[0]) + AVATAR_WIDTH // 2
+            canvas.put(place(name), top + 3, name, f"1;{ink_style}" if active else "2;1")
+            canvas.put(place(session), top + 4, session, "36" if active else "2;36")
+            canvas.put(place(side), top + 5, side, "2;3")
+        # Connector between the avatars: a pulse travels toward the listener while speaking.
+        start, end = 2 + AVATAR_WIDTH + 2, width - 2 - AVATAR_WIDTH - 2
+        if progress >= 1 and end - start >= 6:
+            span = end - start
+            canvas.put(start, top + 1, "─" * span, "2")
+            if speaking and message.get("phase") == "displaying":
+                pulse = int((now * 12) % span)
+                toward_right = speaking == "requester"
+                head = start + (pulse if toward_right else span - 1 - pulse)
+                tail = range(head - 3, head) if toward_right else range(head + 1, head + 4)
+                for x in tail:
+                    if start <= x < end:
+                        canvas.put(x, top + 1, "━", f"1;{ink(message.get('name', ''))}")
+                canvas.put(end - 1 if toward_right else start, top + 1, "▶" if toward_right else "◀", "1")
+                canvas.put(head, top + 1, "●", f"1;{ink(message.get('name', ''))}")
+            elif speaking:
+                dots = "·" * (1 + int(now * 3) % 3)
+                canvas.put(start + (span - 3) // 2, top + 1, f"{dots:<3}", "1;33")
+        # Speech bubble: stable size, shifted toward the speaker, pointer under their avatar.
+        bubble_top = top + 7
+        rows = max(1, min(8, height - bubble_top - 3))
+        bubble_width = max(24, min(width - 4, int(width * 0.74)))
+        left = 2 if speaking != "responder" else width - 2 - bubble_width
+        border = ink(message.get("name", "")) if speaking else "2"
+        top_line = "╭" + "─" * (bubble_width - 2) + "╮"
+        if speaking and speaking in centers:
+            pointer = min(max(centers[speaking] - left, 2), bubble_width - 3)
+            top_line = top_line[:pointer] + "┴" + top_line[pointer + 1:]
+            canvas.put(left + pointer, bubble_top - 1, "│", border)
+        canvas.put(left, bubble_top, top_line, border)
         if speaking and message.get("phase") != "displaying":
-            lines = ("…",)
+            lines = ("…" * (1 + int(now * 3) % 3),)
+        else:
+            lines = self.caption(bubble_width - 4, rows, now) if speaking else ()
         for index in range(rows):
             text = lines[index] if index < len(lines) else ""
-            canvas.put(left, box_top + 2 + index, "│", border)
-            canvas.put(left + 2, box_top + 2 + index, fit(text, box_width - 4))
-            canvas.put(left + box_width - 1, box_top + 2 + index, "│", border)
-        canvas.put(left, box_top + 2 + rows, "╰" + "─" * (box_width - 2) + "╯", border)
+            canvas.put(left, bubble_top + 1 + index, "│", border)
+            canvas.put(left + 2, bubble_top + 1 + index, fit(text, bubble_width - 4), "1" if speaking else "2")
+            canvas.put(left + bubble_width - 1, bubble_top + 1 + index, "│", border)
+        canvas.put(left, bubble_top + 1 + rows, "╰" + "─" * (bubble_width - 2) + "╯", border)
+        # Footer: exchange summary and the shared timeline's progress.
+        exchange_id = str(self.exchange.get("id") or "")
+        count = len(self.counts.get(self.exchange.get("id"), ()))
+        footer = f" exchange {exchange_id[:6]} · {count} message{'s' if count != 1 else ''}"
+        if message and message.get("emotion"):
+            footer += f" · {clean(message['emotion'])}"
+        canvas.put(0, height - 1, fit(footer, width // 2), "2")
+        if message:
+            bar_width = max(8, min(24, width // 4))
+            filled = round(self.timeline(now) * bar_width)
+            canvas.put(width - bar_width - 2, height - 1, "▰" * filled, ink(message.get("name", "")))
+            canvas.put(width - bar_width - 2 + filled, height - 1, "▱" * (bar_width - filled), "2")
         return canvas.lines(self.color)
 
     def compact(self, width, height, now):
         canvas = Canvas(width, height)
         message = self.message if not self.offline else None
         if self.offline:
-            canvas.put(0, 0, fit(f"comms: {self.notice or 'offline'}", width), "33")
+            canvas.put(0, 0, fit(f"✕ comms: {self.notice or 'offline'}", width), "33")
             return canvas.lines(self.color)
         if not self.exchange or not message:
-            canvas.put(0, 0, fit("comms: idle", width), "2")
+            canvas.put(0, 0, fit("○ comms: idle", width), "2")
             if self.exchange:
                 pair = f"{self.exchange['requester'].get('name', '?')} · {self.exchange['responder'].get('name', '?')}"
                 if height > 1:
@@ -353,11 +425,14 @@ class ConversationView:
         speaking = self.speaker_side()
         speaker = self.exchange[speaking]
         listener = self.exchange["responder" if speaking == "requester" else "requester"]
-        kind = f" [{message['kind']}]" if message.get("kind") in KINDS else ""
-        canvas.put(0, 0, fit(f"{speaker.get('name', '?')} ▸ {listener.get('name', '?')}{kind}", width),
-                   f"1;{ink(speaker.get('name', ''))}")
+        kind = message.get("kind")
+        head = f"{speaker.get('name', '?')} ▸ {listener.get('name', '?')}"
+        canvas.put(0, 0, fit(head, width), f"1;{ink(str(speaker.get('name', '')))}")
+        if kind in KINDS and text_width(head) + len(kind) + 3 <= width:
+            canvas.put(width - len(kind) - 2, 0, f" {kind.upper()} ", KIND_STYLES[kind])
         if height > 1:
-            canvas.put(0, 1, fit(f"{face(message.get('emotion'))} {speaking}", width), "1")
+            detail = f"{face(message.get('emotion'))} ◆ {self.session_label(speaker)}"
+            canvas.put(0, 1, fit(detail, width), "36")
         rows = max(1, height - 2)
         lines = self.caption(max(1, width), rows, now)
         if message.get("phase") != "displaying":
