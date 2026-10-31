@@ -17,6 +17,7 @@ import unicodedata
 
 STATES = {"working", "needs_input", "idle", "done", "errored", "unknown", "none"}
 EVENTS = "agent-state,window-closed,window-exit,tml-event"
+NAVIGATION_HINT = "Click an agent for its pane; click a worktree for its session."
 ROLES = {"supervisor": "accent", "worktree": "info", "worker": "success", "reviewer": "warning"}
 
 
@@ -187,17 +188,17 @@ def graph_lines(nodes):
     """Three-row boxes with names in their borders and no spacer rows."""
     lines = []
 
-    def emit(prefix, box, role):
-        lines.append({"prefix": prefix, "box": box, "role": role})
+    def emit(prefix, box, role, node_id):
+        lines.append({"prefix": prefix, "box": box, "role": role, "node_id": node_id})
 
     def draw(node, prefix="", branch=""):
         continuation = prefix + ("│  " if branch == "├──" else "   " if branch else "")
         role = node["role"]
         title = fit_label(node["name"])
         border = title.rstrip() + "─" * (len(title) - len(title.rstrip()))
-        emit(prefix + branch, "┌─" + border + "─┐", role)
-        emit(continuation, "│ " + fit_label(node["detail"]) + " │", role)
-        emit(continuation, "└─" + ("┬" if node["children"] else "─") + "─" * 32 + "┘", role)
+        emit(prefix + branch, "┌─" + border + "─┐", role, node["id"])
+        emit(continuation, "│ " + fit_label(node["detail"]) + " │", role, node["id"])
+        emit(continuation, "└─" + ("┬" if node["children"] else "─") + "─" * 32 + "┘", role, node["id"])
         for index, child in enumerate(node["children"]):
             draw(child, continuation + "  ", "└──" if index == len(node["children"]) - 1 else "├──")
 
@@ -213,7 +214,7 @@ def box_graph(nodes):
 def document(nodes):
     return {
         "type": "tml", "version": 1, "title": "Agent tree",
-        "state": {"nodes": nodes, "lines": graph_lines(nodes), "monitor": "starting; status unverified", "updated": "startup"},
+        "state": {"nodes": nodes, "lines": graph_lines(nodes), "monitor": "starting; status unverified", "updated": "startup", "navigation": NAVIGATION_HINT},
         "children": [{"type": "col", "pad": 0, "gap": 0, "children": [
             {"type": "text", "role": "dim", "children": ["Status at {state.updated}: {state.monitor}"]},
             {"type": "text", "children": [
@@ -222,14 +223,37 @@ def document(nodes):
             ]},
             {"type": "scroll", "h": "fill", "children": [
                 {"type": "list", "items": "state.lines", "as": "line", "select": "none", "children": [
-                    {"type": "text", "wrap": "none", "children": [
+                    {"type": "text", "wrap": "none", "on-press": "emit('navigate', line.node_id)", "children": [
                         {"type": "c", "role": "dim", "children": ["{line.prefix}"]},
                         {"type": "c", "role": "{line.role}", "children": ["{line.box}"]},
                     ]},
                 ]},
             ]},
+            {"type": "text", "role": "dim", "children": ["{state.navigation}"]},
         ]}],
     }
+
+
+def navigate(event, surface, registry):
+    """Resolve a click against current membership, never event-supplied targets."""
+    tml = event.get("tml", {})
+    if (event.get("type") != "tml-event" or tml.get("surface") != surface
+            or tml.get("name") != "navigate"):
+        return None
+    node = next((n for n in registry["nodes"] if n["id"] == tml.get("value")), None)
+    if node is None:
+        return "This box is no longer in the tree."
+    try:
+        if node["kind"] != "worktree":
+            # Focus also selects the pane's workspace, even in a detached session.
+            # Do this first so a missing pane cannot switch to an unrelated view.
+            call("focus-window", session=node["session"], window=node["pane"])
+        if node["kind"] == "worktree" or node["session"] != registry["session"]:
+            call("switch-session", session=registry["session"], name=node["session"])
+    except (TuiosError, subprocess.TimeoutExpired) as error:
+        print(f"Navigation to {node['id']} failed: {error}", file=sys.stderr, flush=True)
+        return f"Could not open {fit_label(node['label']).rstrip()}; see the tree log."
+    return NAVIGATION_HINT
 
 
 def snapshot():
@@ -333,6 +357,13 @@ def run(path):
                     if (updated["session"], updated["supervisor_pane"]) != (registry["session"], registry["supervisor_pane"]):
                         raise ValueError("cannot change dashboard ownership")
                     registry, stamp = updated, path.stat().st_mtime_ns
+                notice = None
+                for event in batch:
+                    result = navigate(event, surface, registry)
+                    if result is not None:
+                        notice = result
+                if notice is not None:
+                    patch_surface(surface, [{"op": "replace", "path": "/navigation", "value": notice}])
                 bindings = {(n["session"], n["pane"]) for n in registry["nodes"] if "pane" in n}
                 relevant = any((e.get("session"), e.get("window")) in bindings for e in batch)
                 if kinds & {"disconnected", "stream-error"}:

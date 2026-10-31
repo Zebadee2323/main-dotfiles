@@ -10,8 +10,16 @@ their workers. Each box uses three rows, with its name in the top border and
 its role/state on one interior row. There are no spacer rows between boxes or
 blank gaps around the header, leaving more room for the tree in short panes.
 Fixed-width boxes and stable ordering keep status changes from
-moving the graph. It uses Unicode box-drawing text in a bound TML list of
-colored text lines inside a scroll container. Each line has dim connector text
+moving the graph. While the helper is running, click any row of an agent box
+to focus its exact pane and workspace, switching to its session if needed.
+Click a worktree box to switch to that worktree's session. Clicks resolve node
+IDs against the current registry, so labels and stale/removed entries cannot
+redirect navigation. Navigation failures appear below the tree and in the log;
+they do not stop status monitoring. Navigation uses the supervisor's existing
+grants (`focus-window` and, across sessions, `switch-session`); it never types
+into a pane or creates a session.
+
+The graph uses Unicode box-drawing text in a bound TML list of colored text lines inside a scroll container. Each line has dim connector text
 and a box span bound to its role. Role colors are fixed: supervisor `accent`,
 worktree `info`, worker `success`, reviewer `warning`. A legend uses the same
 roles, and every box includes its role name; do not use arbitrary hex colors or

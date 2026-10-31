@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import agent_tree as tree
 
@@ -98,6 +98,56 @@ class AgentTreeTests(unittest.TestCase):
         self.assertIn("Justin", tree.box_graph(nodes))
 
 
+class NavigationTests(unittest.TestCase):
+    setUp = AgentTreeTests.setUp
+
+    def click(self, node_id, surface="surface"):
+        return {"type": "tml-event", "tml": {"surface": surface, "name": "navigate", "value": node_id}}
+
+    def test_every_box_row_emits_its_node_id(self):
+        nodes, _, _ = tree.render_nodes(self.registry, {})
+        doc = tree.document(nodes)
+        lines = doc["state"]["lines"]
+        self.assertEqual([line["node_id"] for line in lines],
+                         [node["id"] for node in self.registry["nodes"] for _ in range(3)])
+        graph = doc["children"][0]["children"][2]["children"][0]
+        self.assertEqual(graph["children"][0]["on-press"], "emit('navigate', line.node_id)")
+
+    def test_same_session_agent_only_focuses_exact_pane(self):
+        with patch.object(tree, "call") as send:
+            self.assertEqual(tree.navigate(self.click("supervisor-id"), "surface", self.registry), tree.NAVIGATION_HINT)
+        send.assert_called_once_with("focus-window", session="project", window="supervisor-id")
+
+    def test_cross_session_agent_focuses_then_switches(self):
+        for node_id in ("worker-id", "reviewer-id"):
+            with self.subTest(node=node_id), patch.object(tree, "call") as send:
+                tree.navigate(self.click(node_id), "surface", self.registry)
+            self.assertEqual(send.call_args_list, [
+                call("focus-window", session="slug", window=node_id),
+                call("switch-session", session="project", name="slug"),
+            ])
+
+    def test_worktree_switches_without_focusing_an_arbitrary_pane(self):
+        with patch.object(tree, "call") as send:
+            tree.navigate(self.click("worktree:slug"), "surface", self.registry)
+        send.assert_called_once_with("switch-session", session="project", name="slug")
+
+    def test_other_surfaces_and_removed_nodes_cannot_navigate(self):
+        with patch.object(tree, "call") as send:
+            self.assertIsNone(tree.navigate(self.click("worker-id", "other"), "surface", self.registry))
+            self.assertIn("no longer", tree.navigate(self.click("removed-pane"), "surface", self.registry))
+            self.registry["nodes"] = [self.registry["nodes"][0]]
+            self.assertIn("no longer", tree.navigate(self.click("worker-id"), "surface", self.registry))
+        send.assert_not_called()
+
+    def test_missing_or_denied_destination_returns_notice_without_retry(self):
+        for code in ("window_not_found", "forbidden"):
+            with self.subTest(code=code), patch.object(tree, "call", side_effect=tree.TuiosError("failed", code)) as send:
+                notice = tree.navigate(self.click("worker-id"), "surface", self.registry)
+            self.assertIn("Could not open Jaden", notice)
+            send.assert_called_once_with("focus-window", session="slug", window="worker-id")
+
+
 class MonitorFailureTests(unittest.TestCase):
     def test_cli_failure_preserves_both_diagnostic_channels(self):
         import subprocess
@@ -141,6 +191,9 @@ class MonitorFailureTests(unittest.TestCase):
     def test_start_detaches_before_open_and_waits_for_proof(self):
         self.exercise_start('ok')
 
+    def test_running_monitor_dispatches_click_events(self):
+        self.exercise_start('navigation')
+
     def test_start_reports_detached_ownership_failure(self):
         self.exercise_start('wrong-owner')
 
@@ -166,6 +219,10 @@ root = pathlib.Path(os.environ['FAKE_ROOT'])
 mode = os.environ['FAKE_MODE']
 if sys.argv[1] == 'subscribe':
     print('{"type":"subscribed"}', flush=True)
+    if mode == 'navigation':
+        time.sleep(0.3)
+        print(json.dumps({'type': 'tml-event', 'tml': {'surface': 'test-surface',
+              'name': 'navigate', 'value': 'supervisor-id'}}), flush=True)
     time.sleep(30)
     sys.exit()
 verb = sys.argv[2]
@@ -182,6 +239,8 @@ elif verb == 'list-agents':
     value = {'agents': []}
 elif verb == 'tml-open':
     value = {'surface': 'test-surface', 'window_id': 'tree-pane'}
+elif verb == 'focus-window':
+    value = {'focused_window_id': params['window']}
 elif verb == 'tml-patch':
     if mode == 'denied':
         print('{"error":{"code":"forbidden","message":"wrong owner"}}')
@@ -205,11 +264,21 @@ print(json.dumps(value))
                 self.assertTrue((root / 'calls').exists(), result.stderr + registry.with_suffix('.log').read_text())
                 calls = [json.loads(line) for line in (root / 'calls').read_text().splitlines()]
                 info = json.loads(runtime.read_text())
-                if mode == 'ok':
+                if mode in ('ok', 'navigation'):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(json.loads(result.stdout)['monitor'], 'live')
                     self.assertTrue(any(c['verb'] == 'tml-patch' for c in calls))
                     self.assertEqual(info['monitor'], 'live')
+                    if mode == 'navigation':
+                        deadline = time.monotonic() + 5
+                        while time.monotonic() < deadline:
+                            calls = [json.loads(line) for line in (root / 'calls').read_text().splitlines()]
+                            if any(c['verb'] == 'focus-window' for c in calls):
+                                break
+                            time.sleep(0.05)
+                        focused = [c['params'] for c in calls if c['verb'] == 'focus-window']
+                        self.assertEqual(focused, [{'session': 'project', 'window': 'supervisor-id'}])
+                        self.assertEqual(json.loads(runtime.read_text())['monitor'], 'live')
                     self.assertTrue(all(c['parent'] == info['pid'] and c['parent'] != starter.pid for c in calls))
                 else:
                     self.assertNotEqual(result.returncode, 0)
