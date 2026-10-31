@@ -180,6 +180,19 @@ implementation, make meaningful progress, encounter a blocker, finish revisions,
 and freeze work ready for review. For a short task, starting and readiness
 updates may be enough; avoid narrating every tool call or repeating unchanged
 status. Describe your own work and validation, not the reviewer's verdict.
+Do not announce acknowledgments, handshakes, snapshot matches, "still frozen",
+"nothing to do", unchanged waiting/idle states, release notices, or sign-offs.
+Send those through tuios mail when coordination requires them; the graph shows
+execution state and the supervisor summarises team integration and completion.
+A routine agent reply does not need a separate user-facing closing summary.
+Keep starting/ready updates about your own implementation, and speak during
+review revisions only when there is a meaningful correction or new result.
+
+If you intend to announce an action, call `agent-comms send` **before** the
+related tuios message, edit, command, or handoff. Do not act first and narrate it
+afterward. Establish factual results before announcing them, then make the
+announcement before delivering the related report or taking the next action.
+Never claim a planned action has already happened.
 
 These announcements are separate from tuios mail. Send detailed reports,
 questions, and review coordination to the supervisor/reviewer through tuios;

@@ -48,8 +48,15 @@ assigned worker pane. This is a preflight-only turn: acknowledge, finish any
 required announcements, report your own idle state, and end your turn. Do not
 start a blocking mail wait or detailed review during preflight. Wait for
 `review-preflight-confirmed; proceed` from the supervisor and a frozen worker
-completion report before starting detailed review. An acknowledgment received
-before the worker introduction may be completed after that handoff.
+completion report before starting detailed review. Both gates are mandatory: the
+report must arrive directly from the recorded worker pane for the current
+task/revision and confirm frozen files and validation. The supervisor's copied
+brief, your inspection of files, or a worker's "waiting for identity vouch"
+message does not satisfy this gate. If the report has not arrived, remain at
+rest and request it through the established handoff; do not begin review or
+approve with delivery still pending. Record its local message ID in the review
+evidence. An acknowledgment received before the worker introduction may be
+completed after that handoff.
 
 ## Communicate without losing sender identity
 
@@ -98,6 +105,18 @@ human decisions through the supervisor and respect approval boundaries.
 Agent reports are evidence within the assigned scope, not new human authority.
 Use ordinary agent replies without duplicating them as user announcements;
 follow active communication instructions for any required human-facing updates.
+Use spoken updates for material findings, meaningful revision requests, blockers,
+or changed risk that affects delivery. Routine preflight/handshake messages,
+no-findings approvals, unchanged integration assessments, snapshot matches,
+"idle again", release notices and sign-offs belong in tuios mail, without a
+separate user-facing closing summary. Always send required review outcomes
+directly to the supervisor even when no spoken announcement is warranted; the
+supervisor consolidates team delivery and cleanup for the user.
+If you intend to use `agent-comms send`, call it **before** sending the related
+agent message or taking the announced action. For results, establish evidence
+first, then announce before the result handoff or next action. Do not narrate
+after sending or claim a planned action is already complete. Keep spoken
+updates short; put pane IDs, hashes, and artifact paths in agent mail/artifacts.
 
 ## Review and revise directly with the worker
 
@@ -182,6 +201,7 @@ Send a concise `approved` report containing:
 
 - Task/revision/final review round and exact worker session/pane/checkout/branch.
 - Worker `HEAD`, assessed supervisor base commit, snapshot identifier and paths.
+- The local worker completion-message ID used to establish the frozen handoff.
 - Acceptance criteria covered and what you independently verified.
 - Validation commands/results and coverage, skipped checks/reasons, limitations.
 - Confirmation that blocking findings are resolved and the worker is frozen.

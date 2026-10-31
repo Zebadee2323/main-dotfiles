@@ -172,10 +172,22 @@ scope or permissions. Never type into a pane in `needs_input`; inspect with
 
 ### Keep the user in the loop
 
-Whenever you message a worker or reviewer, also give the user a brief
-`agent-comms send` update phrased as though you are addressing that worker
-directly. Include only enough detail for the user to understand the request.
-This accompanies the actual tuios message to the worker.
+Announce information that helps the user follow delivery: meaningful delegation
+or revision requests, material progress, blockers or decisions, integrated
+milestones, and final completion. Agent mail alone is not a reason to speak.
+Keep routine preflight acknowledgments, snapshot confirmations, reviewer
+approvals with no new findings, integration checks with no new risk, release
+notices, and unchanged waiting/idle states in tuios mail and the live graph.
+Consolidate team integration/cleanup results into your own useful summaries;
+workers and reviewers should not each repeat them or announce sign-offs.
+
+For a useful worker-directed announcement, phrase it briefly as a request to
+that agent. Call `agent-comms send` **before** sending the related tuios message
+or taking the announced action. Do not send first and narrate it afterward.
+When reporting a result, establish the evidence first, then announce it before
+the related handoff or next action; never describe a planned action as already
+completed. Routine internal agent exchanges are agent replies, not automatically
+human-facing turns: do not manufacture a spoken closing summary for each one.
 
 Follow the active identity and prefix rules for both `--msg` and `--tts`; do not
 invent an introduction or add a second one. For example, after any required
@@ -184,6 +196,18 @@ the results." Keep readable text free of speech markup. If harness voice mode
 already delivers the update, avoid a duplicate announcement.
 
 ## Allocate work
+
+Maintain a live TML hierarchy graph with labeled, role-colored box nodes using
+the bundled
+[agent-tree helper and setup instructions](references/agent-tree.md). Read that
+reference before first delegation. Open one tree pane in your own session and
+actual workspace, with supervisor → worktree → worker → reviewer nodes. Update
+its registry only when adding/removing worktrees or participating agents; defer
+reviewer nodes until reviewers are actually launched. The helper listens to
+native tuios status events and patches box labels automatically. Do not spend turns
+rebuilding the view, relaying status, or having workers patch a surface they do
+not own. Stop the helper when supervision ends; retain or close the final tree
+as described in the reference.
 
 Divide work into independently reviewable tasks with explicit ownership,
 dependencies, acceptance criteria, and relevant validation. Record each worker's
@@ -469,8 +493,10 @@ Start only the selected harness. Record the returned `window_id` as
 `REVIEWER_PANE`; never overwrite `WORKER_PANE` or use the reviewer as a ship
 command target. Verify its identity, model, checkout binding, and communication.
 Make reviewer startup a short preflight turn: it acknowledges and ends its turn
-instead of blocking on mail. After verification, explicitly send
-`review-preflight-confirmed; proceed` to the reviewer and introduce the pair.
+instead of blocking on mail. After verification, first send the worker the
+verified reviewer identity/address, then send `review-preflight-confirmed; proceed`
+to the reviewer. Require the worker to deliver its frozen completion report
+directly; reviewer release alone does not complete that handoff.
 Do not require detailed review before sending this release.
 The reviewer prompt must start with:
 
@@ -491,7 +517,12 @@ Send the worker the verified reviewer identity/address and authorize accepting
 its scoped revision requests. Require a direct same-session handshake between
 the pair. Do not start review until the worker has frozen a completion snapshot.
 Have the frozen worker send its completion report directly to the reviewer
-after this handoff. The absence of a reviewer does not authorize self-approval.
+after this handoff. Reviewer release and receipt of that direct report are
+separate gates: a copied completion report in your launch prompt does not
+replace worker-to-reviewer delivery. Require the reviewer to identify the local
+worker message it used in its approval evidence, and reject approval marked
+"completion pending" or "identity vouch pending". The absence of a reviewer
+does not authorize self-approval.
 
 Keep the reviewer alive after approval. Reuse it for hook-generated edits,
 integration/conflict resolution, or further questions about the same assignment.
@@ -722,7 +753,15 @@ reviewer can approve the result and you can commit it.
 
 After a successful merge, verify the combined result and confirm the worker's
 entire assignment is present, with no outstanding changes or revisions. Only
-then release the worker and reviewer and remove the worktree:
+then release the worker and reviewer and remove the worktree. Send each release
+to its exact recorded pane, and verify a successful delivery receipt for **every**
+recipient before removing the session. For a batch, iterate structured recipient
+records using individually quoted argv or Python `subprocess` argument lists.
+Do not pack recipient fields into strings, use `set -- $record`, or rely on zsh
+word splitting. Record each recipient/result; one successful send does not prove
+the rest of a loop ran. Retry only recipients without confirmed delivery, with
+fresh verified selectors as needed:
+
 
 ```sh
 tuios worktree rm "$WORKER_SESSION"
