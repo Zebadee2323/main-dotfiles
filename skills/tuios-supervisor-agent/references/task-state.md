@@ -6,6 +6,14 @@ send updates; they do not concurrently edit the ledger. This is delivery state,
 separate from the live graph's execution state. Keep current facts here and large
 logs/diffs in referenced artifacts, not in messages or conversation history.
 
+Record the todo surface/pane ID, owner/session/workspace and dismissal state at
+run level. Include task titles and completion criteria for delivery and non-code
+milestones, planned wave/concurrency group, owner/lane and structured prerequisite
+gates (task ID plus required milestone). Record capacity constraints and validate
+the dependency graph before delegation; display waves are not global barriers.
+Record integrated commit and acceptance evidence before ticking a
+code item in the [todo pane](task-list.md). Patch the view after ledger transitions.
+
 Each task record contains:
 
 - `task_id`, `revision`, `review_round`, `state`, `next_owner`, `next_action`.

@@ -163,6 +163,16 @@ rebuilding the view, relaying status, or having workers patch a surface they do
 not own. Stop the helper when supervision ends; retain or close the final tree
 as described in the reference.
 
+Also create one supervisor-owned TML **Delivery flow** todo pane using the
+[task-list instructions and template](references/task-list.md). Show all known
+planned, active and completed units, including supervisor work and integration
+milestones. Arrange them by execution wave with explicit parallel groups, task
+owners/lanes and prerequisite gates. Show planned concurrency separately from
+actual running work and resource limits; keep Git merges serialized. Update it from the durable ledger as scope/status changes. Tick code
+items immediately after verified integration and acceptance; a merge awaiting
+required checks stays labelled "Merged; validation pending". Keep completed
+items visible. This pane complements the agent tree's execution-state display.
+
 Divide work into independently reviewable tasks with explicit ownership,
 dependencies, acceptance criteria, and relevant validation. Persist assignments and
 transitions in the run ledger described in [task state and

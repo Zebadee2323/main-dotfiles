@@ -1,0 +1,19 @@
+<tml version="1" title="Delivery flow">
+  <state>{"items":[],"completed":0,"run_status":"Planning","flow":"Plan → parallel work → integration → validation","capacity":"Parallel capacity: not yet assigned"}</state>
+  <col pad="1" gap="1">
+    <heading>Delivery flow</heading>
+    <text>{state.completed} / {len(state.items)} complete · {state.run_status}</text>
+    <text role="accent" wrap="word">{state.flow}</text>
+    <text role="dim" wrap="word">{state.capacity}</text>
+    <scroll h="fill">
+      <table rows="state.items" select="none">
+        <column field="mark" title="Done"/>
+        <column field="wave" title="Wave / concurrency"/>
+        <column field="label" title="Task / lane"/>
+        <column field="after" title="Waits for"/>
+        <column field="status" title="Status"/>
+      </table>
+    </scroll>
+    <text role="dim" wrap="word">Same parallel wave = independent work, subject to capacity. ✓ = integrated and accepted; dependencies use their named gates.</text>
+  </col>
+</tml>

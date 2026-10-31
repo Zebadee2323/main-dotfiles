@@ -56,6 +56,11 @@ yourself merely to bypass the pair. If you specifically request a merge into the
 worker branch instead, require it to stop before creating a merge commit so the
 reviewer can approve the result and you can commit it.
 
+After a successful merge, update the todo item to `Merged; validation pending`
+while required checks remain. Once integration and acceptance are verified,
+record the evidence and tick the item immediately in the supervisor's Delivery
+flow todo pane; keep the completed row visible through cleanup.
+
 After a successful merge, delegate required combined integration tests to a
 named worker, identifying the exact merged commit/tree, checkout, checks and
 reviewer. The worker executes and reports evidence; the reviewer assesses it;
