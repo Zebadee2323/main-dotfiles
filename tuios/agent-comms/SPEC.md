@@ -2,9 +2,10 @@
 
 ## Purpose
 
-Provide shared identities and a single, per-user message listener for coding
-agents. Agents draw an identity, send messages under that identity, and see those
-messages presented sequentially in a terminal or the tuios dock.
+Provide generated agent names and a single, per-user message listener for coding
+agents. Each agent is assigned a name and a gender-matched voice, sends messages
+under that name, and sees those messages presented sequentially in a terminal or
+the tuios dock.
 
 The program lives in `tuios/agent-comms/` in this dotfiles repository. This
 specification captures the agreed design before implementation.
@@ -13,12 +14,13 @@ Later extensions are implemented and documented in README.md: durable `history`,
 separate `send --tts` speech text, watcher-side configurable local Phonon 31m or
 ElevenLabs speech (Naia-default `eleven_turbo_v2_5`), backend-specific injected
 speech guidance, synchronized caption chunks and attention flashes,
-explicit checked spatial prefixes returned by `context`, pane-stable identity ownership,
+explicit checked spatial prefixes returned by `context`, pane-stable name ownership,
 delivery VFX, listener-wide live `audio` toggle/timed mute, and exact-owned
 `[NAME] ` pane-name prefixes applied by `context`. Personalities and the separate
 `prefix` command have been removed.
 Those extensions supersede the original v1
-voice/history exclusions below. The current wire protocol is version 2.
+voice/history exclusions below. The current wire protocol is version 3; mixed
+client/listener/watcher versions fail with restart guidance (`agent-comms restart all`).
 State snapshots include a public listener generation, distinct from the auth
 token; listener generation changes do not reload watchers. Watchers poll an
 atomic runtime revision file every 250 ms, even while disconnected. An explicit
@@ -26,17 +28,22 @@ atomic runtime revision file every 250 ms, even while disconnected. An explicit
 worker resources and re-execute with preserved arguments. `restart all` first
 restarts the installed listener service, then signals watchers (only on service
 success). `service restart` affects only the listener. The tuios palette exposes
-all three scopes. None clears pane identities or history.
-`context` now returns the caller's ID, name, and exact introduction or empty
-prefix, resolving ownership from the tuios environment or persistent parent shell
-(no harness/session identity-selection flags). Outside tuios, the listener derives
-the shell from the caller process ancestry; no tuios executable is needed. Agents must insert
-it themselves in both display and TTS text. `send` rechecks context and rejects
-mismatches without queueing or rewriting the message. Missing pane identities also
-reject the send and return fresh context via the listener; they do not trigger an
-automatic resend. Corrupt identity state does not trigger recovery or allocation.
-This supersedes the earlier
-automatic-introduction behavior.
+all three scopes. None clears name bindings or history.
+`context` now returns the caller's generated name, reset epoch, and exact
+introduction or empty prefix, resolving ownership from the tuios environment or
+persistent parent shell (no harness/session identity-selection flags). Outside
+tuios, the listener derives the shell from the caller process ancestry; no tuios
+executable is needed. Agents must insert the prefix themselves in both display and
+TTS text. `send` rechecks name, epoch, and context and rejects mismatches without
+queueing or rewriting the message. Missing bindings also reject the send and
+return fresh context via the listener; they do not trigger an automatic resend.
+Corrupt, unsupported, or legacy allocation state does not trigger recovery or
+allocation. This supersedes the earlier automatic-introduction behavior.
+
+The static identity roster (opaque `ag_...` IDs with fixed display names) has
+been replaced by generated names plus voice profiles, an explicit reset epoch, and
+a silent conversation view; see "Names, voice profiles, and allocation state" below.
+The refactor design is in `refactor-spec.md`.
 
 ## Technology and platforms
 
@@ -50,7 +57,7 @@ automatic-introduction behavior.
 - Use platform-specific OS-backed file-lock helpers: `fcntl` on macOS/Linux and
   `msvcrt` on Windows. Locks must coordinate separate processes and release when
   a process exits or crashes.
-- Keep the editable identity config in `agent-comms/config.toml`, resolved beside
+- Keep the editable config in `agent-comms/config.toml` (and its `names.toml`), resolved beside
   the program on every platform. Keep state/runtime data in native per-user
   locations outside the source tree, with overrides for isolated tests.
 - Dock output supports ANSI SGR colors and styling.
@@ -59,16 +66,23 @@ automatic-introduction behavior.
 
 ### `agent-comms context`
 
-Resolve the caller pane or shell's stable identity and return JSON with `id`, `name`,
-and `prefix`. Agents call this initially in a separate tool call, then reuse
-these details in the same pane until a send reports an identity/prefix mismatch.
-Never inherit identity details from another pane or conversation.
+Resolve the caller pane or shell's stable assignment and return JSON with `name`,
+`epoch`, and `prefix` (plus `id`, a temporary compatibility alias equal to `name`):
 
-The CLI performs a live local pane check, then requests identity allocation via
+```json
+{"id":"Alice2","name":"Alice2","epoch":"3f9c0a7d1b2e4c68","prefix":"Alice2 here, to your top-right."}
+```
+
+Agents call this initially in a separate tool call, then reuse these details in
+the same pane until a send reports a name/epoch/prefix mismatch. Never inherit
+identity details from another pane or conversation.
+
+The CLI performs a live local pane check, then requests allocation via
 the running listener's authenticated `context` RPC. It forwards only allowlisted
 tuios addressing variables. The listener verifies the pane with that environment,
 persists the binding, and updates the pane title. Routine `context` and `send`
-commands perform no client-side state writes. Pane send verification reads an atomic binding snapshot without a write lock.
+commands perform no client-side state writes. Pane send verification reads the
+atomically replaced allocation document without a lock.
 Standalone clients forward their process ID; the listener discovers the nearest
 persistent ancestor shell, skipping transient command shells, and keys ownership
 by host, PID, and process creation time. Standalone sends use a read-only
@@ -79,38 +93,49 @@ Tuios remains authoritative when its environment is present, including errors.
 Standalone prefixes are empty and pane-title updates are skipped. An older listener requires a restart;
 there is no fallback to writing application state from inside the agent sandbox.
 
-Allocation uses the original Tetris-style bag internally, but repeated lookup
-does not draw a new identity. The following describes the internal allocator:
+Repeated lookups return the existing binding, including after listener or machine
+restarts; only a missing binding allocates. Allocation is described under
+"Names, voice profiles, and allocation state". Diagnostics belong on stderr;
+successful lookup stdout is JSON.
 
-- Diagnostics belong on stderr; successful lookup stdout is JSON.
-- The configuration bag contains every configured identity ID once.
-- The transient bag is a persisted, shuffled copy of those IDs.
-- A draw removes and returns the ID at the front of the transient bag.
-- If the bag is empty, refill it from configuration and shuffle before drawing.
-- Each identity appears exactly once per cycle. A repeat across cycle boundaries
-  is permitted, as with a Tetris bag.
-- Persist remaining IDs between CLI calls. Protect the complete read/modify/write
-  operation with a process-safe lock so concurrent callers cannot consume the
-  same bag entry.
+### `agent-comms context --clear`
 
-### `agent-comms context --refill`
+Release only the caller's binding and print `{"cleared": bool, "name": ...}`
+(`id` mirrors `name`). The name is not returned to the bag; the next `context`
+allocates a fresh name.
 
-Force a fresh shuffle of the complete configuration bag, replacing any remaining
-transient entries. **Do not draw or print an ID.** Use the same lock as normal
-draws.
+### `agent-comms context --refill` (retired)
+
+Fails with guidance. Names refill automatically when the bag is exhausted; a
+premature refill could reuse names within a generation. Use `bags reset --confirm`
+for an explicit restart at generation 0.
 
 ### `agent-comms context --clear-all`
 
-Explicit local administrative reset of all pane bindings in the selected state
-directory, across all daemons and sessions. Acquire the same lock as allocation
+Explicit local administrative clear of all pane and shell bindings in the selected
+state directory, across all daemons and sessions. Acquire the allocation lock
 and atomically replace bindings and scan timestamps with empty tables. Print
-`{"cleared": N}` with the number of released bindings; repeated resets return zero.
-Do not allocate identities, refill the bag, edit config, delete history, change
-titles, or cancel queued announcements. Existing listeners observe the reset
-without restarting; each pane must look up `context` before its next send (a new
-draw may return the same identity). Works outside tuios and offline, without
-loading config, but requires state write access. Corrupt mappings fail explicitly.
-Mutually exclusive with `--clear` and `--refill`.
+`{"cleared": N}` with the number of released bindings; repeated clears return zero.
+Do not allocate, refill or rewind the bags, change the epoch, edit config, delete
+history, change titles, or cancel queued announcements. Issued names stay spent.
+Existing listeners observe the change without restarting; each agent must look up
+`context` before its next send and receives a fresh name. Works outside tuios and
+offline, without loading config, but requires state write access. Corrupt or legacy
+state fails explicitly. Mutually exclusive with `--clear`.
+
+### `agent-comms bags status` / `agent-comms bags reset --confirm`
+
+`status` prints the epoch, generation, remaining name and per-gender voice bag
+sizes, catalog size, binding count, and bound names as JSON (or
+`initialized: false`, with `legacy: true` and guidance for legacy state).
+
+`reset --confirm` is the only operation that changes the epoch. Under the
+allocation lock it starts a new epoch at generation 0, refills all bags from
+current config, and clears every binding in one write. It preserves history and
+voice approvals/rejections; already-accepted messages keep their recorded name and
+voice. Legacy `pane-identities.json`/`bag.json` and corrupt `allocation.json` are
+moved into `state/legacy-backup-*` first. Without `--confirm` it refuses. Ordinary
+service start/restart never resets.
 
 ### `agent-comms serve`
 
@@ -125,7 +150,7 @@ Run the single global listener and own the timed message queue.
 - Accept messages into a FIFO queue. Acknowledge a send only after acceptance.
 - Display one message at a time for a configurable duration, default **5
   seconds**, then remove it and display the next queued message.
-- Show the identity's configured `name` before the message: `Name: message`.
+- Show the sender's generated `name` before the message: `Name: message`.
 - When no messages remain, show a quiet idle indicator.
 - Retain a standalone terminal display, wrapping messages to the terminal width.
 - Keep the queue in memory. Restarting the server discards active and queued
@@ -164,17 +189,26 @@ Run the single global listener and own the timed message queue.
 - Other platforms retain foreground `serve`; unsupported service commands explain
   the limitation (`start --if-installed` safely skips).
 
-### `agent-comms send --id ID --msg MESSAGE`
+### `agent-comms send --name NAME --epoch EPOCH --msg MESSAGE`
 
-Submit a text message using the caller pane's internally resolved identity.
+Submit a text message using the caller's internally resolved binding.
 
-- Resolve the pane binding and validate the message. Unbound panes fail clearly.
-  Required `--id` asserts the expected identity, never selects it. A mismatch
-  rejects the message before networking and instructs the agent to run
-  `agent-comms context` for an up-to-date ID, name, and prefix.
+- Resolve the pane or shell binding and validate the message. Unbound callers fail
+  clearly. `--name` and `--epoch` assert the expected assignment, never select it.
+  `--id` is a deprecated alias for `--name` (a stderr note is printed; both
+  together are a usage error). A missing or mismatched name or epoch rejects the
+  message and prints fresh context JSON (`id`, `name`, `epoch`, `prefix`) on stderr.
+- The listener re-verifies name and epoch against the owner's binding under the
+  allocation lock (mismatch → `context_mismatch` error frame), builds the record
+  from the binding's embedded voice snapshot (never live config), and assigns a
+  unique message ID.
+- Optional display metadata for the conversation view: `--display-recipient`,
+  `--role`, `--kind`, `--emotion`, `--reply-to` (see README.md). It never routes or
+  delivers anything and cannot change the verified sender.
 - Connect to the global listener using discovery and authentication below.
-- Return success only when the listener acknowledges queue acceptance. Success
-  does not mean the message has already appeared on screen.
+- Return success only when the listener acknowledges queue acceptance; print the
+  estimate and `Message ID: <id>`, plus `agent-comms: warning: ...` lines on stderr.
+  Success does not mean the message has already appeared on screen.
 - If the listener is offline, exit nonzero with a clear diagnostic. Do not
   automatically start a server or save messages for later delivery.
 
@@ -195,70 +229,108 @@ updates for a tuios dock component.
 - Keep diagnostics off stdout; stdout is the dock's display stream.
 - Flatten multiline messages for the dock while preserving terminal wrapping in
   the standalone server display.
+- `watch --view conversation` is a separate, always-silent, pane-sized view (it
+  requires a terminal). It never claims speech; it follows the listener's shared
+  presentation lifecycle (`start`, `display`, `end` events in each snapshot's
+  `lifecycle` object), deduplicates by timeline/sequence, and resynchronizes to
+  the current snapshot after a listener restart. Late joiners see the current
+  message only; history is not replayed.
 
-## Identity configuration and bag state
+### `agent-comms history`
 
-Use TOML keyed by globally unique stable identity IDs, either legacy
-`[identities.ID]` or `[identity_groups.GROUP.identities.ID]`. A top-level
-`active_groups` array selects the union eligible for bag draws and voice review.
-Omitting it includes all identities. Invalid/empty/duplicate group selections fail
-closed; a membership change invalidates the bag. Existing pane bindings remain
-stable until cleared or their identity is removed. Each identity has:
+Print retained accepted messages, even offline. `--name` (generated name),
+`--epoch`, `--session`, and deprecated `--id` filter within the retained window.
+`--watch [--refresh-time SECONDS]` redraws in place when content or size changes;
+it requires a terminal and rejects `--json`/`--raw`. Watching never speaks or sends.
 
-- `name`: the human-readable display name.
-- `eleven_labs_voice_id`: voice metadata.
-- `phonon_voice`: local Phonon catalog name; blank/missing disables Phonon speech
-  for this identity. `[speech].mode` selects `phonon`, `pocket_tts`, or `elevenlabs` (legacy default).
-  `[speech.phonon]` configures the external `ptts` executable and 31m model repo.
-  Runtime dependencies and cached weights are stored outside the source tree.
-- `phonon_voice_approved`: Phonon-only review approval (default false), independent
-  of ElevenLabs `voice_approved`. `voice-review` uses the configured provider;
-  `--all` includes approved voices, `s` skips without saving any decision, and
-  `r` replays the existing sample without synthesizing again.
-- `pocket_tts_voice`: Pocket preset name or permitted local reference voice path.
-  Local WAV and exported `.safetensors` paths may be absolute, home-relative, or
-  relative to the configuration file's directory (for example `voices/alice.wav`).
-  Config loading resolves local paths for both review and announcement playback
-  without rewriting the source TOML; preset names and URLs remain unchanged.
-  `[speech.pocket_tts]` configures the external executable and language.
-  `pocket_tts_voice_approved` is its independent approval flag (default false).
-  Each watcher lazily owns a private Pocket model worker, started only after a
-  successful speech claim. Voice conditioning states are cached strictly on first
-  use, not preloaded from the roster. Model/cache persist until watcher exit or
-  interrupted/failed synthesis; pipes serialize requests without a network service.
-- `elevenlabs_speed` / `phonon_speed` / `pocket_tts_speed`: independent global or identity multipliers
-  (0.7–1.2). Identity overrides global; provider-specific overrides legacy `speed`
+## Names, voice profiles, and allocation state
+
+The generated agent name is the only public agent identifier. Names and voices
+are configured independently and paired by gender at allocation.
+
+- `names_file` (relative to the config) points to a catalog with only `male` and
+  `female` arrays. Names are 1–32 ASCII letters starting uppercase, unique
+  case-insensitively across both arrays; `user` is reserved. The catalog must be
+  nonempty, and every represented gender needs an active voice profile.
+- Voice profiles live in `[voice_groups.GROUP.voices.PROFILE_ID]`. Profile IDs are
+  unique across groups and are not agent identifiers. Each profile requires
+  `gender = "male"|"female"` and may contain only voice settings (provider voice
+  fields, approval flags, speed overrides); `name` is rejected. Legacy
+  `[identities]`/`[identity_groups]` tables are rejected with conversion guidance.
+  `active_groups` (default: all groups) selects profiles for new assignments and
+  voice review only.
+- Name bag: one global generation. Generation 0 shuffles the whole catalog and
+  issues each base name once (`Alice`). When empty, the next allocation increments
+  the generation and refills from the current catalog: generation g > 0 issues
+  `Alice{g+1}` (`Alice2`, `Alice3`, ...). Catalog edits apply on the next refill.
+- Voice bags: one shuffled queue per gender over eligible profiles, refilled
+  independently. A name's gender selects the queue. Many agents may share a
+  profile; voice cycles never cap concurrent agents or advance the generation.
+  Active-group changes reconcile the queues for future draws only.
+- A binding records `name`, `base_name`, `gender`, `name_generation`,
+  `voice_profile_id` (provenance only), and a deep-copied `voice_profile`
+  snapshot with absolute voice paths. Delivery uses the snapshot; editing, moving,
+  or deleting the source profile does not affect the binding until it is cleared.
+- Clearing or pruning a binding never returns its name to the bag.
+
+Profile fields (all optional except `gender`):
+
+- `eleven_labs_voice_id` / `voice_approved`: ElevenLabs voice and review approval.
+- `phonon_voice` / `phonon_voice_approved`: local Phonon catalog name; blank/missing
+  disables Phonon speech for this profile. `[speech].mode` selects `phonon`,
+  `pocket_tts`, or `elevenlabs` (legacy default). `[speech.phonon]` configures the
+  external `ptts` executable and 31m model repo; runtime dependencies and cached
+  weights are stored outside the source tree.
+- `pocket_tts_voice` / `pocket_tts_voice_approved`: Pocket preset name or permitted
+  local reference voice path. Local WAV and exported `.safetensors` paths may be
+  absolute, home-relative, or relative to the configuration file's directory; they
+  are resolved at load (and stored absolute in snapshots) without rewriting the
+  TOML. Each watcher lazily owns a private Pocket model worker, started only after
+  a successful speech claim; voice states are cached on first use, not preloaded.
+- `elevenlabs_speed` / `phonon_speed` / `pocket_tts_speed` (and legacy `speed`):
+  0.7–1.2. Profile overrides global; provider-specific overrides legacy `speed`
   within each scope. Used by both watcher playback and voice review.
 
-Illustrative structure, not a finalized identity roster:
+Approvals are profile-scoped. `voice-review` audits active profiles with the
+configured provider (never generated agents); `--all` includes approved voices,
+`s` skips without saving, and `r` replays without synthesizing again.
+
+Illustrative structure:
 
 ```toml
-display_seconds = 5
+names_file = "names.toml"
+active_groups = ["phonon"]
 
-[identities.naia]
-name = "Naia"
+[voice_groups.phonon.voices.voice_juniper]
+gender = "female"
+phonon_voice = "Juniper"
 eleven_labs_voice_id = ""
 ```
 
-Names and voices are identity metadata. Personalities have been removed; use
-ordinary communication style. Optional watcher speech is documented in README.md.
+State is a single versioned document, `STATE/allocation.json`, guarded by
+`allocation.lock` and written by atomic replacement. It holds the epoch, name bag,
+voice bags, bindings, scan times, and retired title prefixes. Allocation, clear,
+prune, reset, title updates, and message acceptance serialize through that lock;
+a name, voice, and binding are committed together. Send paths read it without
+locks, directory creation, or permission changes. Corrupt, unsupported, or
+inconsistent state fails closed with `bags reset --confirm` guidance; it is never
+silently recreated. Pre-refactor `pane-identities.json`/`bag.json` without
+`allocation.json` is legacy state and fails until an explicit reset migrates it.
 
-The default configuration lives beside the program in `agent-comms/config.toml`
-(updated by request after the initial implementation). Flags/environment can
-override it. Configuration is the authoritative bag of possible IDs; a separate locked JSON
-state file stores the remaining shuffled IDs. Runtime state must not be written
-into the checked-in source/configuration example.
+The epoch is an opaque, state-directory-wide value that changes only on
+`bags reset --confirm` (not on restarts or refills). Name uniqueness is scoped to
+one state directory and one epoch.
 
-Pane bindings reserve IDs, so different retained pane bindings cannot silently
-share an identity. `send` resolves the current pane binding internally. Ownership is
-persisted by stable daemon namespace + pane UUID under a shared OS lock. Confirmed
-missing panes are pruned after a seven-day grace period; failed/incomplete listings
-never prune. See README.md for lifecycle and migration details. This is attribution,
-not authentication; the local connection token provides transport authentication.
-Shell bindings share the mapping and lock in a separate host namespace. Complete
-process inventories reclaim confirmed exited shells using the same grace and
-pressure policy; tuios records and live shells are retained. Clear commands apply
-to both types of ownership.
+Optional watcher speech and provider settings are documented in README.md.
+Personalities have been removed; use ordinary communication style. Runtime state
+must not be written into the checked-in source/configuration.
+
+Ownership is persisted by stable daemon namespace + pane UUID (or host + shell PID
++ process start time) inside the allocation document. Confirmed missing panes and
+exited shells are pruned after a seven-day grace period; failed/incomplete
+listings never prune. This is attribution, not authentication; the local
+connection token provides transport authentication. Clear commands apply to both
+types of ownership.
 
 ## Server discovery and authentication
 
@@ -287,13 +359,20 @@ must be documented with the implementation.
 
    ```json
    {
-     "protocol_version": 1,
+     "protocol_version": 3,
+     "name_identity": true,
+     "conversation_view": true,
+     "presentation_lifecycle": true,
      "port": 51432,
      "token": "<random secret>"
    }
    ```
 
 The port is illustrative. No fixed port or manual port configuration is needed.
+Discovery also carries the other capability flags (`prefix_policy`,
+`spatial_prefix`, `audio_control`, `pane_identity`, `pane_identity_clear`,
+`shell_identity`). Clients refuse a listener whose protocol version differs or
+that lacks a capability they need, with restart guidance.
 
 ### Client connection
 
@@ -314,7 +393,7 @@ into account. Do not expose tokens in normal CLI output, dock text, or logs.
 - Watchers reconnect using freshly read discovery data.
 - Clean shutdown should remove the departing server's discovery data safely;
   avoid deleting data published by a replacement server.
-- Handle interrupted bag writes and discovery writes safely; atomic replacement
+- Handle interrupted allocation-state writes and discovery writes safely; atomic replacement
   must not compromise the separate lock's effectiveness.
 
 ## tuios integration
@@ -345,7 +424,7 @@ component.
 
 ### Appearance and capabilities
 
-- Initially show a colored identity name and current message, with a quiet idle
+- Initially show a colored agent name and current message, with a quiet idle
   or disconnected indicator when appropriate.
 - Single-line ASCII graphics are supported: faces, badges, and progress bars.
   For example:
@@ -386,9 +465,13 @@ The installed tuios version was 0.11.0, commit
 
 Implementation should verify, without requiring Windows execution for now:
 
-- Every configured identity appears once per full bag cycle, with automatic
-  refill, persistent remaining entries, and refill-only `--refill` behavior.
-- Concurrent ID calls coordinate safely.
+- Each base name appears once per generation, later generations add numeric
+  suffixes, every assigned name/voice pair has matching gender, and voice cycling
+  never caps concurrent agents. Bags, generation, and bindings survive restarts.
+- Concurrent allocations never issue duplicate names or partial state; clearing
+  and pruning never recycle names; corrupt or legacy state fails closed.
+- Only `bags reset --confirm` changes the epoch; pre-reset contexts are rejected
+  even when the same owner receives the same name again.
 - Only one listener can run for a selected per-user runtime location.
 - Discovery, authentication, stale-file recovery, and restart/reconnect behavior
   work without a fixed port.
@@ -415,11 +498,11 @@ Implementation should verify, without requiring Windows execution for now:
 
 The design above is agreed; the following have not yet been finalized:
 
-- Default identity roster and actual voice metadata.
+- Default name catalog and actual voice metadata.
 - Exact configuration/state paths, override flags/environment variables, and
   install/launcher mechanism on each platform.
 - Transport framing, payload limits, queue limits, timeouts, and retry backoff.
-- Policy for changed identity configuration or corrupt transient bag state.
+- Policy for changed name/voice configuration or corrupt allocation state.
 - How the standalone server is launched/supervised independently of dock
   watchers, including optional startup automation.
 - Exact dock placement, colors, width limits, and long-message presentation.

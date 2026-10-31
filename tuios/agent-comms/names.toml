@@ -1,0 +1,72 @@
+# Agent name catalog. Array membership sets each name's gender, which selects a
+# matching-gender voice profile. Names are 1-32 ASCII letters starting with an
+# uppercase letter (no digits, spaces, or punctuation) and must be unique across
+# both lists, ignoring case. "User" is reserved for the conversation view.
+#
+# Each name is used once per generation. When every name has been issued, the
+# bag refills and later names gain a suffix: Alice2, Alice3, and so on. Edits
+# apply on the next automatic refill; 'agent-comms bags reset --confirm' starts
+# over at generation 0 immediately.
+male = [
+  "Aaron", "Adam", "Adrian", "Aidan", "Alan", "Albert", "Alec", "Alex", "Alfie",
+  "Alfred", "Andrew", "Andy", "Angus", "Anthony", "Archie", "Arnold", "Arthur",
+  "Austin", "Barney", "Barry", "Basil", "Ben", "Benny", "Bernard", "Bert", "Bill",
+  "Blake", "Bob", "Brad", "Brendan", "Brett", "Brian", "Bruce", "Bruno", "Bryce",
+  "Byron", "Cal", "Caleb", "Calvin", "Carl", "Carlos", "Cecil", "Chad", "Charles",
+  "Charlie", "Chester", "Chris", "Clark", "Claude", "Clive", "Cody", "Colin", "Conor",
+  "Craig", "Curt", "Cyril", "Dale", "Damian", "Dan", "Daniel", "Dante", "Darren",
+  "Dave", "David", "Dean", "Dennis", "Derek", "Dexter", "Dominic", "Don", "Douglas",
+  "Duncan", "Dustin", "Dylan", "Earl", "Easton", "Eddie", "Edgar", "Edmund", "Edward",
+  "Edwin", "Eli", "Elliot", "Elton", "Emil", "Eric", "Ernest", "Ethan", "Evan", "Ezra",
+  "Felix", "Fergus", "Finn", "Fletcher", "Floyd", "Francis", "Frank", "Fraser", "Fred",
+  "Gabriel", "Gareth", "Gavin", "Geoff", "George", "Gerald", "Gideon", "Gilbert",
+  "Glen", "Gordon", "Graham", "Grant", "Greg", "Gus", "Guy", "Hamish", "Hank",
+  "Harold", "Harry", "Harvey", "Hector", "Henry", "Herbert", "Howard", "Hugh", "Hugo",
+  "Ian", "Isaac", "Ivan", "Ivor", "Jack", "Jacob", "Jaden", "Jake", "James", "Jared",
+  "Jasper", "Jay", "Jeff", "Jeremy", "Jerome", "Jesse", "Jett", "Jim", "Joe", "Joel",
+  "John", "Jonah", "Jonas", "Joseph", "Josh", "Jude", "Julian", "Justin", "Karl",
+  "Keith", "Ken", "Kevin", "Kieran", "Kurt", "Lance", "Larry", "Lawrence", "Leo",
+  "Leon", "Leonard", "Lewis", "Liam", "Lionel", "Logan", "Louis", "Luca", "Lucas",
+  "Luke", "Lyle", "Malcolm", "Marcus", "Mark", "Martin", "Marvin", "Mason", "Matt",
+  "Max", "Melvin", "Micah", "Miles", "Milo", "Mitchell", "Morgan", "Murray", "Nathan",
+  "Neil", "Nelson", "Nick", "Nigel", "Noah", "Noel", "Norman", 
+  "Omar", "Oscar", "Otis", "Owen", "Patrick", "Paul", "Percy", "Peter", "Phil",
+  "Pierce", "Preston", "Quentin", "Ralph", "Ray", "Reggie", "Rex", "Rhys", "Richard",
+  "Rick", "Rob", "Robin", "Rodney", "Roger", "Roland", "Ronald", "Ross", "Rowan",
+  "Roy", "Rufus", "Rupert", "Russell", "Ryan", "Sam", "Scott", "Sean", "Sebastian",
+  "Seth", "Severin", "Shane", "Silas", "Simon", "Spencer", "Stan", "Stefan", "Stephen",
+  "Stuart", "Tarquin", "Ted", "Teddy", "Terry", "Theo", "Thomas", "Tim", "Toby",
+  "Todd", "Tom", "Tony", "Trevor", "Tristan", "Troy", "Tyler", "Victor", "Vince",
+  "Wade", "Wallace", "Walter", "Warren", "Wayne", "Wesley", "Will", "Wyatt", "Xavier",
+  "Zach", "Zane",
+]
+
+female = [
+  "Aakancha", "Abby", "Ada", "Adele", "Agnes", "Aileen", "Alice", "Alison", "Alma",
+  "Amber", "Amelia", "Amy", "Andrea", "Angela", "Anita", "Anna", "Annie", "April",
+  "Ava", "Beatrice", "Bella", "Bernice", "Beth", "Betty", "Bianca", "Bonnie", "Brenda",
+  "Bridget", "Bryony", "Camilla", "Carla", "Carmen", "Carol", "Caroline", "Cassie",
+  "Catherine", "Cecily", "Celia", "Chloe", "Claire", "Clara", "Claudette", "Cora",
+  "Daisy", "Daphne", "Dawn", "Debbie", "Delia", "Della", "Diana", "Dina", "Dora",
+  "Doris", "Echo", "Edith", "Eileen", "Elaine", "Eleanor", "Elena", "Eliza", "Ella",
+  "Ellen", "Elsie", "Emily", "Emma", "Erica", "Erin", "Esme", "Esther", "Eva",
+  "Evelyn", "Everly", "Faith", "Fay", "Felicity", "Fiona", "Flora", "Florence",
+  "Frances", "Freya", "Gail", "Gemma", "Georgia", "Gina", "Gloria", "Grace", "Greta",
+  "Gwen", "Hadley", "Hannah", "Harper", "Harriet", "Hazel", "Heather", "Heidi",
+  "Helen", "Holly", "Hope", "Ida", "Imogen", "Ingrid", "Irene", "Iris", "Isabel",
+  "Ivy", "Jade", "Jane", "Janet", "Jasmine", "Jean", "Jenna", "Jenny", "Jessica",
+  "Jill", "Joan", "Joanna", "Josie", "Joy", "Judith", "Julia", "Julie", "Juliet",
+  "June", "Juniper", "Karen", "Kate", "Katie", "Kelly", "Kim", "Kirsten", "Lamarina",
+  "Laura", "Lauren", "Leah", "Leila", "Lena", "Lila", "Lily", "Linda", "Lisa", "Lois",
+  "Lola", "Lorna", "Louise", "Lucy", "Luna", "Lydia", "Lynn", "Mabel", "Madeline",
+  "Maeve", "Maggie", "Maisie", "Margot", "Marie", "Marina", "Martha", "Mary",
+  "Matilda", "Maya", "Megan", "Melanie", "Melissa", "Mia", "Millie", "Miranda",
+  "Molly", "Monica", "Muriel", "Myra", "Nadia", "Nadine", "Nancy", "Naomi", "Natalie",
+  "Nell", "Nicole", "Nina", "Nora", "Odette", "Olive", "Olivia", "Paige", "Pamela",
+  "Patricia", "Paula", "Pearl", "Penny", "Phoebe", "Pippa", "Polly", "Priscilla",
+  "Rachel", "Rebecca", "Rita", "Robyn", "Rosa", "Rose", "Rosie", "Ruby", "Ruth",
+  "Sabrina", "Sadie", "Sally", "Samantha", "Sandra", "Sara", "Sarah", "Selma",
+  "Shirley", "Sophia", "Stella", "Susan", "Sylvia", "Tamsin", "Tara", "Tess", "Thea",
+  "Tilly", "Tina", "Trudy", "Una", "Ursula", "Vanessa", "Veda", "Vera", "Violet",
+  "Vivian", "Wanda", "Wendy", "Willow", "Yvonne", "Zara", "Zoe",
+]

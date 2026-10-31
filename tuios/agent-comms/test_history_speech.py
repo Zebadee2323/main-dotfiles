@@ -17,14 +17,14 @@ import agent_comms as app
 import message_history
 import speech
 import tuios_context
-from test_agent_comms import Fixture, SCRIPT
+from test_agent_comms import Fixture, SCRIPT, write_config
 
 
 class HistoryTests(Fixture):
     def test_accepted_messages_persist_and_print_from_any_directory_while_offline(self):
         server, _ = self.start_server()
-        for identity, text in (("a", "first"), ("b", "second"), ("a", "third")):
-            result = self.transport_send(identity, text, "[warm] " + text)
+        for name, text in (("Alice", "first"), ("Bob", "second"), ("Alice", "third")):
+            result = self.transport_send(name, text, "[warm] " + text)
             self.assertEqual(result.returncode, 0, result.stderr)
         server.kill()
         server.wait(timeout=5)
@@ -36,11 +36,21 @@ class HistoryTests(Fixture):
         self.assertEqual(records[-1]["tts"], "[warm] third")
         self.assertIn("created_at", records[-1])
         self.assertEqual(len({record["uid"] for record in records}), 2)
-        filtered = self.cli("history", "--id", "a")
-        self.assertIn("Alice", filtered.stdout)
-        self.assertIn("first", filtered.stdout)
-        self.assertIn("third", filtered.stdout)
-        self.assertNotIn("Bob", filtered.stdout)
+        self.assertEqual(records[-1]["id"], "Alice")
+        self.assertEqual(records[-1]["epoch"], self.sender("Alice")["epoch"])
+        for args in (("--name", "Alice"), ("--id", "Alice")):
+            with self.subTest(args=args):
+                filtered = self.cli("history", *args)
+                self.assertEqual(filtered.returncode, 0, filtered.stderr)
+                self.assertIn("Alice", filtered.stdout)
+                self.assertIn("first", filtered.stdout)
+                self.assertIn("third", filtered.stdout)
+                self.assertNotIn("Bob", filtered.stdout)
+                self.assertEqual("deprecated" in filtered.stderr, args[0] == "--id")
+        epoch = self.sender("Alice")["epoch"]
+        self.assertEqual(len(json.loads(self.cli("history", "--epoch", epoch, "--json").stdout)), 3)
+        self.assertEqual(json.loads(self.cli("history", "--epoch", "0" * 16, "--json").stdout), [])
+        self.assertEqual(self.cli("history", "--name", "Alice", "--id", "Alice").returncode, 2)
         if os.name != "nt":
             self.assertEqual((self.paths.state / "history.jsonl").stat().st_mode & 0o777, 0o600)
 
@@ -80,15 +90,17 @@ class HistoryTests(Fixture):
 
     def test_rejected_messages_do_not_enter_history(self):
         self.start_server()
-        _, stream = self.request("send", id="unknown", msg="rejected")
-        self.assertFalse(json.loads(stream.readline())["ok"])
+        _, stream = self.request("send", **{**self.sender("Alice"), "name": "Unknown"}, msg="rejected")
+        reply = json.loads(stream.readline())
+        self.assertFalse(reply["ok"])
+        self.assertTrue(reply.get("context_mismatch"))
         self.assertEqual(json.loads(self.cli("history", "--json").stdout), [])
 
     def test_history_failure_rejects_instead_of_accepting_an_unrecorded_message(self):
         self.start_server()
         self.paths.state.mkdir(exist_ok=True)  # Lifecycle logging creates state at startup.
         (self.paths.state / "history.jsonl").mkdir()
-        _, stream = self.request("send", id="a", msg="must not disappear")
+        _, stream = self.request("send", **self.sender("Alice"), msg="must not disappear")
         result = json.loads(stream.readline())
         self.assertFalse(result["ok"])
         self.assertIn("not accepted", result["error"])
@@ -98,7 +110,7 @@ class HistoryTests(Fixture):
     def test_explicit_display_and_tts_introductions_are_recorded_without_rewriting(self):
         self.start_server()
         source = {"session_name": "other work", "workspace": 3, "pane_id": "pane", "introduce": True}
-        _, stream = self.request("send", id="a", msg="Alice here, of the other work session. Readable update",
+        _, stream = self.request("send", **self.sender("Alice"), msg="Alice here, of the other work session. Readable update",
                                  tts="Alice here, of the other work session. Spoken update", source=source)
         self.assertTrue(json.loads(stream.readline())["ok"])
         records = json.loads(self.cli("history", "--session", "other work", "--json").stdout)
@@ -138,7 +150,7 @@ class HistoryTests(Fixture):
         self.paths.config.write_text('history_size = 12\n' + self.paths.config.read_text())
         server, _ = self.start_server()
         for index in range(15):
-            _, stream = self.request("send", id="a", msg=str(index))
+            _, stream = self.request("send", **self.sender("Alice"), msg=str(index))
             self.assertTrue(json.loads(stream.readline())["ok"])
         server.kill()
         server.wait(timeout=5)
@@ -274,7 +286,9 @@ class WatcherIntegrationTests(Fixture, unittest.IsolatedAsyncioTestCase):
         self.addCleanup(usage_patch.stop)
 
     async def test_multiple_watchers_generate_once_and_share_audio_timed_captions(self):
-        self.paths.config.write_text('display_seconds = 0.1\n[identities.a]\nname="Alice"\neleven_labs_voice_id="test-voice"\n')
+        write_config(self.paths.config, 'display_seconds = 0.1\n', voices=(
+            '[voice_groups.main.voices.voice_f]\ngender = "female"\neleven_labs_voice_id = "test-voice"\n'
+            '[voice_groups.main.voices.voice_m]\ngender = "male"\neleven_labs_voice_id = ""\n'))
         self.start_server()
         lines = asyncio.Queue()
         paths = []
@@ -301,7 +315,7 @@ class WatcherIntegrationTests(Fixture, unittest.IsolatedAsyncioTestCase):
                 for _ in range(2):
                     self.assertIn("idle", await asyncio.wait_for(lines.get(), 3))
                 reader, writer, _ = await app.connect(self.paths, "watch")
-                await app.rpc(self.paths, "send", id="a", msg="A readable message with enough words for several dock caption pages.", tts="[warm] A spoken message.")
+                await app.rpc(self.paths, "send", **self.sender("Alice"), msg="A readable message with enough words for several dock caption pages.", tts="[warm] A spoken message.")
                 while True:
                     message = (await app.read_frame(reader))["message"]
                     if message and message.get("phase") == "displaying":
@@ -404,7 +418,7 @@ class WatcherIntegrationTests(Fixture, unittest.IsolatedAsyncioTestCase):
     async def test_claim_is_exclusive_and_failed_speech_falls_back(self):
         self.start_server()
         reader, writer, _ = await app.connect(self.paths, "watch")
-        await app.rpc(self.paths, "send", id="a", msg="hello")
+        await app.rpc(self.paths, "send", **self.sender("Alice"), msg="hello")
         active = (await app.read_frame(reader))["message"]
         claim = await app.rpc(self.paths, "claim-speech", uid=active["uid"])
         self.assertTrue(claim["claimed"])

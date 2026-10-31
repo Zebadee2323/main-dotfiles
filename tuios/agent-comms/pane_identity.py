@@ -1,21 +1,24 @@
-"""Durable pane/shell bindings and conservative, owner-scoped garbage collection."""
+"""Durable pane/shell bindings and conservative, owner-scoped garbage collection.
+
+Bindings live in the allocation store (allocation.py); this module derives the
+verified owner key, prunes confirmed-absent owners, and maintains pane titles.
+Pruned or cleared bindings never return their names to the name bag.
+"""
 import hashlib
 import json
-import logging
-import math
 import os
+import re
 import subprocess
 import time
 
+import allocation
 import tuios_context
 import shell_identity
 
 GRACE_SECONDS = 7 * 24 * 3600
 SCAN_INTERVAL = 3600
 
-
-class MissingIdentityError(ValueError):
-    """The caller has no usable binding; a checked context lookup can recover it."""
+MissingIdentityError = allocation.MissingBinding
 
 
 def owner(env=None):
@@ -60,176 +63,128 @@ def prune(state, daemon, own, live, now):
         elif "missing_since" not in record:
             record["missing_since"] = now
         elif now - record["missing_since"] >= GRACE_SECONDS:
-            del state["bindings"][key]
+            allocation.retire_prefix(state, state["bindings"].pop(key))
 
 
-def timestamp(value):
-    return type(value) in (int, float) and math.isfinite(value) and value >= 0
-
-
-def reclaim_absent(state, daemon, own, live, eligible):
-    """Under roster pressure, release one absent pane from a fresh full inventory."""
-    if live is None or own not in live:
-        return False
-    candidates = [(record.get("missing_since", float("inf")), key)
-                  for key, record in state["bindings"].items()
-                  if record["daemon"] == daemon and record["pane_id"] not in live
-                  and record["id"] in eligible]
-    if not candidates:
-        return False
-    _, key = min(candidates)
-    record = state["bindings"].pop(key)
-    logging.getLogger("agent-comms").info(
-        "Reclaimed identity %s from absent pane %s because the roster was full",
-        record["id"], record["pane_id"])
-    return True
-
-
-def read_state(filename, error):
-    try:
-        state = json.loads(filename.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        state = {"version": 1, "bindings": {}, "scanned": {}}
-    except (ValueError, UnicodeError):
-        raise error(f"Corrupt pane identity mapping: {filename}. Repair it explicitly.") from None
-    if (not isinstance(state, dict) or state.get("version") != 1
-            or not isinstance(state.get("bindings"), dict) or not isinstance(state.get("scanned"), dict)
-            or any(not isinstance(k, str) or not timestamp(v) for k, v in state["scanned"].items())
-            or any(not isinstance(k, str) or not isinstance(r, dict)
-                   or any(not isinstance(r.get(f), str) for f in ("daemon", "pane_id", "id"))
-                   or ("missing_since" in r and not timestamp(r["missing_since"]))
-                   for k, r in state["bindings"].items())):
-        raise error(f"Invalid pane identity mapping: {filename}.")
-    return state
+def store(paths, *, lock, atomic_json, private_dir=None):
+    return allocation.Store(paths.state, lock=lock, atomic_json=atomic_json, private_dir=private_dir)
 
 
 def clear_all(paths, *, private_dir, lock, atomic_json, error):
-    """Administrative reset across all daemons, serialized with pane allocation."""
-    directory = private_dir(paths.state)
-    filename = directory / "pane-identities.json"
-    with lock(directory / "pane-identities.lock"):
-        state = read_state(filename, error)
+    """Administrative clear of every owner binding. Bags, generation, and epoch stay."""
+    def operation(state):
+        if state is None:
+            return {"cleared": 0}
         count = len(state["bindings"])
-        atomic_json(filename, {"version": 1, "bindings": {}, "scanned": {}})
-    return {"cleared": count}
+        for record in state["bindings"].values():
+            allocation.retire_prefix(state, record)
+        state["bindings"], state["scanned"] = {}, {}
+        return {"cleared": count}
+    try:
+        return store(paths, lock=lock, atomic_json=atomic_json, private_dir=private_dir).update(operation)
+    except allocation.AllocationError as exc:
+        raise error(str(exc)) from None
 
 
-def resolve(paths, config, *, private_dir, lock, atomic_json, draw_id, error, allocate=True, clear=False, env=None,
-            eligible_ids=None):
-    identity = owner(env)
-    key, daemon, pane = identity
+def lookup(paths, env=None):
+    """Read-only (epoch, binding) for the verified owner; never creates or locks files."""
+    key = owner(env)[0]
+    return allocation.Store(paths.state, lock=None, atomic_json=None).binding(key)
+
+
+def resolve(paths, config, *, private_dir, lock, atomic_json, error, clear=False, env=None, rng=None):
+    """Return the owner's binding (allocating on first use) as (epoch, record)."""
+    key, daemon, pane = owner(env)
 
     def live_owners():
         if daemon.startswith("shell:"):
             return shell_identity.inventory()
         return inventory(env=env) if env is not None else inventory()
 
-    # Atomic replacement makes a lock-free read safe. Sending must never mkdir,
-    # chmod, or open a lock file in the listener's private state directory.
-    directory = private_dir(paths.state) if allocate else paths.state
-    filename = directory / "pane-identities.json"
-    if not allocate:
-        saved = read_state(filename, error)["bindings"].get(key)
-        if saved is None or saved["id"] not in config["identities"]:
-            raise MissingIdentityError("Pane has no current identity.")
-        return saved["id"]
-
-    with lock(directory / "pane-identities.lock"):
-        state = read_state(filename, error)
+    def operation(state):
         if clear:
-            saved = state["bindings"].pop(key, None)
+            saved = state["bindings"].pop(key, None) if state is not None else None
             if saved is not None:
-                atomic_json(filename, state)
-            return {"cleared": saved is not None, "id": saved["id"] if saved else None}
-        saved = state["bindings"].get(key)
+                allocation.retire_prefix(state, saved)
+            return {"cleared": saved is not None, "name": saved["name"] if saved else None}
         now = time.time()
-        scanned = False
-        live = None
         if now - state["scanned"].get(daemon, 0) >= SCAN_INTERVAL:
-            live = live_owners()
-            scanned = True
-            prune(state, daemon, pane, live, now)
+            prune(state, daemon, pane, live_owners(), now)
             # Throttle failures too; never retry a forbidden query via another route.
             state["scanned"][daemon] = now
-        if saved is None or saved["id"] not in config["identities"]:
-            eligible = set(config["identities"]) if eligible_ids is None else set(eligible_ids)
-            used = {r["id"] for k, r in state["bindings"].items() if k != key}
-            if not eligible - used:
-                # Bypass the hourly cache only for allocation pressure. Never
-                # retry a failed/forbidden inventory within the same lookup.
-                if not scanned:
-                    live = live_owners()
-                    prune(state, daemon, pane, live, now)
-                    state["scanned"][daemon] = now
-                reclaim_absent(state, daemon, pane, live, eligible)
-                used = {r["id"] for k, r in state["bindings"].items() if k != key}
-            if not eligible - used:
-                atomic_json(filename, state)
-                raise error("No unassigned pane identities remain. Add identities or wait for confirmed stale bindings to be pruned.")
-            for _ in range(2 * len(eligible)):
-                selected = draw_id(paths, config)
-                if selected not in used:
-                    break
-            else:
-                raise error("Could not allocate a free pane identity.")
-            title_prefix = saved.get("title_prefix") if saved else None
-            saved = {"daemon": daemon, "pane_id": pane, "id": selected}
-            if isinstance(title_prefix, str):
-                saved["title_prefix"] = title_prefix
-            state["bindings"][key] = saved
+        saved = state["bindings"].get(key)
+        if saved is None:
+            saved = allocation.allocate(state, config, target.rng, key=key, daemon=daemon, pane=pane)
         saved.pop("missing_since", None)
-        atomic_json(filename, state)
-        return saved["id"]
+        return state["epoch"], dict(saved)
+
+    target = store(paths, lock=lock, atomic_json=atomic_json, private_dir=private_dir)
+    if rng is not None:
+        target.rng = rng
+    try:
+        return target.update(operation, config=None if clear else config)
+    except allocation.AllocationError as exc:
+        raise error(str(exc)) from None
 
 
-def prefixed_title(title, prefix, previous=None, names=()):
+def title_names(config, retired=()):
+    """Recognize generated-name title prefixes without touching unrelated labels."""
+    bases = "|".join(sorted((re.escape(name) for name, _ in config.get("names", ())), key=len, reverse=True))
+    pattern = re.compile(rf"\[(?:{bases})(?:[2-9]|[1-9][0-9]+)?\] ") if bases else None
+    return pattern, tuple(retired)
+
+
+def prefixed_title(title, prefix, previous=None, names=(), pattern=None):
     """Normalize known agent prefixes, preserving unrelated bracketed labels."""
-    prefixes = {prefix, *(f"[{name}] " for name in names)}
+    prefixes = {prefix, *(names or ())}
     if previous:
         prefixes.add(previous)
     while True:
         matched = next((p for p in prefixes if p and title.startswith(p)), None)
+        if matched is None and pattern is not None:
+            found = pattern.match(title)
+            matched = found.group(0) if found else None
         if matched is None:
             break
         title = title[len(matched):]
     return prefix + title
 
 
-def update_title(paths, name, source, *, private_dir, lock, atomic_json, run=None, env=None, names=()):
-    """Best-effort identity prefix over the pane's live terminal title."""
+def update_title(paths, name, source, *, config, private_dir, lock, atomic_json, run=None, env=None):
+    """Best-effort name prefix over the pane's live terminal title."""
     env = os.environ if env is None else env
     if env.get("TUIOS_ENV") != "1" or "pane_title" not in source:
         return
-    identity = owner(env)
+    key, _, pane = owner(env)
     run = subprocess.run if run is None else run
-    key, _, pane = identity
-    directory = private_dir(paths.state)
-    filename = directory / "pane-identities.json"
+
+    def operation(state):
+        saved = (state or {}).get("bindings", {}).get(key)
+        if saved is None or saved["name"] != name:
+            raise ValueError("Pane binding changed before its name could be shown.")
+        # Re-read under the lock so concurrent context calls cannot stack prefixes.
+        result = run([tuios_context.executable(env), "get-window", pane, "-s", env["TUIOS_SESSION"], "--json"],
+                     capture_output=True, encoding="utf-8", timeout=2, check=True, env=env)
+        window = json.loads(result.stdout)
+        identifiers = [window[field] for field in ("id", "window_id") if field in window]
+        if window.get("success") is not True or not identifiers or any(value != pane for value in identifiers):
+            raise ValueError("Cannot verify the caller pane's current name.")
+        title = window.get("title")
+        if not isinstance(title, str):
+            raise ValueError("Pane has no readable terminal title.")
+        custom = window.get("custom_name", "")
+        if not isinstance(custom, str):
+            raise ValueError("Pane has no readable custom name.")
+        prefix = f"[{name}] "
+        previous = saved.get("title_prefix")
+        pattern, retired = title_names(config, state.get("retired_title_prefixes", ()))
+        updated = prefixed_title(title, prefix, previous if isinstance(previous, str) else None, retired, pattern)
+        if updated != custom:
+            run([tuios_context.executable(env), "set-window", "-s", env["TUIOS_SESSION"], "-w", pane, "--name", updated],
+                capture_output=True, encoding="utf-8", timeout=2, check=True, env=env)
+        saved["title_prefix"] = prefix
+
     try:
-        with lock(directory / "pane-identities.lock"):
-            state = json.loads(filename.read_text(encoding="utf-8"))
-            saved = state["bindings"][key]
-            # Re-read under the lock so concurrent context calls cannot stack prefixes.
-            result = run([tuios_context.executable(env), "get-window", pane, "-s", env["TUIOS_SESSION"], "--json"],
-                         capture_output=True, encoding="utf-8", timeout=2, check=True, env=env)
-            window = json.loads(result.stdout)
-            identifiers = [window[field] for field in ("id", "window_id") if field in window]
-            if window.get("success") is not True or not identifiers or any(value != pane for value in identifiers):
-                raise ValueError("Cannot verify the caller pane's current name.")
-            title = window.get("title")
-            if not isinstance(title, str):
-                raise ValueError("Pane has no readable terminal title.")
-            custom = window.get("custom_name", "")
-            if not isinstance(custom, str):
-                raise ValueError("Pane has no readable custom name.")
-            prefix = f"[{name}] "
-            previous = saved.get("title_prefix")
-            updated = prefixed_title(title, prefix, previous if isinstance(previous, str) else None, names)
-            if updated != custom:
-                run([tuios_context.executable(env), "set-window", "-s", env["TUIOS_SESSION"], "-w", pane, "--name", updated],
-                    capture_output=True, encoding="utf-8", timeout=2, check=True, env=env)
-            saved["title_prefix"] = prefix
-            saved.pop("title_name", None)  # Retire the previous full-name ownership scheme.
-            atomic_json(filename, state)
+        store(paths, lock=lock, atomic_json=atomic_json, private_dir=private_dir).update(operation)
     except subprocess.SubprocessError:
         raise ValueError("Pane naming failed or was not permitted; no retry attempted.") from None

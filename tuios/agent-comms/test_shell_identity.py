@@ -4,13 +4,15 @@ import json
 import os
 import subprocess
 import sys
+import time
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 import agent_comms as app
+import allocation
 import pane_identity
 import shell_identity as shell
-from test_agent_comms import Fixture, ROOT
+from test_agent_comms import Fixture, ROOT, TEST_PANE, seed_binding
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -73,16 +75,19 @@ class ShellBindingTests(Fixture):
         with patch.object(shell, 'inventory', return_value={env[shell.ENV_KEY], other[shell.ENV_KEY]}), \
                 patch.object(pane_identity, 'inventory', side_effect=AssertionError('tuios called')):
             first = app.identify(self.paths, config, env)
+            self.assertEqual(set(first), {'id', 'name', 'epoch', 'prefix'})
             self.assertEqual(first['prefix'], '')
             self.assertEqual(first, app.identify(self.paths, app.load_config(self.paths.config), env))
             second = app.identify(self.paths, config, other)
-            self.assertNotEqual(first['id'], second['id'])
-            self.assertEqual(app.pane_binding(self.paths, config, allocate=False, env=env), first['id'])
+            self.assertNotEqual(first['name'], second['name'])
+            epoch, binding = app.pane_binding(self.paths, config, allocate=False, env=env)
+            self.assertEqual((epoch, binding['name']), (first['epoch'], first['name']))
             cleared = app.pane_binding(self.paths, config, clear=True, env=env)
-            self.assertEqual(cleared, {'cleared': True, 'id': first['id']})
-            with self.assertRaisesRegex(app.ContextMismatch, 'no current identity'):
+            self.assertEqual(cleared, {'cleared': True, 'name': first['name']})
+            with self.assertRaisesRegex(app.ContextMismatch, 'no current agent name'):
                 app.pane_binding(self.paths, config, allocate=False, env=env)
             self.assertEqual(app.identify(self.paths, config, other), second)
+            self.assertNotEqual(app.identify(self.paths, config, env)['name'], first['name'])
 
     def test_listener_derives_owner_and_ignores_its_own_tuios_environment(self):
         with patch.dict(os.environ, {'TUIOS_ENV': '1', 'TUIOS_PANE_ID': 'listener'}), \
@@ -106,19 +111,43 @@ class ShellBindingTests(Fixture):
                 asyncio.run(app.listener_context(self.paths))
             rpc.assert_not_called()
 
-    def test_shell_pressure_reclaims_dead_shell_but_never_live_or_tuios(self):
+    def test_dead_shell_is_pruned_after_grace_without_recycling_but_never_live_or_tuios(self):
         config = app.load_config(self.paths.config)
+        state_file = self.paths.state / allocation.STATE_FILE
+        tuios_env = {**TEST_PANE, 'TUIOS_PANE_ID': 'tuios-pane'}
+        seed_binding(self.paths, tuios_env, 'Alice')
         owners = [f'{i}:' + str(i) * 64 for i in range(1, 5)]
-        live = set(owners[:3])
-        with patch.object(shell, 'inventory', side_effect=lambda: live), \
+        live = set(owners)
+
+        def rescan(missing_since=None):
+            state = json.loads(state_file.read_text())
+            state['scanned'] = {daemon: when for daemon, when in state['scanned'].items()
+                                if not daemon.startswith('shell:')}
+            if missing_since is not None:
+                state['bindings'][pane_identity.owner({shell.ENV_KEY: owners[0]})[0]]['missing_since'] = missing_since
+            app.atomic_json(state_file, state)
+
+        with patch.object(shell, 'inventory', side_effect=lambda: set(live)), \
                 patch.object(pane_identity, 'inventory', side_effect=AssertionError('tuios called')):
-            ids = [app.identify(self.paths, config, {shell.ENV_KEY: o})['id'] for o in owners[:3]]
-            live.add(owners[3])
-            with self.assertRaisesRegex(app.CommsError, 'No unassigned'):
-                app.identify(self.paths, config, {shell.ENV_KEY: owners[3]})
+            names = [app.identify(self.paths, config, {shell.ENV_KEY: o})['name'] for o in owners]
+            # Names are unbounded: the fourth shell gets a numbered name, nothing is reclaimed.
+            self.assertEqual(len(set(names)), 4)
+            self.assertNotIn('Alice', names)
             live.remove(owners[0])
-            new = app.identify(self.paths, config, {shell.ENV_KEY: owners[3]})
-            self.assertEqual(new['id'], ids[0])
+            rescan()
+            app.identify(self.paths, config, {shell.ENV_KEY: owners[1]})
+            bindings = json.loads(state_file.read_text())['bindings']
+            self.assertEqual(len(bindings), 5)
+            rescan(time.time() - pane_identity.GRACE_SECONDS - 1)
+            before = json.loads(state_file.read_text())
+            app.identify(self.paths, config, {shell.ENV_KEY: owners[1]})
+            after = json.loads(state_file.read_text())
+            self.assertEqual({record['name'] for record in after['bindings'].values()},
+                             {'Alice', *names[1:]})
+            self.assertEqual((after['names'], after['voices']), (before['names'], before['voices']))
+            live.add(owners[0])
+            self.assertNotIn(app.identify(self.paths, config, {shell.ENV_KEY: owners[0]})['name'], names)
+        self.assertEqual(app.pane_binding(self.paths, config, allocate=False, env=tuios_env)[1]['name'], 'Alice')
 
 
 @unittest.skipIf(os.name == 'nt', 'integration uses a persistent POSIX shell')
@@ -171,15 +200,18 @@ sys.exit(app.main(sys.argv[2:]))
         self.assertEqual(status, 0, output)
         first = json.loads(output)
         self.assertEqual(first['prefix'], '')
+        self.assertEqual(set(first), {'id', 'name', 'epoch', 'prefix'})
         self.assertEqual(self.call(caller, 'context'), (0, output))
         status, output = self.call(other, 'context')
         self.assertEqual(status, 0, output)
-        self.assertNotEqual(first['id'], json.loads(output)['id'])
-        status, output = self.call(caller, 'send', '--id', first['id'], '--msg', 'Ready.')
+        self.assertNotEqual(first['name'], json.loads(output)['name'])
+        status, output = self.call(caller, 'send', '--name', first['name'], '--epoch', first['epoch'], '--msg', 'Ready.')
         self.assertEqual(status, 0, output)
-        status, output = self.call(caller, 'send', '--id', 'stale', '--msg', 'Wrong.')
+        self.assertIn('Message ID:', output)
+        status, output = self.call(caller, 'send', '--name', 'Stale', '--epoch', first['epoch'], '--msg', 'Wrong.')
         self.assertEqual(status, 1, output)
-        self.assertIn('Fresh context:', output)
+        self.assertIn('Name mismatch', output)
+        self.assertIn('Fresh context: ' + json.dumps(first, separators=(',', ':')), output)
         self.assertEqual(len(json.loads(self.cli('history', '--json').stdout)), 1)
         self.cleanup_process(self.server)
         self.start_server()
@@ -188,7 +220,7 @@ sys.exit(app.main(sys.argv[2:]))
         self.assertEqual(json.loads(output), first)
         status, output = self.call(caller, 'context', '--clear')
         self.assertEqual(status, 0, output)
-        self.assertEqual(json.loads(output), {'cleared': True, 'id': first['id']})
-        status, output = self.call(caller, 'send', '--id', first['id'], '--msg', 'Stale.')
+        self.assertEqual(json.loads(output), {'cleared': True, 'name': first['name'], 'id': first['name']})
+        status, output = self.call(caller, 'send', '--name', first['name'], '--epoch', first['epoch'], '--msg', 'Stale.')
         self.assertEqual(status, 1, output)
-        self.assertIn('no current identity', output)
+        self.assertIn('no current agent name', output)

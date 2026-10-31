@@ -19,7 +19,7 @@ SGR = re.compile(r"\x1b\[[0-9;]*m")
 
 class DeliveryRenderingTests(unittest.TestCase):
     def setUp(self):
-        self.message = {"id": "a", "name": "Alice", "msg": "Readable caption", "phase": "displaying"}
+        self.message = {"id": "Alice", "name": "Alice", "msg": "Readable caption", "phase": "displaying"}
 
     def test_real_audio_glows_behind_unchanged_text(self):
         visualizer = {"levels": base64.b64encode(bytes(range(100))).decode(), "step": 0.02}
@@ -136,7 +136,7 @@ class DeliveryPresentationTests(unittest.IsolatedAsyncioTestCase):
         for vfx in (True, False):
             with self.subTest(vfx=vfx):
                 now = time.monotonic()
-                message = {"id": "a", "name": "Alice", "msg": "Readable caption", "phase": "displaying",
+                message = {"id": "Alice", "name": "Alice", "msg": "Readable caption", "phase": "displaying",
                            "started_at": now - 1, "duration": 10}
                 state = {"message": message, "arrived": now - 1, "changed": asyncio.Event()}
                 output = []

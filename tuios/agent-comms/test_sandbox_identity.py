@@ -39,7 +39,8 @@ print(json.dumps(data))
         self.env['PATH'] = str(bin_dir) + os.pathsep + self.env.get('PATH', '')
         # The listener deliberately has no pane of its own.
         self.start_server()
-        self.env.update(TUIOS_ENV='1', TUIOS_PANE_ID='caller', TUIOS_SESSION='test')
+        self.env.update(TUIOS_ENV='1', TUIOS_PANE_ID='caller', TUIOS_SESSION='test',
+                        TUIOS_SOCKET='/nonexistent/agent-comms-test.sock')
 
     def restricted_cli(self, *args):
         # Enforce the filesystem boundary in a separate client process. The
@@ -69,93 +70,98 @@ sys.exit(app.main(sys.argv[2:]))
         return subprocess.run([sys.executable, '-c', script, str(ROOT), *args], env=self.env,
                               capture_output=True, text=True, timeout=10)
 
-    def test_lookup_send_and_repeat_work_without_any_client_state_writes(self):
-        first = self.restricted_cli('context')
-        self.assertEqual(first.returncode, 0, first.stderr)
-        identity = json.loads(first.stdout)
-        self.assertEqual(set(identity), {'id', 'name', 'prefix'})
-        saved = json.loads((self.paths.state / 'pane-identities.json').read_text())
-        self.assertEqual(next(iter(saved['bindings'].values()))['pane_id'], 'caller')
-        second = self.restricted_cli('context')
-        self.assertEqual(second.returncode, 0, second.stderr)
-        self.assertEqual(json.loads(second.stdout), identity)
-        sent = self.restricted_cli('send', '--id', identity['id'], '--msg', 'Ready.')
-        self.assertEqual(sent.returncode, 0, sent.stderr)
-        history = self.cli('history', '--json')
-        self.assertEqual(json.loads(history.stdout)[-1]['msg'], 'Ready.')
-        wrong = self.restricted_cli('send', '--id', 'stale', '--msg', 'Wrong.')
-        self.assertEqual(wrong.returncode, 1)
-        self.assertIn('Identity mismatch', wrong.stderr)
-        line = next(line for line in wrong.stderr.splitlines() if line.startswith('agent-comms: Fresh context: '))
-        self.assertEqual(json.loads(line.removeprefix('agent-comms: Fresh context: ')), identity)
-        self.assertEqual(len(json.loads(self.cli('history', '--json').stdout)), 1)
+    def state(self):
+        return json.loads((self.paths.state / 'allocation.json').read_text())
 
-    def test_exhausted_listener_reclaims_absent_pane_without_client_state_writes(self):
-        identities = []
-        for pane in ('one', 'two', 'three'):
-            self.env['TUIOS_PANE_ID'] = pane
-            result = self.restricted_cli('context')
-            self.assertEqual(result.returncode, 0, result.stderr)
-            identities.append(json.loads(result.stdout)['id'])
-        self.assertEqual(len(set(identities)), 3)
-        # Fake tuios reports only the current pane in its full inventory.
-        self.env['TUIOS_PANE_ID'] = 'four'
+    def context(self):
         result = self.restricted_cli('context')
         self.assertEqual(result.returncode, 0, result.stderr)
-        identity = json.loads(result.stdout)
-        self.assertIn(identity['id'], identities)
-        saved = json.loads((self.paths.state / 'pane-identities.json').read_text())
-        self.assertEqual(len(saved['bindings']), 3)
-        self.assertIn('four', {record['pane_id'] for record in saved['bindings'].values()})
-        repeat = self.restricted_cli('context')
-        self.assertEqual(repeat.returncode, 0, repeat.stderr)
-        self.assertEqual(json.loads(repeat.stdout), identity)
+        return json.loads(result.stdout)
+
+    def test_lookup_send_and_repeat_work_without_any_client_state_writes(self):
+        identity = self.context()
+        self.assertEqual(set(identity), {'id', 'name', 'epoch', 'prefix'})
+        self.assertEqual(identity['id'], identity['name'])
+        saved = self.state()
+        self.assertEqual(saved['epoch'], identity['epoch'])
+        self.assertEqual(next(iter(saved['bindings'].values()))['pane_id'], 'caller')
+        self.assertEqual(self.context(), identity)
+        sent = self.restricted_cli('send', '--name', identity['name'], '--epoch', identity['epoch'], '--msg', 'Ready.')
+        self.assertEqual(sent.returncode, 0, sent.stderr)
+        self.assertRegex(sent.stdout, r'Message ID: [0-9a-f]{32}')
+        history = self.cli('history', '--json')
+        self.assertEqual(json.loads(history.stdout)[-1]['msg'], 'Ready.')
+        for arguments, error in ((('--name', 'Stale', '--epoch', identity['epoch']), 'Name mismatch'),
+                                 (('--name', identity['name'], '--epoch', '0' * 16), 'Epoch mismatch')):
+            with self.subTest(arguments=arguments):
+                wrong = self.restricted_cli('send', *arguments, '--msg', 'Wrong.')
+                self.assertEqual(wrong.returncode, 1)
+                self.assertIn(error, wrong.stderr)
+                line = next(line for line in wrong.stderr.splitlines() if line.startswith('agent-comms: Fresh context: '))
+                self.assertEqual(json.loads(line.removeprefix('agent-comms: Fresh context: ')), identity)
+        self.assertEqual(len(json.loads(self.cli('history', '--json').stdout)), 1)
+
+    def test_names_are_unbounded_without_reclaiming_or_client_state_writes(self):
+        names = []
+        for pane in ('one', 'two', 'three', 'four'):
+            self.env['TUIOS_PANE_ID'] = pane
+            names.append(self.context()['name'])
+        # Fake tuios reports only the current pane, but absent panes are still in their grace period.
+        self.assertEqual(set(names[:3]), {'Alice', 'Bob', 'Cleo'})
+        self.assertIn(names[3], {'Alice2', 'Bob2', 'Cleo2'})
+        saved = self.state()
+        self.assertEqual({record['pane_id']: record['name'] for record in saved['bindings'].values()},
+                         dict(zip(('one', 'two', 'three', 'four'), names)))
+        self.assertEqual(self.context()['name'], names[3])
 
     def test_server_rejects_arbitrary_environment_and_unknown_pane_without_allocation(self):
         for env in ({**{k: self.env[k] for k in app.PANE_ENV_KEYS if k in self.env}, 'PATH': '/bad'},
                     {'TUIOS_ENV': '1', 'TUIOS_SESSION': 'test'}):
             _, stream = self.request('context', pane_env=env)
             self.assertFalse(json.loads(stream.readline())['ok'])
-        self.assertFalse((self.paths.state / 'pane-identities.json').exists())
+        self.assertFalse((self.paths.state / 'allocation.json').exists())
 
     def test_clear_and_reallocate_without_client_state_writes(self):
-        first = self.restricted_cli('context')
-        self.assertEqual(first.returncode, 0, first.stderr)
-        identity = json.loads(first.stdout)
-        bag = (self.paths.state / 'bag.json').read_text()
+        identity = self.context()
+        before = self.state()
         cleared = self.restricted_cli('context', '--clear')
         self.assertEqual(cleared.returncode, 0, cleared.stderr)
-        self.assertEqual(json.loads(cleared.stdout), {'cleared': True, 'id': identity['id']})
-        self.assertEqual(json.loads((self.paths.state / 'pane-identities.json').read_text())['bindings'], {})
-        self.assertEqual((self.paths.state / 'bag.json').read_text(), bag)
+        self.assertEqual(json.loads(cleared.stdout), {'cleared': True, 'name': identity['name'], 'id': identity['name']})
+        after = self.state()
+        self.assertEqual(after['bindings'], {})
+        self.assertEqual((after['epoch'], after['names'], after['voices']),
+                         (before['epoch'], before['names'], before['voices']))
         repeated = self.restricted_cli('context', '--clear')
         self.assertEqual(repeated.returncode, 0, repeated.stderr)
-        self.assertEqual(json.loads(repeated.stdout), {'cleared': False, 'id': None})
-        sent = self.restricted_cli('send', '--id', identity['id'], '--msg', 'Ready.')
+        self.assertEqual(json.loads(repeated.stdout), {'cleared': False, 'name': None, 'id': None})
+        sent = self.restricted_cli('send', '--name', identity['name'], '--epoch', identity['epoch'], '--msg', 'Ready.')
         self.assertEqual(sent.returncode, 1)
-        self.assertIn('no current identity', sent.stderr)
-        lookup = self.restricted_cli('context')
-        self.assertEqual(lookup.returncode, 0, lookup.stderr)
-        self.assertEqual(set(json.loads(lookup.stdout)), {'id', 'name', 'prefix'})
+        self.assertIn('no current agent name', sent.stderr)
+        lookup = self.context()
+        self.assertEqual(set(lookup), {'id', 'name', 'epoch', 'prefix'})
+        # Cleared names stay spent.
+        self.assertNotEqual(lookup['name'], identity['name'])
+        self.assertEqual(lookup['epoch'], identity['epoch'])
 
     def test_admin_clear_all_invalidates_live_listener_bindings(self):
         identities = {}
         for pane in ('caller', 'other'):
             self.env['TUIOS_PANE_ID'] = pane
-            result = self.restricted_cli('context')
-            self.assertEqual(result.returncode, 0, result.stderr)
-            identities[pane] = json.loads(result.stdout)['id']
+            identities[pane] = self.context()
         cleared = self.cli('context', '--clear-all')
         self.assertEqual(cleared.returncode, 0, cleared.stderr)
         self.assertEqual(json.loads(cleared.stdout), {'cleared': 2})
+        fresh = set()
         for pane, identity in identities.items():
             self.env['TUIOS_PANE_ID'] = pane
-            sent = self.restricted_cli('send', '--id', identity, '--msg', 'Stale.')
+            sent = self.restricted_cli('send', '--name', identity['name'], '--epoch', identity['epoch'],
+                                       '--msg', 'Stale.')
             self.assertEqual(sent.returncode, 1)
-            self.assertIn('no current identity', sent.stderr)
-            lookup = self.restricted_cli('context')
-            self.assertEqual(lookup.returncode, 0, lookup.stderr)
-        self.assertEqual(len(json.loads((self.paths.state / 'pane-identities.json').read_text())['bindings']), 2)
+            self.assertIn('no current agent name', sent.stderr)
+            fresh.add(self.context()['name'])
+        self.assertEqual(len(self.state()['bindings']), 2)
+        self.assertFalse(fresh & {identity['name'] for identity in identities.values()})
+        self.assertEqual(len(json.loads(self.cli('history', '--json').stdout)), 0)
 
 
 class ContextClientTests(Fixture):
@@ -174,14 +180,14 @@ class ContextClientTests(Fixture):
         env = {'TUIOS_ENV': '1', 'TUIOS_PANE_ID': 'caller', 'TUIOS_SESSION': 'work'}
         source = {'session_name': 'work', 'workspace': 1, 'introduce': True,
                   'position': 'bottom-right', 'position_reference': 'workspace'}
-        identity = {'id': 'a', 'name': 'Alice', 'prefix': 'Alice here, of the work session.'}
+        identity = {'id': 'Alice', 'name': 'Alice', 'epoch': '0' * 16, 'prefix': 'Alice here, of the work session.'}
         with patch.dict(os.environ, env), patch.object(app, 'checked_context', return_value=source), \
-             patch.object(app, 'endpoint', return_value={'pane_identity': True}), \
+             patch.object(app, 'endpoint', return_value={'pane_identity': True, 'name_identity': True}), \
              patch.object(app, 'rpc', new_callable=AsyncMock, return_value={'identity': identity}):
             result = asyncio.run(app.listener_context(self.paths))
         self.assertEqual(result, {**identity, 'prefix':
                          'Alice here, in the work session, workspace 1, in the bottom-right.'})
-        app.validate_message(app.load_config(self.paths.config), 'a', result['prefix'] + ' Ready.', source=source)
+        app.validate_message(app.load_config(self.paths.config), 'Alice', result['prefix'] + ' Ready.', source=source)
 
     def test_launchd_path_discovers_homebrew_tuios_before_running_queries(self):
         import shutil

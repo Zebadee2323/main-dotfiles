@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import subprocess
 import unittest
@@ -7,6 +8,9 @@ from unittest.mock import AsyncMock, Mock, patch
 import agent_comms as app
 import tuios_context as context
 from test_agent_comms import Fixture
+
+EPOCH = "e" * 16
+DISPLAY = {"display_recipient": None, "role": None, "kind": None, "emotion": None, "reply_to": None}
 
 
 def pane(identity, x, y, width=40, height=20, workspace=1, **options):
@@ -92,7 +96,7 @@ class SpatialContextTests(unittest.TestCase):
                 source = self.inspect(current=current, attached=False)
                 self.assertEqual(source["position"], "top-right")
                 self.assertEqual(source["position_reference"], "workspace")
-                self.assertEqual(app.expected_prefix({"identities": {"a": {"name": "Alice"}}}, "a", source),
+                self.assertEqual(app.expected_prefix({}, "Alice", source),
                                  "Alice here, in the work session, "
                                  + ("workspace 1, " if current == 2 else "") + "in the top-right.")
 
@@ -111,7 +115,7 @@ class SpatialContextTests(unittest.TestCase):
                 self.assertFalse(source["introduce"])
                 self.assertNotIn("position", source)
                 self.assertNotIn("position_reference", source)
-                self.assertEqual(app.expected_prefix({"identities": {"a": {"name": "Alice"}}}, "a", source), "")
+                self.assertEqual(app.expected_prefix({}, "Alice", source), "")
 
     def test_hidden_sole_agent_requires_workspace_prefix_even_if_marked_focused(self):
         for options in ({"current": 2}, {"attached": False},
@@ -120,7 +124,7 @@ class SpatialContextTests(unittest.TestCase):
                 source = self.inspect(other_state="none", **options)
                 self.assertTrue(source["introduce"])
                 self.assertEqual(source["position_reference"], "workspace")
-                self.assertEqual(app.expected_prefix({"identities": {"a": {"name": "Alice"}}}, "a", source),
+                self.assertEqual(app.expected_prefix({}, "Alice", source),
                                  "Alice here, in the work session, "
                                  + ("workspace 1, " if options.get("current") == 2 else "") + "in the top-right.")
 
@@ -128,7 +132,7 @@ class SpatialContextTests(unittest.TestCase):
         source = self.inspect(other_state="none", current=2, geometry=False)
         self.assertTrue(source["introduce"])
         self.assertNotIn("position", source)
-        self.assertEqual(app.expected_prefix({"identities": {"a": {"name": "Alice"}}}, "a", source),
+        self.assertEqual(app.expected_prefix({}, "Alice", source),
                          "Alice here, of the work session.")
 
     def test_agents_on_other_workspaces_do_not_require_a_prefix(self):
@@ -158,11 +162,11 @@ class SpatialPrefixTests(Fixture):
         return app.load_config(self.paths.config)
 
     def test_relative_and_absolute_wording(self):
-        self.assertEqual(app.expected_prefix(self.config(), "a", self.source), "Alice here, to your top-right.")
+        self.assertEqual(app.expected_prefix(self.config(), "Alice", self.source), "Alice here, to your top-right.")
         for position, phrase in (("top-left", "in the top-left"), ("bottom", "at the bottom"),
                                  ("right", "on the right"), ("center", "in the center")):
             source = {**self.source, "position": position, "position_reference": "workspace"}
-            self.assertEqual(app.expected_prefix(self.config(), "a", source),
+            self.assertEqual(app.expected_prefix(self.config(), "Alice", source),
                              f"Alice here, in the work session, workspace 2, {phrase}.")
 
     def test_spatial_disabled_keeps_session_attribution_without_workspace_or_direction(self):
@@ -171,15 +175,16 @@ class SpatialPrefixTests(Fixture):
             with self.subTest(reference=reference):
                 source = {**self.source, "position_reference": reference, "workspace_name": "main"}
                 with patch.object(app, "checked_context", return_value=source), \
-                     patch.object(app, "pane_binding", return_value="a"):
+                     patch.object(app, "pane_binding", return_value=(EPOCH, {"name": "Alice"})), \
+                     patch.object(app, "update_pane_title"):
                     identity = app.identify(self.paths, config)
                 self.assertEqual(identity["prefix"], "Alice here, of the work session.")
                 message = identity["prefix"] + " Ready."
-                app.validate_message(config, "a", message, message, source)
+                app.validate_message(config, "Alice", message, message, source)
                 with self.assertRaises(app.ContextMismatch):
-                    app.validate_message(config, "a", "Alice here, to your top-right. Ready.", source=source)
-        self.assertEqual(app.expected_prefix(config, "a", {**self.source, "introduce": False}), "")
-        self.assertEqual(app.expected_prefix(config, "a", {}), "")
+                    app.validate_message(config, "Alice", "Alice here, to your top-right. Ready.", source=source)
+        self.assertEqual(app.expected_prefix(config, "Alice", {**self.source, "introduce": False}), "")
+        self.assertEqual(app.expected_prefix(config, "Alice", {}), "")
 
     def test_prefix_config_requires_table_and_boolean(self):
         original = self.paths.config.read_text()
@@ -198,20 +203,21 @@ class SpatialPrefixTests(Fixture):
         self.paths.config.write_text(original + '\n[prefix]\nspatial = false\n')
         self.start_server()
         text = "Alice here, of the work session. Ready."
-        _, stream = self.request("send", id="a", msg=text, tts=text, source=self.source)
+        _, stream = self.request("send", **self.sender("Alice"), msg=text, tts=text, source=self.source)
         self.assertTrue(json.loads(stream.readline())["ok"])
-        _, stream = self.request("send", id="a", msg="Alice here, to your top-right. Ready.", source=self.source)
+        _, stream = self.request("send", **self.sender("Alice"), msg="Alice here, to your top-right. Ready.",
+                                 source=self.source)
         self.assertFalse(json.loads(stream.readline())["ok"])
         self.assertEqual(json.loads(self.cli("history", "--json").stdout)[0]["msg"], text)
 
     def test_named_workspace_and_duplicate_introduction(self):
         source = {**self.source, "position_reference": "workspace", "workspace_name": "main"}
         prefix = "Alice here, in the work session, the main workspace, in the top-right."
-        self.assertEqual(app.expected_prefix(self.config(), "a", source), prefix)
-        app.validate_message(self.config(), "a", prefix + " Ready.", source=source)
+        self.assertEqual(app.expected_prefix(self.config(), "Alice", source), prefix)
+        app.validate_message(self.config(), "Alice", prefix + " Ready.", source=source)
         for expected in (prefix, ""):
             with self.assertRaises(app.CommsError):
-                app.check_prefix("a", expected, (expected + " " if expected else "") + prefix + " Ready.",
+                app.check_prefix(expected, (expected + " " if expected else "") + prefix + " Ready.",
                                  prefix + " Ready.")
 
     def test_single_workspace_omits_name_and_number_only(self):
@@ -219,7 +225,7 @@ class SpatialPrefixTests(Fixture):
             source = {**self.source, "position_reference": "workspace", "workspace_name": workspace_name}
             for count in (1, 2, None, True, "1"):
                 with self.subTest(workspace_name=workspace_name, count=count):
-                    prefix = app.expected_prefix(self.config(), "a", {**source, "workspace_count": count})
+                    prefix = app.expected_prefix(self.config(), "Alice", {**source, "workspace_count": count})
                     if type(count) is int and count == 1:
                         self.assertEqual(prefix, "Alice here, in the work session, in the top-right.")
                     else:
@@ -229,39 +235,44 @@ class SpatialPrefixTests(Fixture):
         self.start_server()
         source = {**self.source, "position_reference": "workspace", "workspace_count": 1}
         text = "Alice here, in the work session, in the top-right. Ready."
-        _, stream = self.request("send", id="a", msg=text, tts=text, source=source)
+        _, stream = self.request("send", **self.sender("Alice"), msg=text, tts=text, source=source)
         self.assertTrue(json.loads(stream.readline())["ok"])
 
     def test_invalid_position_falls_back_without_injecting_text(self):
-        self.assertEqual(app.expected_prefix(self.config(), "a", {**self.source, "position": "bad\ntext"}),
+        self.assertEqual(app.expected_prefix(self.config(), "Alice", {**self.source, "position": "bad\ntext"}),
                           "Alice here, of the work session.")
 
     def test_lone_agent_context_and_send_use_the_same_empty_prefix(self):
         source = SpatialContextTests().inspect(other_state="none")
         with patch.object(app, "checked_context", return_value=source), \
-             patch.object(app, "pane_binding", return_value="a"), \
+             patch.object(app, "pane_binding", return_value=(EPOCH, {"name": "Alice"})), \
+             patch.object(app, "caller_binding", return_value=(EPOCH, "Alice")), \
+             patch.object(app, "update_pane_title"), \
              patch.object(app.Paths, "resolve", return_value=self.paths), \
-             patch.object(app, "send", new=AsyncMock()) as send:
+             patch.object(app, "send", new=AsyncMock()) as send, patch("sys.stdout", io.StringIO()):
             identity = app.identify(self.paths, self.config())
-            self.assertEqual(identity, {"id": "a", "name": "Alice", "prefix": ""})
-            self.assertEqual(app.main(["send", "--id", "a", "--msg", "Ready."]), 0)
-            send.assert_awaited_once_with(self.paths, "a", "Ready.", None, source)
+            self.assertEqual(identity, {"id": "Alice", "name": "Alice", "epoch": EPOCH, "prefix": ""})
+            self.assertEqual(app.main(["send", "--name", "Alice", "--epoch", EPOCH, "--msg", "Ready."]), 0)
+            send.assert_awaited_once_with(self.paths, "Alice", EPOCH, "Ready.", None, source, DISPLAY)
         with self.assertRaisesRegex(app.CommsError, "Prefix mismatch"):
-            app.validate_message(self.config(), "a", "Alice here, to your top-right. Ready.", source=source)
+            app.validate_message(self.config(), "Alice", "Alice here, to your top-right. Ready.", source=source)
 
     def test_hidden_lone_agent_context_and_send_require_the_same_prefix(self):
         source = SpatialContextTests().inspect(other_state="none", current=2)
         prefix = "Alice here, in the work session, workspace 1, in the top-right."
         with patch.object(app, "checked_context", return_value=source), \
-                patch.object(app, "pane_binding", return_value="a"), \
+                patch.object(app, "pane_binding", return_value=(EPOCH, {"name": "Alice"})), \
+                patch.object(app, "caller_binding", return_value=(EPOCH, "Alice")), \
+                patch.object(app, "update_pane_title"), \
                 patch.object(app.Paths, "resolve", return_value=self.paths), \
-                patch.object(app, "send", new=AsyncMock()) as send:
-            self.assertEqual(app.identify(self.paths, self.config()), {"id": "a", "name": "Alice", "prefix": prefix})
+                patch.object(app, "send", new=AsyncMock()) as send, patch("sys.stdout", io.StringIO()):
+            self.assertEqual(app.identify(self.paths, self.config()),
+                             {"id": "Alice", "name": "Alice", "epoch": EPOCH, "prefix": prefix})
             text = prefix + " Ready."
-            self.assertEqual(app.main(["send", "--id", "a", "--msg", text, "--tts", text]), 0)
-            send.assert_awaited_once_with(self.paths, "a", text, text, source)
+            self.assertEqual(app.main(["send", "--name", "Alice", "--epoch", EPOCH, "--msg", text, "--tts", text]), 0)
+            send.assert_awaited_once_with(self.paths, "Alice", EPOCH, text, text, source, DISPLAY)
         with self.assertRaisesRegex(app.CommsError, "Prefix mismatch"):
-            app.validate_message(self.config(), "a", "Ready.", source=source)
+            app.validate_message(self.config(), "Alice", "Ready.", source=source)
 
     def test_duplicate_stale_and_markup_prefixed_introductions_are_rejected(self):
         expected = "Alice here, to your top-right."
@@ -272,26 +283,28 @@ class SpatialPrefixTests(Fixture):
             for text, prefix in ((introduction + " Ready.", ""),
                                  (expected + ' <break time="0.3s" /> ' + introduction + " Ready.", expected)):
                 with self.subTest(text=text), self.assertRaises(app.CommsError):
-                    app.check_prefix("a", prefix, text, text)
+                    app.check_prefix(prefix, text, text)
         for introduction in stale:
             with self.assertRaises(app.CommsError):
-                app.check_prefix("a", expected, introduction + " Ready.", expected + " Ready.")
+                app.check_prefix(expected, introduction + " Ready.", expected + " Ready.")
 
     def test_focus_or_geometry_change_rejects_before_network(self):
         source = {**self.source, "position": "bottom-left"}
         with patch.object(context, "context", return_value=source), patch.object(app, "send", new=AsyncMock()) as send:
-            prefix, checked = app.prefix_context(self.config(), "a")
-            with self.assertRaises(app.CommsError):
-                app.validate_message(self.config(), "a", "Alice here, to your top-right. Ready.", source=checked)
+            checked = app.checked_context()
+            prefix = app.expected_prefix(self.config(), "Alice", checked)
+            with self.assertRaises(app.ContextMismatch):
+                app.validate_message(self.config(), "Alice", "Alice here, to your top-right. Ready.", source=checked)
             self.assertEqual(prefix, "Alice here, to your bottom-left.")
             send.assert_not_called()
 
     def test_listener_accepts_spatial_prefix_unchanged_and_rejects_stale_one(self):
         self.start_server()
         text = "Alice here, to your top-right. Ready."
-        _, stream = self.request("send", id="a", msg=text, tts=text, source=self.source)
+        _, stream = self.request("send", **self.sender("Alice"), msg=text, tts=text, source=self.source)
         self.assertTrue(json.loads(stream.readline())["ok"])
-        _, stream = self.request("send", id="a", msg="Alice here, to your bottom-left. Ready.", source=self.source)
+        _, stream = self.request("send", **self.sender("Alice"), msg="Alice here, to your bottom-left. Ready.",
+                                 source=self.source)
         self.assertFalse(json.loads(stream.readline())["ok"])
         self.assertEqual(json.loads(self.cli("history", "--json").stdout)[0]["msg"], text)
 
@@ -299,7 +312,7 @@ class SpatialPrefixTests(Fixture):
         with patch.object(app, "endpoint", return_value={"prefix_policy": app.PREFIX_POLICY}), \
              patch.object(app, "rpc", new=AsyncMock()) as rpc:
             with self.assertRaisesRegex(app.CommsError, "predates spatial prefixes"):
-                asyncio.run(app.send(self.paths, "a", "Alice here, to your top-right. Ready.", source=self.source))
+                asyncio.run(app.send(self.paths, "Alice", EPOCH, "Alice here, to your top-right. Ready.", source=self.source))
             rpc.assert_not_called()
 
 

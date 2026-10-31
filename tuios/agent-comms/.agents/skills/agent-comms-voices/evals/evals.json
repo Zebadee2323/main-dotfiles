@@ -4,19 +4,19 @@
     {
       "id": 1,
       "prompt": "Replace the unapproved voices in agent-comms/config.toml. Keep every ID unique, don't use rejected_elevenlabs_voices, and don't mark replacements approved. You may add collection voices if necessary. Use fixture configuration and mocked ElevenLabs responses only.",
-      "expected_output": "Only unapproved identities receive fresh IDs; approved identities, names, and the rejection list are preserved. Returned collection IDs are checked against exclusions. Replacements have verified standard pricing and configured model support; all final IDs are unique. No live API mutations or TTS.",
+      "expected_output": "Only unapproved voice profiles receive fresh IDs, each with an ElevenLabs gender matching the profile's gender; approved profiles, profile IDs, genders, '# formerly' comments, and the rejection list are preserved, and no profile gains a name field. Returned collection IDs are checked against exclusions. Replacements have verified standard pricing and configured model support; all final IDs are unique. No live API mutations or TTS.",
       "files": []
     },
     {
       "id": 2,
       "prompt": "Do it again. Since the last round I approved three voices and rejected two others. The mock account catalog now needs two pages, and one new library voice lacks eleven_turbo_v2_5 support. Use the current fixture file and mocks, not the live account.",
-      "expected_output": "Rereads current approvals and rejections, leaves newly approved identities untouched, follows catalog pagination, excludes rejected and previously assigned IDs, and skips the incompatible voice. Every replacement remains unapproved. Reports rather than bypasses any shortage of verified candidates.",
+      "expected_output": "Rereads current approvals and rejections, leaves newly approved profiles untouched, follows catalog pagination, excludes rejected and previously assigned IDs, skips the incompatible voice, and only picks candidates whose gender matches each target profile. Every replacement remains unapproved. Reports rather than bypasses any shortage of verified same-gender candidates.",
       "files": []
     },
     {
       "id": 3,
-      "prompt": "Make sure none of the assigned voices charge extra. In the mocked metadata, approved Raven has rate 3.0 and fiat_rate 0.25, another professional voice has rate 1.0 and fiat_rate null, and a third has unknown pricing. Use fixtures only.",
-      "expected_output": "Audits all assignments, replaces the confirmed surcharge voice with a unique non-rejected standard-rate voice, and resets its approval to false. Keeps the standard-rate professional voice. Resolves unknown pricing or reports it as unverified instead of claiming a clean audit. Notes ordinary usage charges remain and does not generate TTS.",
+      "prompt": "Make sure none of the assigned voices charge extra. In the mocked metadata, the approved voice_raven profile's voice has rate 3.0 and fiat_rate 0.25, another professional voice has rate 1.0 and fiat_rate null, and a third has unknown pricing. Use fixtures only.",
+      "expected_output": "Audits all profiles, replaces the confirmed surcharge voice with a unique, non-rejected, standard-rate voice of the same gender as voice_raven, and resets its approval to false. Keeps the standard-rate professional voice. Resolves unknown pricing or reports it as unverified instead of claiming a clean audit. Notes ordinary usage charges remain and does not generate TTS.",
       "files": []
     }
   ]

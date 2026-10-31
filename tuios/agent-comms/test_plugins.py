@@ -89,7 +89,9 @@ console.log(JSON.stringify(event.system));
                 self.assertIn("combine it with send", instructions)
                 self.assertIn("without another introduction", instructions)
                 self.assertIn("No precautionary refresh", instructions)
-                self.assertIn("--id RETURNED_ID", instructions)
+                self.assertIn("--name RETURNED_NAME --epoch RETURNED_EPOCH", instructions)
+                self.assertNotIn("--id", instructions)
+                self.assertIn("(`name`, `epoch`, `prefix`)", instructions)
                 self.assertIn("or another pane/agent", instructions)
                 self.assertIn("`agent-comms context`", instructions)
                 self.assertNotIn("--harness", instructions)
@@ -100,7 +102,7 @@ console.log(JSON.stringify(event.system));
                 self.assertIn("eleven_turbo_v2_5", instructions)
                 self.assertNotIn("Personality:", instructions)
                 self.assertNotIn("Session identity:", instructions)
-                self.assertFalse((self.paths.state / "bag.json").exists())
+                self.assertFalse((self.paths.state / "allocation.json").exists())
 
     def test_instructions_require_reuse_across_turns_and_compaction(self):
         instructions = json.loads(self.cli("instructions").stdout)["instructions"]
@@ -151,7 +153,7 @@ class CodexHookTests(Fixture):
         self.assertTrue(all(output == outputs[0] for output in outputs))
         self.assertEqual(outputs[0]["hookEventName"], "SessionStart")
         self.assertIn("agent-comms send", outputs[0]["additionalContext"])
-        self.assertIn("--id RETURNED_ID", outputs[0]["additionalContext"])
+        self.assertIn("--name RETURNED_NAME --epoch RETURNED_EPOCH", outputs[0]["additionalContext"])
         self.assertIn('"Oli" in written responses and `--msg`', outputs[0]["additionalContext"])
         self.assertIn('Use "Ollie" in `--tts`', outputs[0]["additionalContext"])
         self.assertFalse(self.paths.state.exists(), "instruction hooks must not allocate identities")

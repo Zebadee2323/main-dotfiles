@@ -8,6 +8,9 @@ import agent_comms as app
 import tuios_context
 from test_agent_comms import Fixture
 
+EPOCH = "e" * 16
+DISPLAY = {"display_recipient": None, "role": None, "kind": None, "emotion": None, "reply_to": None}
+
 
 class PrefixTests(Fixture):
     source = {"session_name": "work", "pane_id": "pane", "workspace": 2, "introduce": True}
@@ -22,7 +25,9 @@ class PrefixTests(Fixture):
             return app.identify(paths, self.config())
         with patch.object(app, "prepare_output"), patch.object(app.Paths, "resolve", return_value=self.paths), \
              patch.object(app, "listener_context", new=context), \
-             patch.object(app, "pane_binding", return_value="a"), \
+             patch.object(app, "pane_binding", return_value=(EPOCH, {"name": "Alice"})), \
+             patch.object(app, "caller_binding", return_value=(EPOCH, "Alice")), \
+             patch.object(app, "update_pane_title"), \
              patch.object(tuios_context, "context", return_value=self.source if source is None else source), \
              patch("sys.stdout", output), patch("sys.stderr", errors):
             code = app.main(args)
@@ -39,26 +44,31 @@ class PrefixTests(Fixture):
         self.assertFalse(self.paths.runtime.exists())
         self.assertFalse(self.paths.state.exists())
 
-    def test_id_json_contains_only_required_fields(self):
+    def test_context_json_contains_only_required_fields(self):
         code, text, error = self.invoke(["context"])
         self.assertEqual(code, 0, error)
         result = json.loads(text)
-        self.assertEqual(result, {"id": "a", "name": "Alice", "prefix": self.prefix})
+        # "id" is only a compatibility alias equal to the generated name.
+        self.assertEqual(result, {"id": "Alice", "name": "Alice", "epoch": EPOCH, "prefix": self.prefix})
 
-    def test_prefix_command_removed_and_unknown_identity_is_error(self):
+    def test_prefix_command_removed_and_unknown_name_is_error(self):
         self.assertEqual(self.cli("id").returncode, 2)
         self.assertEqual(self.cli("prefix", "--id", "a").returncode, 2)
-        self.assertEqual(self.cli("send", "--msg", "Ready.").returncode, 2)
-        with self.assertRaisesRegex(app.CommsError, "Unknown identity"):
-            app.validate_message(self.config(), "missing", "Ready.")
+        result = self.cli("send", "--msg", "Ready.")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--name", result.stderr)
+        for name in ("", None):
+            with self.subTest(name=name), self.assertRaisesRegex(app.CommsError, "Unknown agent name"):
+                app.validate_message(self.config(), name, "Ready.")
 
     def test_valid_prefix_is_not_inserted_or_rewritten(self):
         message = self.prefix + " Ready."
         tts = self.prefix + ' <break time="0.3s" /> Ready.'
-        result = app.validate_message(self.config(), "a", message, tts, self.source)
+        result = app.validate_message(self.config(), "Alice", message, tts, self.source)
         self.assertEqual(result["msg"], message)
         self.assertEqual(result["tts"], tts)
         self.assertEqual(result["session_name"], "work")
+        self.assertEqual((result["id"], result["name"]), ("Alice", "Alice"))
 
     def test_missing_wrong_stale_and_duplicated_prefixes_are_errors_in_each_field(self):
         good = self.prefix + " Ready."
@@ -69,7 +79,7 @@ class PrefixTests(Fixture):
                     '<break time="0.3s" /> ' + good):
             for field in ("--msg", "--tts"):
                 with self.subTest(bad=bad, field=field), self.assertRaises(app.CommsError) as error:
-                    app.validate_message(self.config(), "a", bad if field == "--msg" else good,
+                    app.validate_message(self.config(), "Alice", bad if field == "--msg" else good,
                                          bad if field == "--tts" else good, self.source)
                 self.assertIn(field, str(error.exception))
                 self.assertIsInstance(error.exception, app.ContextMismatch)
@@ -78,14 +88,15 @@ class PrefixTests(Fixture):
     def test_no_required_prefix_rejects_stale_introductions(self):
         for prefix in ("", '<break time="0.3s" /> '):
             with self.assertRaises(app.CommsError) as error:
-                app.validate_message(self.config(), "a", prefix + self.prefix + " Ready.", source={})
+                app.validate_message(self.config(), "Alice", prefix + self.prefix + " Ready.", source={})
             self.assertIn("no introduction", str(error.exception))
-        result = app.validate_message(self.config(), "a", "Ready.", source={})
+        result = app.validate_message(self.config(), "Alice", "Ready.", source={})
         self.assertEqual(result["msg"], "Ready.")
 
     def test_send_rechecks_context_and_rejects_focus_race_before_network(self):
         with patch.object(app, "send", new=AsyncMock()) as send:
-            code, _, error = self.invoke(["send", "--id", "a", "--msg", self.prefix + " Ready."],
+            code, _, error = self.invoke(["send", "--name", "Alice", "--epoch", EPOCH,
+                                          "--msg", self.prefix + " Ready."],
                                          source={**self.source, "session_name": "changed"})
         self.assertEqual(code, 1)
         self.assertIn("changed session.", error)
@@ -94,9 +105,10 @@ class PrefixTests(Fixture):
     def test_checked_send_passes_both_strings_unchanged(self):
         message = self.prefix + " Ready."
         with patch.object(app, "send", new=AsyncMock()) as send:
-            code, _, error = self.invoke(["send", "--id", "a", "--msg", message, "--tts", message])
+            code, _, error = self.invoke(["send", "--name", "Alice", "--epoch", EPOCH,
+                                          "--msg", message, "--tts", message])
         self.assertEqual(code, 0, error)
-        send.assert_awaited_once_with(self.paths, "a", message, message, self.source)
+        send.assert_awaited_once_with(self.paths, "Alice", EPOCH, message, message, self.source, DISPLAY)
 
     def test_unavailable_tuios_context_is_not_silently_treated_as_empty(self):
         env = {"TUIOS_ENV": "1", "TUIOS_SESSION": "work", "TUIOS_PANE_ID": "pane"}
@@ -108,16 +120,18 @@ class PrefixTests(Fixture):
             tuios_context.context("Alice", run=run, env={"TUIOS_ENV": "1"}, strict=True)
         with patch.object(app, "prepare_output"), patch.object(app.Paths, "resolve", return_value=self.paths), \
              patch.object(tuios_context, "context", side_effect=tuios_context.ContextError("Cannot check prefix")), \
+             patch.object(app, "caller_binding", return_value=(EPOCH, "Alice")), \
              patch.object(app, "send", new=AsyncMock()) as send, patch("sys.stderr", io.StringIO()):
-            self.assertEqual(app.main(["send", "--id", "a", "--msg", "Ready."]), 1)
+            self.assertEqual(app.main(["send", "--name", "Alice", "--epoch", EPOCH, "--msg", "Ready."]), 1)
             send.assert_not_called()
 
     def test_listener_rejects_missing_prefix_before_history_or_queue(self):
         self.start_server()
-        _, stream = self.request("send", id="a", msg="Ready.", source=self.source)
+        _, stream = self.request("send", **self.sender("Alice"), msg="Ready.", source=self.source)
         result = json.loads(stream.readline())
         self.assertFalse(result["ok"])
         self.assertIn("Expected prefix", result["error"])
+        self.assertTrue(result.get("context_mismatch"))
         self.assertEqual(json.loads(self.cli("history", "--json").stdout), [])
         _, subscriber = self.request("watch")
         self.assertIsNone(json.loads(subscriber.readline())["message"])
@@ -126,6 +140,18 @@ class PrefixTests(Fixture):
         with patch.object(app, "endpoint", return_value={"protocol_version": app.VERSION}), \
              patch.object(app, "rpc", new=AsyncMock()) as rpc:
             with self.assertRaises(app.CommsError) as error:
-                asyncio.run(app.send(self.paths, "a", self.prefix + " Ready.", source=self.source))
+                asyncio.run(app.send(self.paths, "Alice", EPOCH, self.prefix + " Ready.", source=self.source))
         self.assertIn("restart", str(error.exception))
         rpc.assert_not_called()
+
+    def test_listener_without_name_identity_is_rejected_before_send(self):
+        info = {"protocol_version": app.VERSION, "prefix_policy": app.PREFIX_POLICY, "spatial_prefix": True}
+        with patch.object(app, "endpoint", return_value=info), \
+             patch.object(app, "rpc", new=AsyncMock()) as rpc:
+            with self.assertRaisesRegex(app.CommsError, "generated agent names"):
+                asyncio.run(app.send(self.paths, "Alice", EPOCH, self.prefix + " Ready.", source=self.source))
+        rpc.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

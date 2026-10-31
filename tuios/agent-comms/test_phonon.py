@@ -8,6 +8,13 @@ import wave
 
 import agent_comms as app
 import speech
+from test_agent_comms import write_config
+
+
+def write_profile(path, settings="", profile='phonon_voice="Juniper"\n'):
+    """Config with a female profile "a" (extra fields in profile) and a male profile."""
+    write_config(path, settings, voices=f'[voice_groups.main.voices.a]\ngender="female"\n{profile}'
+                 '[voice_groups.main.voices.m]\ngender="male"\n')
 
 
 class ConfigTests(unittest.TestCase):
@@ -23,20 +30,20 @@ class ConfigTests(unittest.TestCase):
                     ('[speech.phonon]\nmodel=""\n', False),
                     ('[speech.phonon]\nexecutable=42\n', False)):
                 with self.subTest(settings=settings):
-                    path.write_text(settings + '[identities.a]\nname="Alice"\nphonon_voice="Juniper"\n')
+                    write_profile(path, settings)
                     if valid:
-                        self.assertEqual(app.load_config(path)["identities"]["a"]["phonon_voice"], "Juniper")
+                        self.assertEqual(app.load_config(path)["voices"]["a"]["phonon_voice"], "Juniper")
                     else:
                         with self.assertRaises(app.CommsError):
                             app.load_config(path)
-            path.write_text('[identities.a]\nname="Alice"\nphonon_voice=42\n')
+            write_profile(path, profile="phonon_voice=42\n")
             with self.assertRaisesRegex(app.CommsError, "phonon_voice must be text"):
                 app.load_config(path)
 
     def test_message_preserves_both_providers(self):
-        config = {"identities": {"a": {"name": "Alice", "phonon_voice": " Juniper ",
-                                        "eleven_labs_voice_id": "cloud"}}}
-        message = app.validate_message(config, "a", "Hello")
+        config = {}
+        profile = {"gender": "female", "phonon_voice": " Juniper ", "eleven_labs_voice_id": "cloud"}
+        message = app.validate_message(config, "Alice", "Hello", profile=profile)
         self.assertEqual(message["phonon_voice"], "Juniper")
         self.assertEqual(message["voice_id"], "cloud")
         self.assertIn("TTS mode: `phonon`", app.communication_instructions({"speech": {"mode": "phonon"}}))
@@ -47,7 +54,7 @@ class ConfigTests(unittest.TestCase):
     def test_watcher_rejects_invalid_config_instead_of_cloud_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.toml"
-            path.write_text('[speech]\nmode="typo"\n[identities.a]\nname="Alice"\n')
+            write_profile(path, '[speech]\nmode="typo"\n')
             with patch.object(app.Paths, "resolve", return_value=Mock(config=path)), \
                     patch.object(app, "watch") as watch, \
                     patch.object(app, "prepare_output"):
@@ -96,7 +103,7 @@ class SynthesisTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WatcherTests(unittest.IsolatedAsyncioTestCase):
-    async def test_phonon_needs_no_key_and_uses_identity_speed(self):
+    async def test_phonon_needs_no_key_and_uses_profile_speed(self):
         message = {"uid": "m", "phase": "preparing", "phonon_voice": "Juniper",
                    "voice_id": "cloud", "tts": "Hello", "voice_speed": 1.2}
 

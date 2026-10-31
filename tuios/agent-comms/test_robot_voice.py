@@ -9,6 +9,7 @@ import wave
 
 import agent_comms as app
 import speech
+from test_agent_comms import write_config
 
 
 class RobotVoiceTests(unittest.IsolatedAsyncioTestCase):
@@ -30,7 +31,7 @@ class RobotVoiceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.toml"
             for value in ('"true"', "1", "[]"):
-                path.write_text(f'[speech]\nrobot_mode = {value}\n[identities.a]\nname = "Alice"\n')
+                write_config(path, f'[speech]\nrobot_mode = {value}\n')
                 with self.assertRaisesRegex(app.CommsError, "speech.robot_mode must be a boolean"):
                     app.load_config(path)
 

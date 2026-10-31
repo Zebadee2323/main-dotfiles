@@ -1,4 +1,4 @@
-"""Per-user agent identities, FIFO messaging, and tuios push subscriptions."""
+"""Generated agent names, FIFO messaging, and tuios push subscriptions."""
 from __future__ import annotations
 
 import argparse
@@ -29,7 +29,9 @@ import unicodedata
 import uuid
 import wave
 
+import allocation
 import audio_visualizer
+import conversation
 import message_history
 import pane_identity
 import shell_identity
@@ -37,8 +39,11 @@ import speech
 import service_manager
 import tuios_context
 
-VERSION = 2
+VERSION = 3
 PREFIX_POLICY = "explicit"
+CAPABILITIES = {"prefix_policy": PREFIX_POLICY, "spatial_prefix": True, "audio_control": True,
+                "pane_identity": True, "pane_identity_clear": True, "shell_identity": True,
+                "name_identity": True, "conversation_view": True, "presentation_lifecycle": True}
 MAX_FRAME = 65536
 MAX_MESSAGE = 8192
 QUEUE_LIMIT = 256
@@ -235,6 +240,10 @@ def format_history(messages, *, width=88, color=False):
         with suppress(ValueError, OverflowError, OSError):
             timestamp = datetime.fromisoformat(timestamp).astimezone().strftime("%b %d %H:%M:%S")
         name = clean_text(message["name"])
+        recipient = message.get("recipient")
+        if (isinstance(recipient, dict) and isinstance(recipient.get("name"), str)
+                and (recipient.get("kind") == "agent" or recipient.get("selector") is not None)):
+            name += " → " + clean_text(recipient["name"])
         metadata = []
         if isinstance(message.get("session_name"), str):
             metadata.append(clean_text(message["session_name"]))
@@ -250,33 +259,6 @@ def format_history(messages, *, width=88, color=False):
     return "\n".join(lines)
 
 
-def identity_tables(config):
-    """Index raw TOML identity tables without losing their group or edit location."""
-    legacy = config.get("identities", {})
-    groups = config.get("identity_groups", {})
-    if not isinstance(legacy, dict) or not isinstance(groups, dict):
-        raise CommsError("identities and identity_groups must be tables.")
-    identities = dict(legacy)
-    for group, table in groups.items():
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", group):
-            raise CommsError(f"Invalid identity group: {group!r}")
-        if not isinstance(table, dict) or not isinstance(table.get("identities"), dict) or not table["identities"]:
-            raise CommsError(f"Identity group {group} needs nonempty identities.")
-        for identity, metadata in table["identities"].items():
-            if identity in identities:
-                raise CommsError(f"Duplicate identity ID across groups: {identity}")
-            identities[identity] = metadata
-    return identities
-
-
-def active_identity_ids(config):
-    """Group activation controls new draws, not existing pane ownership."""
-    if "active_groups" not in config:
-        return set(config["identities"])
-    return {identity for group in config["active_groups"]
-            for identity in config["identity_groups"][group]["identities"]}
-
-
 def voice_fields(mode):
     return {"elevenlabs": ("eleven_labs_voice_id", "voice_approved"),
             "phonon": ("phonon_voice", "phonon_voice_approved"),
@@ -284,15 +266,7 @@ def voice_fields(mode):
 
 
 def resolve_pocket_voice(voice, config_dir):
-    """Keep preset names/URLs; anchor local voice files to the config directory."""
-    voice = voice.strip()
-    if not voice or "://" in voice:
-        return voice
-    local = Path(voice).expanduser()
-    if (local.is_absolute() or "/" in voice or "\\" in voice
-            or local.suffix):
-        return str(local if local.is_absolute() else config_dir / local)
-    return voice
+    return allocation.resolve_pocket_voice(voice, config_dir)
 
 
 def load_config(path: Path) -> dict:
@@ -302,7 +276,7 @@ def load_config(path: Path) -> dict:
         with path.open("rb") as stream:
             config = tomllib.load(stream)
     except (ValueError, OSError) as exc:
-        raise CommsError(f"Cannot read identity config {path}: {exc}") from None
+        raise CommsError(f"Cannot read agent-comms config {path}: {exc}") from None
     user = config.get("user", {})
     if not isinstance(user, dict):
         raise CommsError("user must be a table.")
@@ -360,44 +334,16 @@ def load_config(path: Path) -> dict:
     if (not isinstance(rejected, dict) or not isinstance(rejected.get("ids", []), list)
             or any(not isinstance(voice, str) or not voice.strip() for voice in rejected.get("ids", []))):
         raise CommsError("rejected_elevenlabs_voices.ids must be an array of nonempty voice ID strings.")
-    identities = identity_tables(config)
-    if not identities:
-        raise CommsError("Config must contain at least one identity table.")
-    config["identities"] = identities  # Runtime index; source remains grouped on disk.
-    if "active_groups" in config:
-        active = config["active_groups"]
-        groups = config.get("identity_groups", {})
-        if (not isinstance(active, list) or not active
-                or any(not isinstance(g, str) or g not in groups for g in active)
-                or len(set(active)) != len(active)):
-            raise CommsError("active_groups must be a nonempty array of unique configured identity group names.")
-    for identity, metadata in identities.items():
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", identity):
-            raise CommsError(f"Invalid identity ID: {identity!r}")
-        if not isinstance(metadata, dict) or not isinstance(metadata.get("name"), str) or not clean_text(metadata["name"]):
-            raise CommsError(f"Identity {identity} needs a nonempty name.")
-        if len(metadata["name"]) > 128:
-            raise CommsError(f"Identity {identity} name is too long (maximum 128 characters).")
-        metadata.pop("personality", None)  # Ignore obsolete fields in older user configs.
-        for key in ("eleven_labs_voice_id", "phonon_voice", "pocket_tts_voice"):
-            if not isinstance(metadata.get(key, ""), str):
-                raise CommsError(f"Identity {identity}: {key} must be text.")
-        if "pocket_tts_voice" in metadata:
-            metadata["pocket_tts_voice"] = resolve_pocket_voice(
-                metadata["pocket_tts_voice"], path.resolve().parent)
-        for key in ("voice_approved", "phonon_voice_approved", "pocket_tts_voice_approved"):
-            if type(metadata.get(key, False)) is not bool:
-                raise CommsError(f"Identity {identity}: {key} must be a boolean.")
-        for key in ("speed", "elevenlabs_speed", "phonon_speed", "pocket_tts_speed"):
-            if key in metadata:
-                speed = metadata[key]
-                if type(speed) not in (int, float) or not math.isfinite(speed) or not 0.7 <= speed <= 1.2:
-                    raise CommsError(f"Identity {identity}: {key} must be between 0.7 and 1.2.")
+    try:
+        allocation.prepare_voices(config, path)
+        allocation.prepare_names(config, path)
+    except allocation.AllocationError as exc:
+        raise CommsError(str(exc)) from None
     return config
 
 
 def speech_speed(settings, metadata, mode, *, legacy_key="speed"):
-    """Identity overrides global; provider-specific overrides legacy at each scope."""
+    """Profile overrides global; provider-specific overrides legacy at each scope."""
     key = f"{mode}_speed"
     return metadata.get(key, metadata.get(legacy_key, settings.get(key, settings.get("speed", 1.0))))
 
@@ -427,7 +373,7 @@ def record_rejected_voice(source: str, voice_id: str) -> str:
     raise CommsError("Cannot safely edit rejected_elevenlabs_voices; use a [rejected_elevenlabs_voices] table with an ids array.")
 
 
-def save_voice_approval(paths: Paths, identity: str, voice_id: str, approved: bool, *, mode="elevenlabs") -> None:
+def save_voice_approval(paths: Paths, profile: str, voice_id: str, approved: bool, *, mode="elevenlabs") -> None:
     """Save approval and rejection history together, preserving unrelated config."""
     voice_field, approval_field = voice_fields(mode)
     private_dir(paths.state)
@@ -435,17 +381,20 @@ def save_voice_approval(paths: Paths, identity: str, voice_id: str, approved: bo
         path = paths.config.resolve()  # Keep a symlinked config intact.
         original = path.read_text(encoding="utf-8")
         expected = tomllib.loads(original)
-        metadata = identity_tables(expected).get(identity)
+        try:
+            metadata = allocation.voice_tables(expected)[0].get(profile)
+        except allocation.AllocationError as exc:
+            raise CommsError(str(exc)) from None
         if metadata is None or metadata.get(voice_field, "").strip() != voice_id:
-            raise CommsError(f"Identity {identity} changed during review; approval was not saved.")
+            raise CommsError(f"Voice profile {profile} changed during review; approval was not saved.")
         metadata[approval_field] = approved
         value = "true" if approved else "false"
         # Try surgical edits, accepting one only if TOML parsing proves that it
-        # changes exactly the intended field (not text inside a personality).
+        # changes exactly the intended field and no other profile.
         edits = [(m.start(1), m.end(1), value) for m in re.finditer(
             rf"(?m)^\s*{approval_field}\s*=\s*(true|false)\b", original)]
         edits += [(m.end(), m.end(), f"\n{approval_field} = {value}") for m in re.finditer(
-            r"(?m)^\s*\[(?:identities|identity_groups\.[^\]\n]+\.identities)\.[^\n]+\][ \t]*(?:#[^\n]*)?$", original)]
+            r"(?m)^\s*\[voice_groups\.[^\]\n]+\.voices\.[^\n]+\][ \t]*(?:#[^\n]*)?$", original)]
         for start, end, replacement in edits:
             updated = original[:start] + replacement + original[end:]
             try:
@@ -454,7 +403,7 @@ def save_voice_approval(paths: Paths, identity: str, voice_id: str, approved: bo
             except ValueError:
                 pass
         else:
-            raise CommsError(f"Cannot safely edit {identity}; use an explicit identity table in the config.")
+            raise CommsError(f"Cannot safely edit {profile}; use an explicit voice profile table in the config.")
         if not approved and mode == "elevenlabs":
             updated = record_rejected_voice(updated, voice_id)
         fd, filename = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -480,7 +429,7 @@ async def voice_review_decision(audio, executable: str, name: str) -> bool | str
         while True:
             try:
                 answer = (await asyncio.to_thread(
-                    input, f"Do you like {name}'s voice? [y/n/s/r/q] (s skips, r replays) ")).strip().lower()
+                    input, f"Do you like the {name} voice? [y/n/s/r/q] (s skips, r replays) ")).strip().lower()
             except EOFError:
                 return None
             if answer in ("q", "quit"):
@@ -499,21 +448,22 @@ async def voice_review_decision(audio, executable: str, name: str) -> bool | str
             print("Please answer y, n, s (skip unchanged), r (replay), or q.")
     finally:
         # speech.play's cancellation cleanup terminates the player before the
-        # next identity starts or its temporary audio file is removed.
+        # next profile starts or its temporary audio file is removed.
         playback.cancel()
         with suppress(asyncio.CancelledError):
             await playback
 
 
 def voice_review(paths: Paths, config: dict, *, all_voices=False) -> None:
+    """Audition voice profiles in active groups. Generated agent assignments are never reviewed."""
     settings = config.get("speech", {})
     mode = settings.get("mode", "elevenlabs")
     voice_field, approval_field = voice_fields(mode)
-    active = active_identity_ids(config)
-    pending = [(identity, metadata) for identity, metadata in config["identities"].items()
-               if identity in active and (all_voices or not metadata.get(approval_field, False))]
+    active = {profile for ids in allocation.eligible_profiles(config).values() for profile in ids}
+    pending = [(profile, metadata) for profile, metadata in config["voices"].items()
+               if profile in active and (all_voices or not metadata.get(approval_field, False))]
     if not pending:
-        print("All identity voices are approved.")
+        print("All active voice profiles are approved.")
         return
     if not sys.stdin.isatty():
         raise CommsError("voice-review requires an interactive terminal.")
@@ -527,14 +477,14 @@ def voice_review(paths: Paths, config: dict, *, all_voices=False) -> None:
     print(f"Reviewing {len(pending)} {selection} voices using {mode}. "
           "Decisions are saved immediately; s skips unchanged, r replays, q quits.")
     with tempfile.TemporaryDirectory(prefix="agent-comms-voice-review-") as directory:
-        for index, (identity, metadata) in enumerate(pending, 1):
-            name = clean_text(metadata["name"])
+        for index, (profile, metadata) in enumerate(pending, 1):
+            name = profile
             voice_id = metadata.get(voice_field, "").strip()
-            print(f"\n[{index}/{len(pending)}] {name} ({identity}) — {mode}: {voice_id}", flush=True)
+            print(f"\n[{index}/{len(pending)}] {profile} ({metadata['gender']}) — {mode}: {voice_id}", flush=True)
             if not voice_id:
                 print("No voice ID configured; skipping without approval.")
                 continue
-            text = (f"Hello, I'm {name}. Here's a quick update: the changes are ready for review. "
+            text = ("Hello! Here's a quick update: the changes are ready for review. "
                     "We found one small issue, and the next step is to check the fix together. "
                     "How does this voice sound to you?")
             try:
@@ -559,40 +509,13 @@ def voice_review(paths: Paths, config: dict, *, all_voices=False) -> None:
             if approved == "skip":
                 print("Skipped; approval unchanged.")
                 continue
-            save_voice_approval(paths, identity, voice_id, approved, mode=mode)
+            save_voice_approval(paths, profile, voice_id, approved, mode=mode)
             if approved:
                 print("Approved.")
             elif mode == "elevenlabs":
                 print("Not approved; voice ID added to rejected_elevenlabs_voices.ids. Will be offered again next time.")
             else:
                 print("Not approved; will be offered again next time.")
-
-
-def draw_id(paths: Paths, config: dict, refill: bool = False) -> str | None:
-    private_dir(paths.state)
-    ids = sorted(active_identity_ids(config))
-    state_file = paths.state / "bag.json"
-    with FileLock(paths.state / "bag.lock"):
-        state = {}
-        try:
-            state = json.loads(state_file.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            pass
-        except (ValueError, UnicodeError):
-            print("agent-comms: corrupt bag state; starting a new cycle.", file=sys.stderr)
-        remaining = state.get("remaining") if isinstance(state, dict) else None
-        valid = (
-            isinstance(state, dict) and state.get("ids") == ids
-            and isinstance(remaining, list)
-            and all(isinstance(i, str) and i in ids for i in remaining)
-            and len(remaining) == len(set(remaining))
-        )
-        if refill or not valid or not remaining:
-            remaining = ids.copy()
-            random.SystemRandom().shuffle(remaining)
-        identity = None if refill else remaining.pop(0)
-        atomic_json(state_file, {"ids": ids, "remaining": remaining})
-        return identity
 
 
 def communication_instructions(config):
@@ -628,11 +551,20 @@ def communication_instructions(config):
 
 
 def pane_binding(paths, config, *, allocate=True, clear=False, env=None):
+    """Return (epoch, binding) for the verified owner, or a clear result.
+
+    Without allocation, read the store lock-free: sending must never mkdir,
+    chmod, or open a lock file in the listener's private state directory.
+    """
     try:
+        if clear:
+            return pane_identity.resolve(paths, config, private_dir=private_dir, lock=FileLock,
+                                         atomic_json=atomic_json, error=CommsError, clear=True, env=env)
+        if not allocate:
+            return pane_identity.lookup(paths, env)
         return pane_identity.resolve(paths, config, private_dir=private_dir, lock=FileLock,
-                                     atomic_json=atomic_json, draw_id=draw_id, error=CommsError, allocate=allocate,
-                                     clear=clear, env=env, eligible_ids=active_identity_ids(config))
-    except pane_identity.MissingIdentityError as exc:
+                                     atomic_json=atomic_json, error=CommsError, env=env)
+    except allocation.MissingBinding as exc:
         raise ContextMismatch(f"{exc} Message was not queued.") from None
     except ValueError as exc:
         raise CommsError(str(exc)) from None
@@ -648,18 +580,18 @@ def checked_context(env=None):
 def identify(paths, config, env=None):
     # Verify pane presence/focus before persisting any allocation.
     source = checked_context(env) if env is not None else checked_context()
-    identity = pane_binding(paths, config, **({"env": env} if env is not None else {}))
-    prefix = expected_prefix(config, identity, source)
-    name = clean_text(config["identities"][identity]["name"])
-    update_pane_title(paths, config, identity, source, env)
-    return {"id": identity, "name": name, "prefix": prefix}
+    epoch, binding = pane_binding(paths, config, **({"env": env} if env is not None else {}))
+    name = binding["name"]
+    prefix = expected_prefix(config, name, source)
+    update_pane_title(paths, config, name, source, env)
+    # "id" is a temporary compatibility alias for name, never a second identifier.
+    return {"id": name, "name": name, "epoch": epoch, "prefix": prefix}
 
 
-def update_pane_title(paths, config, identity, source, env=None):
+def update_pane_title(paths, config, name, source, env=None):
     try:
-        pane_identity.update_title(paths, clean_text(config["identities"][identity]["name"]), source,
-                                   private_dir=private_dir, lock=FileLock, atomic_json=atomic_json, env=env,
-                                   names=[clean_text(meta["name"]) for meta in config["identities"].values()])
+        pane_identity.update_title(paths, name, source, config=config, private_dir=private_dir, lock=FileLock,
+                                   atomic_json=atomic_json, env=env)
     except (OSError, ValueError, CommsError) as exc:
         print(f"agent-comms: pane name unchanged: {exc}", file=sys.stderr)
 
@@ -698,6 +630,11 @@ def request_owner_env(request):
     return {**env, shell_identity.ENV_KEY: owner}
 
 
+def require_capability(info, flag, message):
+    if info.get(flag) is not True:
+        raise CommsError(message)
+
+
 async def listener_context(paths, *, clear=False):
     env = {k: os.environ[k] for k in PANE_ENV_KEYS if k in os.environ}
     standalone = env.get("TUIOS_ENV") != "1"
@@ -711,35 +648,42 @@ async def listener_context(paths, *, clear=False):
     except CommsError as exc:
         raise CommsError(f"Client pane check failed: {exc}") from None
     info = endpoint(paths)
-    if standalone and info.get("shell_identity") is not True:
-        raise CommsError("Listener predates standalone shell identities; restart 'agent-comms serve'.")
-    if info.get("pane_identity") is not True:
-        raise CommsError("Listener predates sandbox-compatible identity lookup; restart 'agent-comms serve'.")
+    if standalone:
+        require_capability(info, "shell_identity", "Listener predates standalone shell identities; restart 'agent-comms serve'.")
+    require_capability(info, "pane_identity", "Listener predates sandbox-compatible identity lookup; restart 'agent-comms serve'.")
+    require_capability(info, "name_identity", "Listener predates generated agent names; restart 'agent-comms serve'.")
     if clear:
-        if info.get("pane_identity_clear") is not True:
-            raise CommsError("Listener predates pane identity clearing; restart 'agent-comms serve'.")
         return (await rpc(paths, "clear-context", **payload))["result"]
     identity = (await rpc(paths, "context", **payload))["identity"]
-    # The listener owns persistent identity allocation, but may still have an
-    # older prefix implementation loaded after an update. Use the same local
-    # context and policy as send validation, not the listener's cached code.
-    prefix = expected_prefix(load_config(paths.config), identity["id"], source)
-    return {**identity, "prefix": prefix}
+    # The listener owns persistent allocation, but may still have an older
+    # prefix implementation loaded after an update. Use the same local context
+    # and policy as send validation, not the listener's cached code.
+    prefix = expected_prefix(load_config(paths.config), identity["name"], source)
+    return {"id": identity["name"], "name": identity["name"], "epoch": identity["epoch"], "prefix": prefix}
 
 
 async def shell_binding(paths):
     """Read an existing shell binding through the listener, without client ps/state writes."""
-    if endpoint(paths).get("shell_identity") is not True:
-        raise CommsError("Listener predates standalone shell identities; restart 'agent-comms serve'.")
+    info = endpoint(paths)
+    require_capability(info, "shell_identity", "Listener predates standalone shell identities; restart 'agent-comms serve'.")
+    require_capability(info, "name_identity", "Listener predates generated agent names; restart 'agent-comms serve'.")
     result = await rpc(paths, "shell-binding", shell_pid=os.getpid())
-    if result["id"] is None:
-        raise ContextMismatch("Shell has no current identity. Message was not queued.")
-    return result["id"]
+    if result.get("name") is None:
+        raise ContextMismatch("Shell has no current agent name. Message was not queued.")
+    return result["epoch"], result["name"]
 
 
-def expected_prefix(config, identity, source):
-    if identity not in config["identities"]:
-        raise CommsError("Unknown identity; use an ID from the identity configuration.")
+def caller_binding(paths):
+    """(epoch, name) bound to this pane or shell, without allocating."""
+    if os.environ.get("TUIOS_ENV") == "1":
+        epoch, binding = pane_binding(paths, None, allocate=False)
+        return epoch, binding["name"]
+    return asyncio.run(shell_binding(paths))
+
+
+def expected_prefix(config, name, source):
+    if not isinstance(name, str) or not name:
+        raise CommsError("Unknown agent name; run 'agent-comms context'.")
     if not isinstance(source, dict) or not isinstance(source.get("session_name"), str):
         return ""
     session = clean_text(source["session_name"])[:128]
@@ -770,7 +714,7 @@ def expected_prefix(config, identity, source):
         fields = rule["fallback_fields"]
     parts = []
     if "name" in fields:
-        parts.append(clean_text(config["identities"][identity]["name"]) + " here")
+        parts.append(clean_text(name) + " here")
     workspace = None
     if ("workspace" in fields and type(source.get("workspace")) is int
             and not (rule["omit_single_workspace"] and source.get("workspace_count") == 1
@@ -796,14 +740,7 @@ def expected_prefix(config, identity, source):
     return prefix if "name" in fields else prefix[0].upper() + prefix[1:]
 
 
-def prefix_context(config, identity):
-    if identity not in config["identities"]:
-        raise CommsError("Unknown identity; use an ID from the identity configuration.")
-    source = checked_context()
-    return expected_prefix(config, identity, source), source
-
-
-def check_prefix(identity, prefix, message, tts):
+def check_prefix(prefix, message, tts):
     direction = r"(?:top-left|top-right|bottom-left|bottom-right|top|bottom|left|right|center)"
     introduction = re.compile(
         rf"^[^\n]{{1,128}} here(?:\.|, (?:of the [^\n]{{1,128}} session\.|to your {direction}\."
@@ -835,9 +772,22 @@ def check_prefix(identity, prefix, message, tts):
             )
 
 
-def validate_message(config: dict, identity, message, tts=None, source=None) -> dict:
-    if not isinstance(identity, str) or identity not in config["identities"]:
-        raise CommsError("Unknown identity; use an ID from the identity configuration.")
+def voice_settings(profile: dict) -> dict:
+    """Delivery fields from an assignment's embedded voice snapshot, never live config."""
+    result = {"voice_id": profile.get("eleven_labs_voice_id", "").strip(),
+              "phonon_voice": profile.get("phonon_voice", "").strip(),
+              "pocket_tts_voice": profile.get("pocket_tts_voice", "").strip()}
+    if "speed" in profile:
+        result["voice_speed"] = profile["speed"]
+    for key in ("elevenlabs_speed", "phonon_speed", "pocket_tts_speed"):
+        if key in profile:
+            result[key] = profile[key]
+    return result
+
+
+def validate_message(config: dict, name, message, tts=None, source=None, profile=None) -> dict:
+    if not isinstance(name, str) or not name:
+        raise CommsError("Unknown agent name; run 'agent-comms context'.")
     if not isinstance(message, str) or not message.strip():
         raise CommsError("Message must be nonempty text.")
     try:
@@ -858,17 +808,10 @@ def validate_message(config: dict, identity, message, tts=None, source=None) -> 
     except UnicodeEncodeError:
         raise CommsError("TTS message must be valid Unicode text.") from None
     tts = clean_text(tts, multiline=True)
-    check_prefix(identity, expected_prefix(config, identity, source), message, tts)
-    metadata = config["identities"][identity]
-    result = {"id": identity, "name": clean_text(metadata["name"]), "msg": message,
-              "tts": tts, "voice_id": metadata.get("eleven_labs_voice_id", "").strip(),
-              "phonon_voice": metadata.get("phonon_voice", "").strip(),
-              "pocket_tts_voice": metadata.get("pocket_tts_voice", "").strip()}
-    if "speed" in metadata:
-        result["voice_speed"] = metadata["speed"]
-    for key in ("elevenlabs_speed", "phonon_speed", "pocket_tts_speed"):
-        if key in metadata:
-            result[key] = metadata[key]
+    check_prefix(expected_prefix(config, name, source), message, tts)
+    # "id" stays equal to the generated name for older readers of history/watch frames.
+    result = {"id": name, "name": clean_text(name), "msg": message, "tts": tts,
+              **voice_settings(profile or {})}
     if isinstance(source, dict) and isinstance(source.get("session_name"), str):
         session = clean_text(source["session_name"])[:128]
         result["session_name"] = session
@@ -914,7 +857,10 @@ def endpoint(paths: Paths) -> dict:
         if not isinstance(value, dict):
             raise ValueError
         if type(value.get("protocol_version")) is not int or value["protocol_version"] != VERSION:
-            raise CommsError("Unsupported discovery protocol version.")
+            raise CommsError(f"Unsupported discovery protocol version: the listener speaks "
+                             f"{clean_text(str(value.get('protocol_version')))}, this client needs {VERSION}. "
+                             "Restart the listener and watchers with the same agent-comms version "
+                             "('agent-comms restart all').")
         if type(value.get("port")) is not int or not 1 <= value["port"] <= 65535:
             raise ValueError
         if not isinstance(value.get("token"), str) or not re.fullmatch(r"[0-9a-f]{64}", value["token"]):
@@ -943,7 +889,8 @@ async def connect(paths: Paths, command: str, **payload):
         await write_frame(writer, {"protocol_version": VERSION, "token": info["token"], "command": command, **payload})
         response = await read_frame(reader)
         if response.get("ok") is not True:
-            raise CommsError(clean_text(str(response.get("error", "Listener rejected the request."))))
+            error = clean_text(str(response.get("error", "Listener rejected the request.")))
+            raise (ContextMismatch if response.get("context_mismatch") is True else CommsError)(error)
         if response.get("protocol_version") != VERSION:
             raise CommsError("Unsupported listener protocol version.")
         return reader, writer, response
@@ -958,15 +905,18 @@ async def rpc(paths: Paths, command: str, **payload):
     return response
 
 
-async def send(paths: Paths, identity: str, message: str, tts=None, source=None):
+async def send(paths: Paths, name: str, epoch: str, message: str, tts=None, source=None, display=None):
     info = endpoint(paths)
     if info.get("prefix_policy") != PREFIX_POLICY:
         raise CommsError("Listener predates explicit-prefix validation; restart 'agent-comms serve'. Message was not queued.")
     if isinstance(source, dict) and source.get("position_reference") and info.get("spatial_prefix") is not True:
         raise CommsError("Listener predates spatial prefixes; restart 'agent-comms serve'. Message was not queued.")
+    require_capability(info, "name_identity", "Listener predates generated agent names; restart "
+                       "'agent-comms serve'. Message was not queued.")
     pane_env = {key: os.environ[key] for key in PANE_ENV_KEYS if os.environ.get(key)}
-    return await rpc(paths, "send", id=identity, msg=message, tts=tts, source=source,
-              **({"pane_env": pane_env} if pane_env.get("TUIOS_ENV") == "1" else {}))
+    owner = {"pane_env": pane_env} if pane_env.get("TUIOS_ENV") == "1" else {"shell_pid": os.getpid()}
+    return await rpc(paths, "send", name=name, epoch=epoch, msg=message, tts=tts, source=source,
+                     **{k: v for k, v in (display or {}).items() if v is not None}, **owner)
 
 
 def cell_width(text: str) -> int:
@@ -1158,13 +1108,19 @@ def restart_watchers(paths: Paths):
     atomic_json(paths.runtime / "watcher-restart.json", {"revision": secrets.token_hex(16)})
 
 
-async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=True, settings=None, vfx=True):
+async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=True, settings=None, vfx=True,
+                view="captions", animate=True):
     revision = watcher_revision(paths)
-    worker = (speech.PocketWorker((settings or {}).get("pocket_tts", {}))
-              if (settings or {}).get("mode") == "pocket_tts" else None)
-    stream = asyncio.create_task(watch_stream(
-        paths, color=color, width=width, muted=muted, flash=flash,
-        settings=settings, vfx=vfx, pocket_worker=worker))
+    worker = None
+    if view == "conversation":
+        # Always silent: never claims speech, synthesizes, or plays audio.
+        stream = asyncio.create_task(watch_conversation(paths, color=color, animate=animate))
+    else:
+        worker = (speech.PocketWorker((settings or {}).get("pocket_tts", {}))
+                  if (settings or {}).get("mode") == "pocket_tts" else None)
+        stream = asyncio.create_task(watch_stream(
+            paths, color=color, width=width, muted=muted, flash=flash,
+            settings=settings, vfx=vfx, pocket_worker=worker))
     try:
         while True:
             done, _ = await asyncio.wait((stream,), timeout=0.25)
@@ -1308,6 +1264,112 @@ async def watch_stream(paths: Paths, *, color: bool, width: int, muted=False, fl
         await asyncio.gather(billing_task, return_exceptions=True)
 
 
+@contextmanager
+def terminal_screen():
+    """Alternate screen for full-pane views; leaves the user's scrollback untouched."""
+    tty = sys.stdout.isatty()
+    if tty:
+        print("\x1b[?1049h\x1b[?25l", end="", flush=True)
+    try:
+        yield tty
+    finally:
+        if tty:
+            print("\x1b[0m\x1b[?25h\x1b[?1049l", end="", flush=True)
+
+
+class ScreenWriter:
+    """Redraw in place only when the content or terminal size changes."""
+
+    def __init__(self, stream=None):
+        self.stream, self.last = stream, None
+
+    def draw(self, lines, size):
+        key = (tuple(lines), tuple(size))
+        if key == self.last:
+            return False
+        self.last = key
+        stream = self.stream or sys.stdout
+        stream.write("\x1b[H" + "\r\n".join(line + "\x1b[K" for line in lines) + "\x1b[J")
+        stream.flush()
+        return True
+
+
+def valid_display_message(message):
+    return (isinstance(message, dict) and all(isinstance(message.get(k), str) for k in ("id", "name", "msg", "uid"))
+            and message.get("phase") in ("preparing", "displaying"))
+
+
+async def watch_conversation(paths: Paths, *, color=True, animate=True, size=None, writer=None):
+    """Silent conversation view driven only by the listener's shared lifecycle."""
+    view = conversation.ConversationView(color=color, animate=animate)
+    screen = ScreenWriter(writer)
+    changed = asyncio.Event()
+    seen = None
+
+    async def subscribe():
+        nonlocal seen
+        delay = 0.25
+        while True:
+            connection = None
+            try:
+                info = endpoint(paths)
+                if info.get("conversation_view") is not True or info.get("presentation_lifecycle") is not True:
+                    view.notice = "listener too old; run 'agent-comms restart all'"
+                    raise CommsError("Listener predates the conversation view.")
+                reader, connection, response = await connect(paths, "watch")
+                view.notice, delay = None, 0.25
+                while True:
+                    lifecycle = response.get("lifecycle")
+                    if response.get("event") != "state" or not isinstance(lifecycle, dict):
+                        raise CommsError("Unexpected listener response.")
+                    position = (lifecycle.get("timeline"), lifecycle.get("seq"))
+                    # Deduplicate by lifecycle position; a new timeline resynchronizes.
+                    if seen is None or position[0] != seen[0] or (type(position[1]) is int and position[1] > seen[1]):
+                        seen = position
+                        message = response.get("message")
+                        view.update(message if valid_display_message(message) else None, time.monotonic())
+                        changed.set()
+                    response = await read_frame(reader, timeout=False)
+            except (CommsError, OSError, asyncio.TimeoutError):
+                view.update(None, time.monotonic(), offline=True)
+                changed.set()
+            finally:
+                if connection is not None:
+                    await close_writer(connection)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 5)
+
+    task = asyncio.create_task(subscribe())
+    try:
+        with terminal_screen():
+            while True:
+                columns, rows = size() if size else shutil.get_terminal_size((80, 24))
+                screen.draw(view.render(max(1, columns - 1), max(1, rows), time.monotonic()), (columns, rows))
+                if task.done():
+                    task.result()
+                changed.clear()
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(changed.wait(), 0.05)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+def history_watch(paths: Paths, *, limit, history_size, refresh, color, filters, sleep=time.sleep, size=None):
+    """Poll retained history and redraw only on change. Never speaks or submits."""
+    screen = ScreenWriter()
+    with terminal_screen():
+        try:
+            while True:
+                messages = message_history.read(paths.state, limit, max_entries=history_size, **filters)
+                columns, rows = size() if size else shutil.get_terminal_size((88, 24))
+                lines = format_history(messages, width=columns, color=color).splitlines()
+                screen.draw(lines[-max(1, rows):], (columns, rows))
+                sleep(refresh)
+        except KeyboardInterrupt:
+            return 0
+
+
 class TerminalDisplay:
     def __init__(self, quiet=False):
         self.quiet = quiet
@@ -1374,17 +1436,71 @@ class Server:
         self.volume_notice_until = 0
         self.muted_until = None
         self.audio_timer = None
+        self.accepting = 0
+        # One authoritative presentation timeline shared by every subscriber.
+        self.lifecycle = {"timeline": self.generation, "seq": 0, "event": "idle", "message_id": None}
 
-    def refresh_sender_title(self, env, identity):
+    def refresh_sender_title(self, env, name):
         try:
             # Never allocate or trust a submitted message's pane attribution.
             # Verify the persisted binding and the live pane in its own environment.
-            if pane_binding(self.paths, self.config, allocate=False, env=env) != identity:
+            if pane_binding(self.paths, self.config, allocate=False, env=env)[1]["name"] != name:
                 return
             source = checked_context(env)
-            update_pane_title(self.paths, self.config, identity, source, env)
+            update_pane_title(self.paths, self.config, name, source, env)
         except (OSError, ValueError, CommsError) as exc:
             print(f"agent-comms: pane name unchanged: {exc}", file=sys.stderr)
+
+    def find_message(self, uid):
+        """Accepted messages still queued, presenting, or retained in history."""
+        if uid in self.pending:
+            return self.pending[uid]
+        if self.current and self.current.get("uid") == uid:
+            return self.current
+        records = message_history.read(self.paths.state, max_entries=self.config.get(
+            "history_size", message_history.MAX_ENTRIES))
+        return next((record for record in records if record.get("uid") == uid), None)
+
+    def accept(self, request, env):
+        """Verify the owner's current binding and record the message in one serialized step."""
+        key = pane_identity.owner(env)[0]
+        store = pane_identity.store(self.paths, lock=FileLock, atomic_json=atomic_json, private_dir=private_dir)
+        user = self.config.get("user", {}).get("name")
+
+        def operation(state):
+            binding = (state or {}).get("bindings", {}).get(key)
+            if binding is None:
+                raise ContextMismatch("Caller has no current agent name. Message was not queued.")
+            if request.get("name") != binding["name"] or request.get("epoch") != state["epoch"]:
+                raise ContextMismatch("Name/epoch mismatch: --name and --epoch must match the caller pane or "
+                                      "shell's current assignment (contexts from before a reset are invalid). "
+                                      "Message was not queued.")
+            message = validate_message(self.config, binding["name"], request.get("msg"), request.get("tts"),
+                                       request.get("source"), binding["voice_profile"])
+            uid = uuid.uuid4().hex
+            try:
+                fields, warnings = conversation.resolve(
+                    request, sender=binding["name"], epoch=state["epoch"], message_id=uid,
+                    user_name=clean_text(user) if isinstance(user, str) else None,
+                    find_agent=lambda name: (allocation.find_agent(state, name) or {}).get("name"),
+                    find_message=self.find_message)
+            except conversation.ConversationError as exc:
+                raise CommsError(f"{exc} Message was not queued.") from None
+            message.update(uid=uid, message_id=uid, created_at=datetime.now(timezone.utc).isoformat(),
+                           epoch=state["epoch"], voice_profile_id=binding["voice_profile_id"], **fields)
+            private_dir(self.paths.state)
+            try:
+                with FileLock(self.paths.state / "history.lock"):
+                    message_history.append(self.paths.state, message,
+                                           max_entries=self.config.get("history_size", message_history.MAX_ENTRIES))
+            except (OSError, ValueError):
+                raise CommsError("Could not save message history; message was not accepted.") from None
+            return message, warnings
+
+        try:
+            return store.update(operation)
+        except allocation.AllocationError as exc:
+            raise CommsError(f"{exc} Message was not queued.") from None
 
     def schedule_title_refresh(self, identity, pane_env):
         if pane_env is None:
@@ -1453,10 +1569,13 @@ class Server:
     def snapshot(self):
         return {"ok": True, "protocol_version": VERSION, "event": "state", "listener_generation": self.generation,
                 "message": dict(self.current) if self.current else None,
-                "audio": self.audio_status()}
+                "audio": self.audio_status(), "lifecycle": dict(self.lifecycle)}
 
-    def publish(self, message):
+    def publish(self, message, event, message_id=None):
+        """Advance the shared lifecycle: start, display (progress timing), end."""
         self.current = message
+        self.lifecycle = {"timeline": self.generation, "seq": self.lifecycle["seq"] + 1, "event": event,
+                          "message_id": message_id if message_id is not None else (message or {}).get("uid")}
         self.display.show(message)
         self.broadcast()
 
@@ -1495,7 +1614,7 @@ class Server:
             self.claimed.clear()
             self.ready.clear()
             self.lease, self.audio_duration = None, None
-            self.publish({**message, "phase": "preparing"})
+            self.publish({**message, "phase": "preparing"}, "start")
             # Give local watchers a short opportunity to claim speech. A single
             # lease prevents duplicate synthesis charges and overlapping players.
             if not self.audio_muted:
@@ -1506,11 +1625,14 @@ class Server:
                     await asyncio.wait_for(self.ready.wait(), speech.REQUEST_TIMEOUT + 10)
             duration = self.audio_duration or max(self.config.get("display_seconds", 5), speech.estimate_seconds(message["msg"]))
             delay = 0.2 if self.audio_duration else 0
-            self.publish({**self.current, "phase": "displaying", "started_at": time.monotonic() + delay, "duration": duration})
+            self.publish({**self.current, "phase": "displaying", "started_at": time.monotonic() + delay,
+                          "duration": duration}, "display")
             await asyncio.sleep(duration + delay + (0.15 if self.audio_duration else 0))
             self.queue.task_done()
             if self.queue.empty():
-                self.publish(None)
+                self.publish(None, "end", message["uid"])
+            else:
+                self.publish(self.current, "end")
 
     async def handle(self, reader, writer):
         task = asyncio.current_task()
@@ -1532,6 +1654,7 @@ class Server:
                 env = await asyncio.to_thread(request_owner_env, request)
                 await asyncio.to_thread(checked_context, env)
                 result = await asyncio.to_thread(pane_binding, self.paths, self.config, clear=True, env=env)
+                result = {**result, "id": result.get("name")}  # Compatibility alias for name.
                 await write_frame(writer, {"ok": True, "protocol_version": VERSION, "result": result})
             elif request.get("command") == "context":
                 env = await asyncio.to_thread(request_owner_env, request)
@@ -1546,27 +1669,30 @@ class Server:
                     raise CommsError("Missing caller process ID.")
                 env = await asyncio.to_thread(request_owner_env, request)
                 try:
-                    identity = await asyncio.to_thread(pane_binding, self.paths, self.config, allocate=False, env=env)
+                    epoch, binding = await asyncio.to_thread(pane_binding, self.paths, self.config, allocate=False, env=env)
+                    name = binding["name"]
                 except ContextMismatch:
-                    identity = None
-                await write_frame(writer, {"ok": True, "protocol_version": VERSION, "id": identity})
+                    epoch, name = None, None
+                await write_frame(writer, {"ok": True, "protocol_version": VERSION, "id": name, "name": name,
+                                           "epoch": epoch})
             elif request.get("command") == "send":
-                message = validate_message(self.config, request.get("id"), request.get("msg"), request.get("tts"), request.get("source"))
-                if self.queue.full():
+                if "pane_env" not in request and "shell_pid" not in request:
+                    raise CommsError("Missing caller ownership; upgrade the agent-comms client. Message was not queued.")
+                if self.queue.qsize() + self.accepting >= self.queue.maxsize:
                     raise CommsError("Message queue is full; try again later.") from None
-                message.update(uid=uuid.uuid4().hex, created_at=datetime.now(timezone.utc).isoformat())
-                private_dir(self.paths.state)
+                self.accepting += 1
                 try:
-                    with FileLock(self.paths.state / "history.lock"):
-                        message_history.append(self.paths.state, message,
-                                               max_entries=self.config.get("history_size", message_history.MAX_ENTRIES))
-                except (OSError, ValueError):
-                    raise CommsError("Could not save message history; message was not accepted.") from None
+                    env = await asyncio.to_thread(request_owner_env, request)
+                    # File locks and shell inspection must not stall speech/watch clients.
+                    message, warnings = await asyncio.to_thread(self.accept, request, env)
+                finally:
+                    self.accepting -= 1
                 self.pending[message["uid"]] = message
                 self.queue.put_nowait(message)
-                await write_frame(writer, {"ok": True, "protocol_version": VERSION,
+                await write_frame(writer, {"ok": True, "protocol_version": VERSION, "message_id": message["uid"],
+                                           "warnings": warnings,
                                            "estimated_total_seconds": self.estimated_total_seconds()})
-                self.schedule_title_refresh(message["id"], request.get("pane_env"))
+                self.schedule_title_refresh(message["name"], request.get("pane_env"))
             elif request.get("command") == "audio":
                 status = self.set_audio(request.get("action"), request.get("seconds"))
                 await write_frame(writer, {"ok": True, "protocol_version": VERSION, "audio": status})
@@ -1619,7 +1745,8 @@ class Server:
                 raise CommsError("Unknown command.")
         except CommsError as exc:
             with suppress(OSError, asyncio.TimeoutError):
-                await write_frame(writer, {"ok": False, "error": str(exc)})
+                await write_frame(writer, {"ok": False, "error": str(exc),
+                                           **({"context_mismatch": True} if isinstance(exc, ContextMismatch) else {})})
         except (OSError, asyncio.TimeoutError):
             pass
         finally:
@@ -1634,12 +1761,10 @@ class Server:
             listener = await asyncio.start_server(self.handle, "127.0.0.1", 0, limit=MAX_FRAME)
             processor = None
             try:
-                atomic_json(discovery, {"protocol_version": VERSION, "prefix_policy": PREFIX_POLICY, "spatial_prefix": True,
-                                        "audio_control": True, "pane_identity": True, "pane_identity_clear": True,
-                                        "shell_identity": True,
+                atomic_json(discovery, {"protocol_version": VERSION, **CAPABILITIES,
                                         "port": listener.sockets[0].getsockname()[1], "token": self.token})
                 with TerminalDisplay(self.quiet) as self.display, stop_signals(self.stop):
-                    self.publish(None)
+                    self.publish(None, "idle")
                     LOG.info("Listener ready: pid=%s", os.getpid())
                     processor = asyncio.create_task(self.process())
                     # Surface unexpected worker failures instead of leaving a dead queue.
@@ -1679,18 +1804,23 @@ def parser():
     # values supplied before it with subparser defaults.
     def common(target, defaults=True):
         default = None if defaults else argparse.SUPPRESS
-        target.add_argument("--config", default=default, help="Identity TOML path (AGENT_COMMS_CONFIG)")
-        target.add_argument("--state-dir", default=default, help="Bag state directory (AGENT_COMMS_STATE_DIR)")
+        target.add_argument("--config", default=default, help="Config TOML path (AGENT_COMMS_CONFIG)")
+        target.add_argument("--state-dir", default=default, help="Allocation/history state directory (AGENT_COMMS_STATE_DIR)")
         target.add_argument("--runtime-dir", default=default, help="Discovery/lock directory (AGENT_COMMS_RUNTIME_DIR)")
     common(result)
     subs = result.add_subparsers(dest="command", required=True)
-    identity = subs.add_parser("context", help="Return caller ID, name, and required message prefix as JSON")
+    identity = subs.add_parser("context", help="Return the caller's generated name, reset epoch, and required prefix as JSON")
     identity_actions = identity.add_mutually_exclusive_group()
-    identity_actions.add_argument("--refill", action="store_true", help="Reshuffle without drawing")
-    identity_actions.add_argument("--clear", action="store_true", help="Release the current pane or shell's identity without allocating another")
-    identity_actions.add_argument("--clear-all", action="store_true", help="Release all pane and shell identities in this state directory; agents must run context again")
-    review = subs.add_parser("voice-review", help="Audition non-approved voices and save approval decisions")
-    review.add_argument("--all", action="store_true", help="Audition all identities, including approved voices")
+    identity_actions.add_argument("--refill", action="store_true", help=argparse.SUPPRESS)  # Retired; reports guidance.
+    identity_actions.add_argument("--clear", action="store_true", help="Release the current pane or shell's name; the next context gets a fresh name")
+    identity_actions.add_argument("--clear-all", action="store_true", help="Release all pane and shell bindings; issued names stay spent")
+    bags = subs.add_parser("bags", help="Inspect or explicitly reset the name and voice bags")
+    bag_actions = bags.add_subparsers(dest="action", required=True)
+    bag_status = bag_actions.add_parser("status", help="Show generation, remaining bag sizes, and bindings as JSON")
+    bag_reset = bag_actions.add_parser("reset", help="Start a new epoch at generation 0; clears all bindings (also migrates legacy state)")
+    bag_reset.add_argument("--confirm", action="store_true", help="Required: names may repeat and cached contexts become invalid")
+    review = subs.add_parser("voice-review", help="Audition non-approved voice profiles and save approval decisions")
+    review.add_argument("--all", action="store_true", help="Audition all active voice profiles, including approved voices")
     serve_parser = subs.add_parser("serve", help="Run the single per-user listener")
     serve_parser.add_argument("--quiet", action="store_true", help="Disable the standalone terminal display")
     service = subs.add_parser("service", help="Manage the per-user OS service (macOS launchd / Windows Task Scheduler)")
@@ -1706,10 +1836,23 @@ def parser():
             target.add_argument("--lines", type=int, default=100)
             target.add_argument("--follow", action="store_true")
     send_parser = subs.add_parser("send", help="Queue a named message")
-    send_parser.add_argument("--id", required=True, help="Expected caller identity ID returned by context")
+    sender = send_parser.add_mutually_exclusive_group()
+    sender.add_argument("--name", help="Expected caller name returned by context")
+    sender.add_argument("--id", help="Deprecated alias for --name (accepts the generated name)")
+    send_parser.add_argument("--epoch", help="Reset epoch returned by context")
     send_parser.add_argument("--msg", required=True)
     send_parser.add_argument("--tts", help="Speech text including optional ElevenLabs tags; defaults to --msg")
-    watcher = subs.add_parser("watch", help="Stream current messages as tuios push lines")
+    send_parser.add_argument("--display-recipient", metavar="NAME",
+                             help="Displayed recipient only; does not route or deliver the message. "
+                                  "Defaults to the configured user.")
+    send_parser.add_argument("--role", choices=conversation.ROLES, help="Your side of the displayed exchange (default: requester)")
+    send_parser.add_argument("--kind", choices=conversation.KINDS, help="Displayed message kind (default: statement)")
+    send_parser.add_argument("--emotion", help=f"Displayed expression: {', '.join(conversation.FACES)} (default: neutral)")
+    send_parser.add_argument("--reply-to", metavar="MESSAGE_ID", help="Continue the displayed exchange of an accepted message")
+    watcher = subs.add_parser("watch", help="Stream current messages as tuios push lines, or show the conversation view")
+    watcher.add_argument("--view", choices=("captions", "conversation"), default="captions",
+                         help="captions: dock caption line with speech (default); conversation: silent pane-sized view")
+    watcher.add_argument("--no-animation", action="store_true", help="Conversation view: keep sides and emphasis without sliding")
     watcher.add_argument("--no-color", action="store_true")
     watcher.add_argument("--width", type=int, default=96, help="Maximum display cells (default: 96)")
     watcher.add_argument("--mute", action="store_true", help="Display captions without generating or playing speech")
@@ -1726,15 +1869,21 @@ def parser():
     audio.add_argument("--seconds", type=float, help="Automatically unmute after this many seconds (mute only)")
     history = subs.add_parser("history", help="Print previous accepted messages, even when the listener is offline")
     history.add_argument("--limit", type=int, help="Number of messages to show (defaults to history_size)")
-    history.add_argument("--id", help="Filter by identity ID")
+    history_name = history.add_mutually_exclusive_group()
+    history_name.add_argument("--name", help="Filter by generated agent name")
+    history_name.add_argument("--id", help="Deprecated alias: filter by record ID (the name, or a legacy identity ID)")
+    history.add_argument("--epoch", help="Filter by reset epoch, disambiguating repeated names")
     history.add_argument("--session", help="Filter by tuios session name")
+    history.add_argument("--watch", action="store_true", help="Keep the view open and redraw as messages arrive")
+    history.add_argument("--refresh-time", type=float, metavar="SECONDS", help="Watch polling interval (default: 1.0)")
     history_format = history.add_mutually_exclusive_group()
     history_format.add_argument("--json", action="store_true", help="Print machine-readable full records including speech text")
     history_format.add_argument("--raw", action="store_true", help="Print unstyled timestamp/name/message lines")
     history.add_argument("--no-color", action="store_true", help="Disable history heading colors")
     instructions = subs.add_parser("instructions", help="Print shared communication instructions without allocating identity")
     instructions.add_argument("--format", choices=("json", "text"), default="json")
-    for sub in (identity, review, serve_parser, service, restart, send_parser, watcher, instructions, history, audio):
+    for sub in (identity, bags, bag_status, bag_reset, review, serve_parser, service, restart, send_parser, watcher,
+                instructions, history, audio):
         common(sub, defaults=False)
     return result
 
@@ -1810,6 +1959,30 @@ def main(argv=None):
         elif args.command == "restart":
             restart_watchers(paths)
             print("Watcher reload requested; listener unchanged.")
+        elif args.command == "context" and args.refill:
+            raise CommsError("context --refill was retired: names refill automatically when the bag is exhausted. "
+                             "For an explicit new epoch at generation 0, use 'agent-comms bags reset --confirm'.")
+        elif args.command == "bags":
+            config = load_config(paths.config)
+            store = pane_identity.store(paths, lock=FileLock, atomic_json=atomic_json, private_dir=private_dir)
+            try:
+                if args.action == "status":
+                    try:
+                        state = store.read()
+                    except allocation.LegacyState as exc:
+                        print(json.dumps({"initialized": False, "legacy": True, "guidance": str(exc)}))
+                        return 0
+                    print(json.dumps(allocation.status(state, config), ensure_ascii=True))
+                else:
+                    if not args.confirm:
+                        raise CommsError("bags reset needs --confirm: it clears every binding, returns names to "
+                                         "generation 0 (names may repeat), and invalidates cached contexts.")
+                    result = store.reset(config)
+                    print(json.dumps(result, ensure_ascii=True))
+                    print("agent-comms: Reset complete. Cached contexts are invalid; agents must run "
+                          "'agent-comms context' again. Names may now repeat earlier names.", file=sys.stderr)
+            except allocation.AllocationError as exc:
+                raise CommsError(str(exc)) from None
         elif args.command == "context" and args.clear_all:
             result = pane_identity.clear_all(paths, private_dir=private_dir, lock=FileLock,
                                              atomic_json=atomic_json, error=CommsError)
@@ -1833,7 +2006,22 @@ def main(argv=None):
             limit = history_size if args.limit is None else args.limit
             if not 1 <= limit <= history_size:
                 raise CommsError(f"--limit must be between 1 and {history_size}.")
-            messages = message_history.read(paths.state, limit, args.id, args.session, max_entries=history_size)
+            if args.id is not None:
+                print("agent-comms: history --id is deprecated; use --name.", file=sys.stderr)
+            filters = {"identity": args.id, "name": args.name, "epoch": args.epoch, "session": args.session}
+            if args.refresh_time is not None and not args.watch:
+                raise CommsError("--refresh-time requires --watch.")
+            if args.watch:
+                refresh = 1.0 if args.refresh_time is None else args.refresh_time
+                if not math.isfinite(refresh) or refresh <= 0:
+                    raise CommsError("--refresh-time must be a positive, finite number of seconds.")
+                if args.json or args.raw:
+                    raise CommsError("--watch cannot be combined with --json or --raw.")
+                if not sys.stdout.isatty():
+                    raise CommsError("--watch requires a terminal; use one-shot history for redirected output.")
+                return history_watch(paths, limit=limit, history_size=history_size, refresh=refresh, filters=filters,
+                                     color=not args.no_color and "NO_COLOR" not in os.environ)
+            messages = message_history.read(paths.state, limit, max_entries=history_size, **filters)
             if args.json:
                 print(json.dumps(messages, ensure_ascii=True))
             elif args.raw:
@@ -1845,6 +2033,8 @@ def main(argv=None):
         elif args.command == "watch":
             if not 16 <= args.width <= 1000:
                 raise CommsError("--width must be between 16 and 1000.")
+            if args.view == "conversation" and not sys.stdout.isatty():
+                raise CommsError("--view conversation is pane-sized and requires a terminal.")
             try:
                 settings = load_config(paths.config).get("speech", {})
             except CommsError:
@@ -1853,37 +2043,55 @@ def main(argv=None):
                 settings = {}
             reload_watcher = asyncio.run(watch(
                 paths, color=not args.no_color and "NO_COLOR" not in os.environ, width=args.width,
-                muted=args.mute, flash=args.flash, settings=settings, vfx=args.vfx))
+                muted=args.mute, flash=args.flash, settings=settings, vfx=args.vfx,
+                view=args.view, animate=not args.no_animation))
             if reload_watcher:
                 original_args = list(sys.argv[1:] if argv is None else argv)
                 os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve()), *original_args])
         else:
             config = load_config(paths.config)
             if args.command == "context":
-                if args.refill:
-                    draw_id(paths, config, refill=True)
-                elif args.clear:
+                if args.clear:
                     print(json.dumps(asyncio.run(listener_context(paths, clear=True)), ensure_ascii=True, separators=(",", ":")))
                 else:
                     print(json.dumps(asyncio.run(listener_context(paths)), ensure_ascii=True, separators=(",", ":")))
             elif args.command == "voice-review":
                 voice_review(paths, config, all_voices=args.all)
             elif args.command == "send":
+                if args.name is None and args.id is None:
+                    raise ContextMismatch("send needs --name NAME --epoch EPOCH from 'agent-comms context'. "
+                                          "Message was not queued.")
+                if args.id is not None:
+                    print("agent-comms: --id is deprecated; use --name with the generated name.", file=sys.stderr)
+                expected = args.name if args.name is not None else args.id
+                display = {"display_recipient": args.display_recipient, "role": args.role, "kind": args.kind,
+                           "emotion": args.emotion, "reply_to": args.reply_to}
+                try:
+                    conversation.validate_request(display)
+                except conversation.ConversationError as exc:
+                    raise CommsError(f"{exc} Message was not queued.") from None
                 source = checked_context()
-                identity = (pane_binding(paths, config, allocate=False) if os.environ.get("TUIOS_ENV") == "1"
-                            else asyncio.run(shell_binding(paths)))
-                if args.id != identity:
-                    raise ContextMismatch(
-                        "Identity mismatch: --id does not match the caller pane or shell's current identity. "
-                        "Message was not queued."
-                    )
-                validate_message(config, identity, args.msg, args.tts, source)
-                result = asyncio.run(send(paths, identity, args.msg, args.tts, source))
+                epoch, name = caller_binding(paths)
+                if expected != name:
+                    raise ContextMismatch("Name mismatch: --name does not match the caller pane or shell's "
+                                          "current name. Message was not queued.")
+                if args.epoch is None:
+                    raise ContextMismatch("Missing --epoch: send needs the epoch returned by context. "
+                                          "Message was not queued.")
+                if args.epoch != epoch:
+                    raise ContextMismatch("Epoch mismatch: this context predates an explicit bag reset. "
+                                          "Message was not queued.")
+                validate_message(config, name, args.msg, args.tts, source)
+                result = asyncio.run(send(paths, name, epoch, args.msg, args.tts, source, display))
+                for warning in result.get("warnings", []) if isinstance(result, dict) else []:
+                    print(f"agent-comms: warning: {clean_text(str(warning))}", file=sys.stderr)
                 seconds = result.get("estimated_total_seconds") if isinstance(result, dict) else None
                 if seconds is None:
                     print("Message queued. Total time unavailable; restart the listener to enable estimates.")
                 else:
                     print(f"Estimated total time: {seconds:.1f} seconds (approximate).")
+                if isinstance(result, dict) and isinstance(result.get("message_id"), str):
+                    print(f"Message ID: {result['message_id']}")
             elif args.command == "serve":
                 private_dir(paths.state / "logs")
                 handler = RotatingFileHandler(paths.state / "logs/server.log", maxBytes=2_000_000,
@@ -1919,8 +2127,8 @@ def main(argv=None):
         else:
             print("agent-comms: Fresh context: " + json.dumps(context, ensure_ascii=True, separators=(",", ":")),
                   file=sys.stderr)
-            print("agent-comms: Use this up-to-date ID, name, and prefix; recompose both --msg and --tts "
-                  "and retry once with --id. No separate context lookup is needed. "
+            print("agent-comms: Use this up-to-date name, epoch, and prefix; recompose both --msg and --tts "
+                  "and retry once with --name NAME --epoch EPOCH. No separate context lookup is needed. "
                   "Use a nonempty prefix exactly once at the start of both arguments.", file=sys.stderr)
         return 1
     except (CommsError, service_manager.ServiceError, OSError, asyncio.TimeoutError) as exc:

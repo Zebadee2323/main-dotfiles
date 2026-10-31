@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import signal
 import socket
 import subprocess
@@ -18,9 +19,46 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 import agent_comms as app
+import allocation
+import pane_identity
 
 ROOT = Path(__file__).resolve().parent
 SCRIPT = ROOT / "agent_comms.py"
+# A fake pane on a nonexistent tuios socket: tests never reach the user's live daemon.
+TEST_PANE = {"TUIOS_ENV": "1", "TUIOS_SESSION": "test", "TUIOS_SOCKET": "/nonexistent/agent-comms-test.sock"}
+NAMES = 'female = ["Alice", "Cleo"]\nmale = ["Bob"]\n'
+VOICES = ('[voice_groups.main.voices.voice_f]\ngender = "female"\neleven_labs_voice_id = ""\n'
+          '[voice_groups.main.voices.voice_m]\ngender = "male"\neleven_labs_voice_id = ""\n')
+
+
+def write_config(config: Path, body="", *, names=NAMES, voices=VOICES):
+    """Write a config plus its names.toml. body precedes the voice tables (top-level keys)."""
+    config.parent.mkdir(parents=True, exist_ok=True)
+    (config.parent / "names.toml").write_text(names, encoding="utf-8")
+    config.write_text('names_file = "names.toml"\n' + body + voices, encoding="utf-8")
+
+
+def seed_binding(paths, env, name, *, profile=None, generation=0):
+    """Deterministically bind an owner to a catalog name; returns the epoch."""
+    config = app.load_config(paths.config)
+    key, daemon, pane = pane_identity.owner(env)
+    store = pane_identity.store(paths, lock=app.FileLock, atomic_json=app.atomic_json, private_dir=app.private_dir)
+    base = re.match(r"[A-Za-z]+", name).group(0)
+
+    def operation(state):
+        entry = next((e for e in state["names"]["remaining"] if e[0] == base), None)
+        gender = entry[1] if entry else dict(config["names"])[base]
+        if entry and generation == state["names"]["generation"]:
+            state["names"]["remaining"].remove(entry)
+        chosen = profile or allocation.eligible_profiles(config)[gender][0]
+        state["bindings"][key] = {
+            "daemon": daemon, "pane_id": pane, "name": name, "base_name": base, "gender": gender,
+            "name_generation": generation, "voice_profile_id": chosen, "voice_group": config["voice_group_of"][chosen],
+            "voice_profile": allocation.snapshot(config, chosen), "assigned_at": allocation.now_iso()}
+        state["names"]["generation"] = max(state["names"]["generation"], generation)
+        state["scanned"][daemon] = time.time()  # Never inventory the live tuios daemon from tests.
+        return state["epoch"]
+    return store.update(operation, config=config)
 
 
 class Fixture(unittest.TestCase):
@@ -29,14 +67,7 @@ class Fixture(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name)
         self.paths = app.Paths(root / "config/config.toml", root / "state", root / "run")
-        self.paths.config.parent.mkdir()
-        self.paths.config.write_text(
-            'display_seconds = 0.18\n'
-            '[identities.a]\nname = "Alice"\neleven_labs_voice_id = ""\n'
-            '[identities.b]\nname = "Bob"\neleven_labs_voice_id = ""\n'
-            '[identities.c]\nname = "Cleo"\neleven_labs_voice_id = ""\n',
-            encoding="utf-8",
-        )
+        write_config(self.paths.config, 'display_seconds = 0.18\n')
         self.env = {
             # Test sends must not inspect the user's live tuios focus or inherit
             # a paid speech credential. Context/speech tests supply their own.
@@ -52,18 +83,31 @@ class Fixture(unittest.TestCase):
         return subprocess.run([sys.executable, str(SCRIPT), *args], env=self.env,
                               capture_output=True, text=True, encoding="utf-8", timeout=10)
 
-    def transport_send(self, identity, message, tts=None):
+    def pane_env(self, pane):
+        return {**TEST_PANE, "TUIOS_PANE_ID": pane}
+
+    def sender(self, name="Alice", pane=None):
+        """Bound send fields (name, epoch, pane_env) for a fake pane, seeded once per name."""
+        bound = self.__dict__.setdefault("_bound", {})
+        if name not in bound:
+            env = self.pane_env(pane or f"pane-{name.lower()}")
+            bound[name] = {"name": name, "epoch": seed_binding(self.paths, env, name), "pane_env": env}
+        return dict(bound[name])
+
+    def transport_send(self, name, message, tts=None):
         """Exercise transport in isolation; pane attribution has separate CLI tests."""
+        sender = self.sender(name)
         code = ("import asyncio,sys; import agent_comms as a; "
                 "p=a.Paths.resolve(a.parser().parse_args(['serve'])); "
-                "identity,message,tts=sys.argv[1:];\n"
+                "name,epoch,message,tts=sys.argv[1:];\n"
                 "try:\n"
-                " a.validate_message(a.load_config(p.config),identity,message,tts)\n"
-                " asyncio.run(a.send(p,identity,message,tts))\n"
+                " a.validate_message(a.load_config(p.config),name,message,tts)\n"
+                " asyncio.run(a.send(p,name,epoch,message,tts))\n"
                 "except (a.CommsError,OSError) as e:\n"
                 " print(str(e),file=sys.stderr); sys.exit(1)\n")
-        return subprocess.run([sys.executable, "-c", code, identity, message, message if tts is None else tts],
-                              cwd=ROOT, env=self.env, capture_output=True, text=True, timeout=10)
+        return subprocess.run([sys.executable, "-c", code, name, sender["epoch"], message,
+                               message if tts is None else tts],
+                              cwd=ROOT, env={**self.env, **sender["pane_env"]}, capture_output=True, text=True, timeout=10)
 
     def process(self, *args):
         process = subprocess.Popen([sys.executable, str(SCRIPT), *args], env=self.env,
@@ -120,67 +164,27 @@ class Fixture(unittest.TestCase):
 
     def message(self, stream):
         while True:
-            message = json.loads(stream.readline())["message"]
+            frame = json.loads(stream.readline())
+            message = frame["message"]
+            if message is not None and frame.get("lifecycle", {}).get("event") == "end":
+                continue  # The ended message stays current only until the next start.
             if message is None or message.get("phase") == "displaying":
                 return message
 
 
-class BagTests(Fixture):
-    def new_identity(self):
-        # Test the internal allocation bag across processes, not pane ownership.
-        code = ("import json; import agent_comms as a; "
-                "p=a.Paths.resolve(a.parser().parse_args(['context'])); "
-                "print(json.dumps({'id':a.draw_id(p,a.load_config(p.config))}))")
-        return subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=self.env,
-                              capture_output=True, text=True, timeout=10)
-
-    def test_two_cycles_and_refill_only(self):
-        for _ in range(2):
-            draws = [self.new_identity() for _ in range(3)]
-            self.assertTrue(all(p.returncode == 0 for p in draws))
-            self.assertEqual(sorted(json.loads(p.stdout)["id"] for p in draws), ["a", "b", "c"])
-        self.assertEqual(self.cli("context", "--refill").stdout, "")
-        state = json.loads((self.paths.state / "bag.json").read_text())
-        self.assertEqual(len(state["remaining"]), 3)
-
-    def test_concurrent_draws_preserve_cycle_accounting(self):
-        self.cli("context", "--refill")
-        with ThreadPoolExecutor(max_workers=9) as pool:
-            draws = list(pool.map(lambda _: self.new_identity(), range(30)))
-        self.assertTrue(all(p.returncode == 0 for p in draws), [p.stderr for p in draws])
-        for identity in ("a", "b", "c"):
-            self.assertEqual(sum(json.loads(p.stdout)["id"] == identity for p in draws), 10)
-        self.assertEqual(json.loads((self.paths.state / "bag.json").read_text())["remaining"], [])
-
-    def test_front_of_persisted_bag_is_drawn(self):
-        self.paths.state.mkdir()
-        app.atomic_json(self.paths.state / "bag.json", {"ids": ["a", "b", "c"], "remaining": ["c", "a"]})
-        self.assertEqual(json.loads(self.new_identity().stdout)["id"], "c")
-        self.assertEqual(json.loads(self.new_identity().stdout)["id"], "a")
-
-    def test_config_change_and_corrupt_state_start_new_cycle(self):
-        self.new_identity()
-        state = self.paths.state / "bag.json"
-        state.write_text("broken json")
-        result = self.new_identity()
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("corrupt", result.stderr)
-        with self.paths.config.open("a") as stream:
-            stream.write('[identities.d]\nname = "Delta"\n')
-        self.new_identity()
-        self.assertEqual(json.loads(state.read_text())["ids"], ["a", "b", "c", "d"])
-
+class ConfigTests(Fixture):
     def test_missing_config_is_actionable(self):
         self.paths.config.unlink()
         result = self.cli("context")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("Cannot read identity config", result.stderr)
+        self.assertIn("Cannot read agent-comms config", result.stderr)
         self.assertFalse(self.paths.config.exists())
 
     def test_invalid_config_and_global_overrides(self):
-        result = self.cli("--runtime-dir", str(self.paths.runtime), "context", "--refill", "--state-dir", str(self.paths.state))
+        result = self.cli("--runtime-dir", str(self.paths.runtime), "bags", "status", "--state-dir", str(self.paths.state))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.paths.config.write_text('display_seconds = nan\n[identities.x]\nname = "X"\n')
+        self.assertEqual(json.loads(result.stdout), {"initialized": False})
+        write_config(self.paths.config, "display_seconds = nan\n")
         result = self.cli("context")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("display_seconds", result.stderr)
@@ -188,7 +192,7 @@ class BagTests(Fixture):
 
 class ServerTests(Fixture):
     def test_offline_send_does_not_start_server(self):
-        result = self.transport_send("a", "hello")
+        result = self.transport_send("Alice", "hello")
         self.assertEqual(result.returncode, 1)
         self.assertIn("offline", result.stderr)
         self.assertFalse((self.paths.runtime / "server.json").exists())
@@ -196,12 +200,12 @@ class ServerTests(Fixture):
     def test_configured_expiration_and_server_sanitization(self):
         self.start_server()
         stream = self.subscribe()
-        _, sender = self.request("send", id="a", msg="hello\nworld\x1b[31m!\x1b[0m")
+        _, sender = self.request("send", **self.sender("Alice"), msg="hello\nworld\x1b[31m!\x1b[0m")
         self.assertTrue(json.loads(sender.readline())["ok"])
         start = time.monotonic()
         active = self.message(stream)
         self.assertEqual({key: active[key] for key in ("id", "name", "msg")},
-                         {"id": "a", "name": "Alice", "msg": "hello\nworld!"})
+                         {"id": "Alice", "name": "Alice", "msg": "hello\nworld!"})
         self.assertIsNone(self.message(stream))
         elapsed = time.monotonic() - start
         self.assertGreater(elapsed, 0.12)
@@ -213,7 +217,7 @@ class ServerTests(Fixture):
         for content, expected in (("broken", "Invalid discovery"),
                                   ('{"protocol_version": 99}', "Unsupported discovery")):
             discovery.write_text(content)
-            result = self.transport_send("a", "hello")
+            result = self.transport_send("Alice", "hello")
             self.assertEqual(result.returncode, 1)
             self.assertIn(expected, result.stderr)
 
@@ -249,8 +253,8 @@ class ServerTests(Fixture):
     def test_fifo_multiple_watchers_and_initial_snapshot(self):
         self.start_server()
         first, second = self.subscribe(), self.subscribe()
-        for identity, text in (("a", "first"), ("b", "second"), ("c", "third")):
-            _, stream = self.request("send", id=identity, msg=text)
+        for identity, text in (("Alice", "first"), ("Bob", "second"), ("Cleo", "third")):
+            _, stream = self.request("send", **self.sender(identity), msg=text)
             self.assertTrue(json.loads(stream.readline())["ok"])
         for text in ("first", "second", "third"):
             one, two = self.message(first), self.message(second)
@@ -259,7 +263,7 @@ class ServerTests(Fixture):
         self.assertIsNone(self.message(first))
         self.assertIsNone(self.message(second))
         # A newly attached watcher receives an active message immediately.
-        self.assertEqual(self.transport_send("a", "current").returncode, 0)
+        self.assertEqual(self.transport_send("Alice", "current").returncode, 0)
         _, stream = self.request("watch")
         self.assertEqual(json.loads(stream.readline())["message"]["msg"], "current")
 
@@ -267,16 +271,18 @@ class ServerTests(Fixture):
         self.start_server()
         for payload, error in (({"token": "bad"}, "Authentication"),
                                ({"protocol_version": 999}, "protocol"),
-                               ({"id": "unknown"}, "Unknown identity"),
+                               ({"name": "Unknown"}, "mismatch"),
+                               ({"epoch": "0" * 16}, "mismatch"),
+                               ({"pane_env": TEST_PANE | {"TUIOS_PANE_ID": "unbound"}}, "no current agent name"),
                                ({"msg": " "}, "nonempty"),
                                ({"msg": "x" * (app.MAX_MESSAGE + 1)}, "exceeds"),
                                ({"msg": "\ud800"}, "Unicode"),
                                ({"token": "\ud800"}, "Authentication")):
-            _, stream = self.request("send", **{"id": "a", "msg": "hi", **payload})
+            _, stream = self.request("send", **{**self.sender("Alice"), "msg": "hi", **payload})
             reply = json.loads(stream.readline())
             self.assertFalse(reply["ok"])
             self.assertIn(error, reply["error"])
-        self.assertEqual(self.transport_send("a", "healthy").returncode, 0)
+        self.assertEqual(self.transport_send("Alice", "healthy").returncode, 0)
 
     def test_malformed_and_oversized_frames_do_not_break_server(self):
         _, info = self.start_server()
@@ -285,7 +291,7 @@ class ServerTests(Fixture):
                 connection.sendall(frame)
                 reply = connection.recv(4096)
                 self.assertIn(b'"ok": false', reply)
-        self.assertEqual(self.transport_send("a", "still alive").returncode, 0)
+        self.assertEqual(self.transport_send("Alice", "still alive").returncode, 0)
 
     def test_crash_recovery_replaces_stale_discovery(self):
         server, old = self.start_server()
@@ -294,7 +300,7 @@ class ServerTests(Fixture):
         self.assertTrue((self.paths.runtime / "server.json").exists())
         _, new = self.start_server()
         self.assertNotEqual(old["token"], new["token"])
-        self.assertEqual(self.transport_send("b", "recovered").returncode, 0)
+        self.assertEqual(self.transport_send("Bob", "recovered").returncode, 0)
 
     def test_watcher_reconnects_across_offline_and_restart(self):
         watcher = self.process("watch", "--no-color")
@@ -319,7 +325,7 @@ class ServerTests(Fixture):
         until("offline")
         server, _ = self.start_server()
         until("idle")
-        self.transport_send("a", "watch this")
+        self.transport_send("Alice", "watch this")
         self.assertIn("Alice: watch this", until("watch this"))
         server.kill()
         server.wait(timeout=5)
@@ -376,7 +382,9 @@ class RenderingTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             paths = app.Paths.resolve(args)
         self.assertEqual(paths.config, ROOT / "config.toml")
-        self.assertTrue(app.load_config(paths.config)["identities"], "the default roster is user-editable")
+        config = app.load_config(paths.config)
+        self.assertGreaterEqual(len(config["names"]), 200, "ship hundreds of names")
+        self.assertTrue(config["voices"], "the default voice profiles are user-editable")
         self.assertFalse((ROOT / "config.lock").exists())
 
 
@@ -391,11 +399,14 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("offline", str(error.exception))
 
     async def test_full_queue_rejects_without_dropping_accepted_message(self):
-        config = {"identities": {"a": {"name": "Alice"}}}
         temp = tempfile.TemporaryDirectory(prefix="agent-comms-queue-test-")
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
-        server = app.Server(app.Paths(root / "config.toml", root / "state", root / "run"), config, quiet=True)
+        paths = app.Paths(root / "config/config.toml", root / "state", root / "run")
+        write_config(paths.config)
+        env = {**TEST_PANE, "TUIOS_PANE_ID": "queue-pane"}
+        epoch = seed_binding(paths, env, "Alice")
+        server = app.Server(paths, app.load_config(paths.config), quiet=True)
         server.queue = asyncio.Queue(maxsize=1)
         listener = await asyncio.start_server(server.handle, "127.0.0.1", 0)
         port = listener.sockets[0].getsockname()[1]
@@ -404,14 +415,16 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
             try:
                 await app.write_frame(writer, {"protocol_version": app.VERSION, "token": server.token,
-                                               "command": "send", "id": "a", "msg": text})
+                                               "command": "send", "name": "Alice", "epoch": epoch,
+                                               "pane_env": env, "msg": text})
                 return await app.read_frame(reader)
             finally:
                 await app.close_writer(writer)
 
         try:
-            self.assertTrue((await send("first"))["ok"])
-            second = await send("second")
+            with patch.object(server, "schedule_title_refresh"):
+                self.assertTrue((await send("first"))["ok"])
+                second = await send("second")
             self.assertFalse(second["ok"])
             self.assertIn("full", second["error"])
             self.assertEqual(server.queue.get_nowait()["msg"], "first")

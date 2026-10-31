@@ -47,13 +47,13 @@ class QueueEstimateTests(Fixture):
         # Claim speech to hold the first message in preparation while sending more.
         _, watcher = self.request("watch")
         watcher.readline()
-        self.transport_send("a", "hello world")
+        self.transport_send("Alice", "hello world")
         preparing = json.loads(watcher.readline())["message"]
         _, claim = self.request("claim-speech", uid=preparing["uid"])
         self.assertTrue(json.loads(claim.readline())["claimed"])
         totals = []
         for _ in range(2):
-            _, stream = self.request("send", id="a", msg="hi", tts="hello world")
+            _, stream = self.request("send", **self.sender("Alice"), msg="hi", tts="hello world")
             response = json.loads(stream.readline())
             self.assertTrue(response["ok"], response)
             totals.append(response["estimated_total_seconds"])

@@ -1,6 +1,6 @@
 ---
 name: agent-comms-voices
-description: Refresh or audit ElevenLabs voice assignments in agent-comms/config.toml. Use when choosing new identity voices, replacing unapproved voices, repeating a voice refresh (including "do it again"), avoiding rejected or duplicate voice IDs, or checking for premium voice surcharges. Preserve approved assignments by default, leave replacements unapproved, and verify current pricing and model compatibility.
+description: Refresh or audit ElevenLabs voices in agent-comms/config.toml voice profiles. Use when choosing new voices for voice profiles, replacing unapproved voices, repeating a voice refresh (including "do it again"), avoiding rejected or duplicate voice IDs, or checking for premium voice surcharges. Preserve approved voices by default, keep each profile's gender, leave replacements unapproved, and verify current pricing and model compatibility.
 ---
 
 # Agent-comms voice selection and pricing
@@ -16,14 +16,19 @@ silently approving replacements, or introducing voice-specific surcharges.
 2. Read and parse the on-disk TOML afresh on every invocation. The user may have
    approved or rejected voices since the preceding refresh. Treat attachments and
    prior conversation lists as context, not as the current source of truth.
-   Enumerate both legacy `identities` and `identity_groups.GROUP.identities`.
-   Preserve each identity's original table location and group activation settings.
-   Skip identities without an ElevenLabs assignment when refreshing a mixed-provider
-   roster; do not replace Pocket TTS or Phonon voice fields with ElevenLabs voices.
+   Voices live in voice profiles: `[voice_groups.GROUP.voices.PROFILE_ID]`, each
+   with a required `gender = "male"` or `"female"`. Profiles have no display
+   names; agent names are generated separately from `names.toml` and are never
+   stored in the config. Enumerate profiles in every group, including inactive
+   ones, and preserve each profile's table location and `active_groups`.
+   Skip profiles without an ElevenLabs assignment when refreshing a mixed-provider
+   config; do not replace Pocket TTS or Phonon voice fields with ElevenLabs voices.
+   If the file still has legacy `identities` / `identity_groups` tables, stop and
+   report that it needs conversion first (see the agent-comms README, Migration).
 3. Snapshot the original text and parsed data outside the repository for comparison.
    Inspect existing changes; do not overwrite unrelated work.
 4. Determine the operation:
-   - **Refresh:** replace only identities whose `voice_approved` is not true.
+   - **Refresh:** replace only profiles whose `voice_approved` is not true.
      A follow-up "again" repeats this against the latest file, not the previous
      batch. If none remain, report that and make no changes.
    - **Pricing audit:** inspect every assigned voice, including approved ones.
@@ -35,20 +40,33 @@ silently approving replacements, or introducing voice-specific surcharges.
 
 ## Preserve these invariants
 
-- Keep opaque identity keys, display names, speech settings, and
-  unrelated configuration intact. Voice catalog names need not match identity names.
+- Keep profile IDs (table keys), `gender`, speech settings, other providers'
+  fields, and unrelated configuration intact. Preserve the `# formerly NAME (ag_...)`
+  comments on profile table headers; they record retired static identities.
+  Profile IDs and voice catalog names need not match each other or any agent name.
+  Never add a `name` field to a profile; config loading rejects it.
+- **Keep the profile's gender.** A replacement ElevenLabs voice must have the
+  same gender as the profile: check `labels.gender` in the voice metadata (or the
+  library `gender` field) and treat a missing or ambiguous gender as unverified,
+  not a match. The profile's Phonon/Pocket TTS voice already has that gender;
+  never change `gender` to fit a candidate, because generated names are matched to
+  profiles by gender and switching `[speech].mode` must not change how an agent
+  sounds. If no verified same-gender candidate remains, report the shortage.
 - Preserve approved voice IDs in normal refreshes. Set every new assignment's
   `voice_approved = false`; never approve a voice on the user's behalf.
-- Exclude every ID in `[rejected_elevenlabs_voices].ids`, across all identities. Do not remove
+- Exclude every ID in `[rejected_elevenlabs_voices].ids`, across all profiles. Do not remove
   IDs from that list or add IDs merely because you replaced them. Rejection is a
   separate user decision, not a synonym for "previously assigned" or "costly".
 - Ensure assigned IDs are unique across the **entire** configuration, including
-  preserved approved identities and the rest of the replacement batch.
+  preserved approved profiles and the rest of the replacement batch.
 - Choose genuinely fresh candidates: exclude the complete pre-edit assignment set
-  rather than rotating old IDs between identities. Also avoid previously tried IDs
+  rather than rotating old IDs between profiles. Also avoid previously tried IDs
   available in the conversation or local review history when possible.
 - Update adjacent `# ElevenLabs: ...` catalog-label comments to the selected voice's
-  actual name, without renaming identities.
+  actual name, without renaming profiles or editing `# formerly ...` comments.
+- Changing a profile affects only future agent assignments: existing agents keep
+  an embedded snapshot of their profile until their binding is cleared. Mention
+  this when reporting, rather than clearing bindings yourself.
 
 ## Query ElevenLabs safely
 
@@ -68,7 +86,8 @@ Use current API documentation if endpoint parameters or field semantics differ:
   <https://elevenlabs.io/docs/api-reference/voices/get>.
 
 Filter results locally and display compact fields rather than dumping the entire
-catalog. Select voices using catalog descriptions, language,
+catalog. Filter candidates by the target profile's gender first, then select using
+catalog descriptions, language,
 delivery, age, accent, and texture. Do not claim to have auditioned a voice from
 metadata alone. Do not generate TTS, run `voice-review`, or incur audition costs
 unless the user requests it. Normal required agent announcements are not auditions.
@@ -113,7 +132,7 @@ Content-Type: application/json
 
 Otherwise ask before adding voices. Read API responses and use the returned
 `voice_id`, which may differ from the source ID. Recheck that returned ID for
-rejection, uniqueness, pricing, availability, and model support in account metadata
+rejection, uniqueness, gender, pricing, availability, and model support in account metadata
 **before** assigning it. Do not silently fall back to an incompatible voice after
 an API error or collection limit. Do not delete collection voices without consent.
 Disclose successful additions left unused if later validation rejects them.
@@ -127,12 +146,15 @@ Use targeted patches so comments, formatting, and user edits survive.
 After editing, parse TOML and programmatically check:
 
 1. Every intended target has a different ID and `voice_approved = false`.
-2. Non-target identities and target display names are unchanged.
-3. All assigned IDs are unique and none intersect `rejected_elevenlabs_voices.ids`.
-4. Every replacement exists in the account and supports the configured model.
-5. All assigned voices pass the current no-surcharge check, or explicitly report
+2. Non-target profiles are unchanged; target profiles keep their ID, table,
+   `gender`, other providers' fields, and `# formerly ...` comment.
+3. Every replacement's ElevenLabs gender matches its profile's `gender`.
+4. All assigned IDs are unique and none intersect `rejected_elevenlabs_voices.ids`.
+5. Every replacement exists in the account and supports the configured model.
+6. All assigned voices pass the current no-surcharge check, or explicitly report
    unresolved exceptions without claiming success.
-6. The rejection list and unrelated settings are unchanged.
+7. The rejection list and unrelated settings are unchanged, and no profile gained
+   a `name` field.
 
 Review the diff against the pre-operation snapshot rather than attributing existing
 repository changes to this operation. If validation fails, fix only your changes
@@ -140,12 +162,12 @@ or report the blocker; never discard user work. Do not commit unless requested.
 
 ## Completion
 
-Briefly report the file changed, replacement count, collection additions (including
-unused additions), uniqueness/rejection/pricing verification, and that replacements
+Briefly report the file changed, replacement count (by profile ID), collection additions (including
+unused additions), uniqueness/rejection/gender/pricing verification, and that replacements
 remain unapproved. For an audit, name any surcharge assignment replaced and whether
 its prior approval was reset. Mention standard usage charges and any incomplete
 verification. Follow the active harness's communication/display rules; do not hardcode
-an agent identity, voice ID, or messaging integration into this skill.
+an agent name, voice ID, or messaging integration into this skill.
 
 Regression scenarios are in `evals/evals.json`. Use fixtures or mocked API responses
 for tests; do not run these prompts against the live collection as an automatic test.

@@ -9,9 +9,9 @@ from unittest.mock import AsyncMock, Mock, patch
 import wave
 
 import agent_comms as app
+import allocation
 import speech
-from test_identity_groups import SOURCE
-from test_agent_comms import Fixture
+from test_agent_comms import Fixture, write_config
 
 
 class PocketSynthesisTests(unittest.IsolatedAsyncioTestCase):
@@ -85,18 +85,45 @@ class PocketSynthesisTests(unittest.IsolatedAsyncioTestCase):
         normalized.remove.assert_called_once()
 
 
+SOURCE = '''# Preserve grouping and comments.
+active_groups = ["pocket"]
+[speech]
+mode = "pocket_tts"
+[voice_groups.original.voices.a]
+gender = "female"
+phonon_voice = "Juniper"
+voice_approved = true
+[voice_groups.original.voices.b]
+gender = "male"
+[voice_groups.pocket.voices.c]
+gender = "female"
+pocket_tts_voice = "alba"
+[voice_groups.pocket.voices.d]
+gender = "male"
+pocket_tts_voice = "anna"
+'''
+
+
 class PocketReviewTests(Fixture):
+    def write_profile(self, profile, settings="", group="main"):
+        """Config with female profile "a" (extra fields in profile) plus a male profile; returns the source."""
+        write_config(self.paths.config, settings, voices=f'[voice_groups.{group}.voices.a]\ngender="female"\n{profile}'
+                     f'[voice_groups.{group}.voices.m]\ngender="male"\n')
+        return self.paths.config.read_text()
+
     def test_local_voice_paths_resolve_from_config_not_working_directory(self):
         for voice in ("voices/my-voice.wav", "voices/my-voice.safetensors",
                       "./voices/voice with spaces.wav", "voice.wav", "voice.safetensors"):
             with self.subTest(voice=voice):
-                source = ('[identities.a]\nname="Alice"\npocket_tts_voice_approved=true\n'
-                          f'pocket_tts_voice={json.dumps(voice)}\n')
-                self.paths.config.write_text(source)
+                source = self.write_profile(f'pocket_tts_voice_approved=true\npocket_tts_voice={json.dumps(voice)}\n')
                 config = app.load_config(self.paths.config)
                 expected = str(self.paths.config.resolve().parent / voice)
-                self.assertEqual(config["identities"]["a"]["pocket_tts_voice"], expected)
-                self.assertEqual(app.validate_message(config, "a", "Hello")["pocket_tts_voice"], expected)
+                self.assertEqual(config["voices"]["a"]["pocket_tts_voice"], expected)
+                # Assignment snapshots embed the already-absolute path.
+                snapshot = allocation.snapshot(config, "a")
+                self.assertEqual(snapshot["pocket_tts_voice"], expected)
+                self.assertEqual(app.validate_message(config, "Alice", "Hello", profile=snapshot)["pocket_tts_voice"],
+                                 expected)
                 self.assertEqual(self.paths.config.read_text(), source)
 
     def test_presets_urls_absolute_and_home_paths(self):
@@ -107,18 +134,14 @@ class PocketReviewTests(Fixture):
                 (str(self.paths.config.parent / "voice.wav"), str(self.paths.config.parent / "voice.wav")),
                 ("~/voices/voice.wav", str(Path.home() / "voices/voice.wav"))):
             with self.subTest(voice=voice):
-                self.paths.config.write_text(
-                    f'[identities.a]\nname="Alice"\npocket_tts_voice={json.dumps(voice)}\n')
-                self.assertEqual(app.load_config(self.paths.config)["identities"]["a"]["pocket_tts_voice"], expected)
+                self.write_profile(f'pocket_tts_voice={json.dumps(voice)}\n')
+                self.assertEqual(app.load_config(self.paths.config)["voices"]["a"]["pocket_tts_voice"], expected)
 
     def test_grouped_local_voice_is_resolved_for_review(self):
-        self.paths.config.write_text(
-            '[speech]\nmode="pocket_tts"\n'
-            '[identity_groups.pocket.identities.a]\nname="Alice"\n'
-            'pocket_tts_voice="voices/alice.safetensors"\n')
+        self.write_profile('pocket_tts_voice="voices/alice.safetensors"\n', '[speech]\nmode="pocket_tts"\n', "pocket")
         config = app.load_config(self.paths.config)
         expected = str(self.paths.config.resolve().parent / "voices/alice.safetensors")
-        self.assertEqual(config["identity_groups"]["pocket"]["identities"]["a"]["pocket_tts_voice"], expected)
+        self.assertEqual(config["voice_groups"]["pocket"]["voices"]["a"]["pocket_tts_voice"], expected)
         with patch.object(app.sys.stdin, "isatty", return_value=True), \
                 patch.object(speech, "player", return_value="fake"), \
                 patch.object(speech, "synthesize_pocket_tts", AsyncMock(return_value=Mock())) as local, \
@@ -129,7 +152,7 @@ class PocketReviewTests(Fixture):
         self.assertEqual(local.call_args.args[1], expected)
 
     def test_reviews_only_active_group_and_saves_provider_specific_decisions(self):
-        self.paths.config.write_text(SOURCE)
+        write_config(self.paths.config, voices=SOURCE)
         audio = Mock()
         with patch.object(app.sys.stdin, "isatty", return_value=True), \
                 patch.dict(app.os.environ, {"ELEVENLABS_API_KEY": ""}), \
@@ -143,11 +166,14 @@ class PocketReviewTests(Fixture):
         self.assertEqual([c.args[1] for c in local.call_args_list], ["alba", "anna"])
         cloud.assert_not_called()
         config = app.load_config(self.paths.config)
-        self.assertTrue(config["identities"]["c"]["pocket_tts_voice_approved"])
-        self.assertNotIn("pocket_tts_voice_approved", config["identities"]["d"])
+        self.assertTrue(config["voices"]["c"]["pocket_tts_voice_approved"])
+        self.assertNotIn("pocket_tts_voice_approved", config["voices"]["d"])
+        self.assertNotIn("pocket_tts_voice_approved", config["voices"]["a"])
+        self.assertIn("# Preserve grouping and comments.", self.paths.config.read_text())
         self.assertIn("local Pocket TTS", app.communication_instructions(config))
         self.assertNotIn("<break", app.communication_instructions(config))
-        self.assertEqual(app.validate_message(config, "c", "Hello")["pocket_tts_voice"], "alba")
+        snapshot = allocation.snapshot(config, "c")
+        self.assertEqual(app.validate_message(config, "Cleo", "Hello", profile=snapshot)["pocket_tts_voice"], "alba")
 
     def test_invalid_pocket_settings_are_rejected(self):
         for settings in ('[speech.pocket_tts]\nexecutable=42\n',
@@ -155,5 +181,5 @@ class PocketReviewTests(Fixture):
                          '[speech]\npocket_tts=[]\n',
                          '[speech]\npocket_tts_speed=1.3\n'):
             with self.subTest(settings=settings), self.assertRaises(app.CommsError):
-                self.paths.config.write_text(settings + '[identities.a]\nname="Alice"\n')
+                self.write_profile("", settings)
                 app.load_config(self.paths.config)

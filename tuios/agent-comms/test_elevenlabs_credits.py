@@ -43,7 +43,7 @@ class CreditLeaseTests(Fixture):
         streams = [self.request("watch")[1] for _ in range(2)]
         for stream in streams:
             stream.readline()
-        self.transport_send("a", "hello")
+        self.transport_send("Alice", "hello")
         messages = [json.loads(stream.readline())["message"] for stream in streams]
         uid = messages[0]["uid"]
         _, claim = self.request("claim-speech", uid=uid)
@@ -60,7 +60,7 @@ class CreditLeaseTests(Fixture):
 
 class WatcherCreditTests(unittest.IsolatedAsyncioTestCase):
     async def render(self, mode, balance=12345, width=80, key="fake"):
-        response = {"event": "state", "message": {"id": "a", "name": "Alice", "msg": "Hello world",
+        response = {"event": "state", "message": {"id": "Alice", "name": "Alice", "msg": "Hello world",
                     "uid": "m", "phase": "displaying", "duration": 5, "credit_cost": 12.5}}
         output = io.StringIO()
         blocked = asyncio.Event()

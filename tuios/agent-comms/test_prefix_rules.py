@@ -32,7 +32,7 @@ class PrefixRuleTests(Fixture):
             ({"attached": False, "current": 2}, "Alice here, in the work session, workspace 1, in the top-right."),
         ):
             with self.subTest(options=options):
-                self.assertEqual(app.expected_prefix(self.config(), "a", self.source(**options)), expected)
+                self.assertEqual(app.expected_prefix(self.config(), "Alice", self.source(**options)), expected)
 
     def test_each_situation_can_select_independent_fields(self):
         config = self.config(
@@ -50,43 +50,44 @@ class PrefixRuleTests(Fixture):
             with self.subTest(options=options):
                 source = self.source(**options)
                 with patch.object(app, "checked_context", return_value=source), \
-                     patch.object(app, "pane_binding", return_value="a"):
+                     patch.object(app, "pane_binding", return_value=("e" * 16, {"name": "Alice"})), \
+                     patch.object(app, "update_pane_title"):
                     self.assertEqual(app.identify(self.paths, config)["prefix"], expected)
-                app.validate_message(config, "a", expected + " Ready.", source=source)
+                app.validate_message(config, "Alice", expected + " Ready.", source=source)
                 with self.assertRaises(app.ContextMismatch):
-                    app.validate_message(config, "a", expected + " " + expected + " Ready.", source=source)
+                    app.validate_message(config, "Alice", expected + " " + expected + " Ready.", source=source)
 
     def test_empty_fields_disable_each_situation(self):
         config = self.config(**{situation: {"fields": []} for situation in app.PREFIX_RULES})
         for options in ({"focused": "own"}, {}, {"current": 2}, {"attached": False}):
             with self.subTest(options=options):
-                self.assertEqual(app.expected_prefix(config, "a", self.source(**options)), "")
+                self.assertEqual(app.expected_prefix(config, "Alice", self.source(**options)), "")
 
     def test_geometry_can_be_requested_for_previously_suppressed_prefixes(self):
         config = self.config(
             focused={"fields": ["name", "position"]},
             same_workspace={"fields": ["name", "position"], "only_when_multiple_agents": False},
         )
-        self.assertEqual(app.expected_prefix(config, "a", self.source(focused="own")),
+        self.assertEqual(app.expected_prefix(config, "Alice", self.source(focused="own")),
                          "Alice here, in the top-right.")
-        self.assertEqual(app.expected_prefix(config, "a", self.source(other_state="none")),
+        self.assertEqual(app.expected_prefix(config, "Alice", self.source(other_state="none")),
                          "Alice here, to your top-right.")
         config["prefix"]["focused"]["fallback_fields"] = ["name"]
-        self.assertEqual(app.expected_prefix(config, "a", self.source(focused="own", geometry=False)), "Alice here.")
+        self.assertEqual(app.expected_prefix(config, "Alice", self.source(focused="own", geometry=False)), "Alice here.")
         config["prefix"]["focused"]["fallback_fields"] = []
-        self.assertEqual(app.expected_prefix(config, "a", self.source(focused="own", geometry=False)), "")
+        self.assertEqual(app.expected_prefix(config, "Alice", self.source(focused="own", geometry=False)), "")
 
     def test_workspace_label_and_single_workspace_policy(self):
         source = self.source(attached=False, workspace_names={"1": "main"})
         config = self.config(different_session={"fields": ["name", "workspace"]})
-        self.assertEqual(app.expected_prefix(config, "a", source), "Alice here.")
+        self.assertEqual(app.expected_prefix(config, "Alice", source), "Alice here.")
         config["prefix"]["different_session"]["omit_single_workspace"] = False
-        self.assertEqual(app.expected_prefix(config, "a", source), "Alice here, the main workspace.")
+        self.assertEqual(app.expected_prefix(config, "Alice", source), "Alice here, the main workspace.")
 
     def test_legacy_spatial_switch_and_explicit_rule_precedence(self):
         config = self.config(spatial=False, same_workspace={"fields": ["name", "position"]})
-        self.assertEqual(app.expected_prefix(config, "a", self.source()), "Alice here, to your top-right.")
-        self.assertEqual(app.expected_prefix(config, "a", self.source(current=2)), "Alice here, of the work session.")
+        self.assertEqual(app.expected_prefix(config, "Alice", self.source()), "Alice here, to your top-right.")
+        self.assertEqual(app.expected_prefix(config, "Alice", self.source(current=2)), "Alice here, of the work session.")
 
     def test_config_validation_rejects_mistyped_rules(self):
         original = self.paths.config.read_text()
@@ -115,13 +116,16 @@ fields = []
         self.start_server()
         focused = self.source(focused="own")
         text = "Alice here. Ready."
-        _, stream = self.request("send", id="a", msg=text, tts=text, source=focused)
+        _, stream = self.request("send", **self.sender("Alice"), msg=text, tts=text, source=focused)
         self.assertTrue(json.loads(stream.readline())["ok"])
-        _, stream = self.request("send", id="a", msg=text, tts=text, source=self.source())
-        self.assertFalse(json.loads(stream.readline())["ok"])
+        _, stream = self.request("send", **self.sender("Alice"), msg=text, tts=text, source=self.source())
+        reply = json.loads(stream.readline())
+        self.assertFalse(reply["ok"])
+        self.assertTrue(reply.get("context_mismatch"))
+        self.assertEqual([m["msg"] for m in json.loads(self.cli("history", "--json").stdout)], [text])
 
     def test_stale_prefix_without_name_is_rejected_after_prefix_disabled(self):
-        app.check_prefix("a", "", "Ready.", "Ready.")
+        app.check_prefix("", "Ready.", "Ready.")
         for old in ("Alice here.", "Of the work session.", "Workspace 1.", "On the right."):
             with self.subTest(old=old), self.assertRaises(app.ContextMismatch):
-                app.check_prefix("a", "", old + " Ready.", old + " Ready.")
+                app.check_prefix("", old + " Ready.", old + " Ready.")

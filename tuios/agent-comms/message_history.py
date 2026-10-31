@@ -8,14 +8,23 @@ import tempfile
 MAX_ENTRIES = 10
 
 
-def read(directory: Path, limit=None, identity=None, session=None, *, max_entries=MAX_ENTRIES):
+def read(directory: Path, limit=None, identity=None, session=None, *, max_entries=MAX_ENTRIES,
+         name=None, epoch=None):
+    """Latest matching retained records in chronological order.
+
+    identity matches the record "id" (the generated name for new records, or a
+    legacy identity ID); name matches the generated name; epoch disambiguates
+    resets. An absent or concurrently replaced file is an empty history.
+    """
     if limit is None:
         limit = max_entries
     path = directory / "history.jsonl"
-    if not path.exists():
-        return []
     recent = deque(maxlen=max_entries)
-    with path.open("rb") as stream:
+    try:
+        stream = path.open("rb")
+    except FileNotFoundError:
+        return []
+    with stream:
         for line in stream:
             if not line.endswith(b"\n"):
                 continue
@@ -27,6 +36,8 @@ def read(directory: Path, limit=None, identity=None, session=None, *, max_entrie
                 recent.append(record)
     matching = [record for record in recent
                 if (identity is None or record.get("id") == identity)
+                and (name is None or str(record.get("name", "")).lower() == name.lower())
+                and (epoch is None or record.get("epoch") == epoch)
                 and (session is None or record.get("session_name") == session)]
     return matching[-limit:]
 
