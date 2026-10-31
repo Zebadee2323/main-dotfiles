@@ -33,7 +33,7 @@ unnecessarily.
 
    | Default | Shared harness | Worker model ID | Reviewer model ID |
    | --- | --- | --- | --- |
-   | Work | `opencode` | `github-copilot/claude-opus-5.5` | `github-copilot/claude-fable-5.1` |
+   | Work | `opencode` | `github-copilot/gpt-6.1-sol` | `github-copilot/claude-opus-5.5` |
    | Personal | `opencode` | `openai/gpt-6.1-sol-fast` | `openai/gpt-6-astra` |
 
    This table is the editable source of defaults for both roles. To change a
