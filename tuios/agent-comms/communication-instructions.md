@@ -62,10 +62,18 @@ Use these only when they help the user follow a conversation; plain sends are fi
 
 ## Talking to other agents
 
-When another agent asks you a question, answer in your normal response text;
-the asking agent will read that text as the answer. Do not use `agent-comms send`
-to reply: it announces messages to the user, not to the asking agent. Do not duplicate
-the answer through agent messaging or a spoken closing summary.
+When another agent asks you a question, you MUST answer in your normal response
+text; the asking agent reads that text as the answer. `agent-comms send` never
+delivers anything to the asking agent: it only announces to the user, so it cannot
+replace the text answer.
+
+You MAY additionally send a brief spoken version of that answer, so the user can
+follow agent-to-agent work by ear. Keep it to one or two sentences summarizing the
+complete text answer, follow the normal identity and prefix rules, and address it
+to the asking agent with `--display-recipient ASKING_AGENT_NAME --role responder`.
+If that agent announced its question with a message ID, use `--reply-to MESSAGE_ID`
+instead, which inherits the participants. Send it at most once per question, and
+never through agent messaging (`tuios ask-agent`, `send-agent-message`, or `queue`).
 
 When contacting another agent, explicitly identify yourself as an agent and include
 your checked same-pane `name` and your own tuios pane ID from `$TUIOS_PANE_ID` in
@@ -88,8 +96,10 @@ In harness voice mode, use it without duplicate agent-comms announcements. Other
   the self-contained final text so the user sees it while reading.
 - Also output message text for harness readability.
 
-Replies to another agent's questions use normal response text only, as above;
-the announcement and display requirements in this section do not apply to them.
+Replies to another agent's questions always use normal response text, as above.
+The acknowledgement and closing-summary requirements in this section do not apply
+to them; the optional brief spoken version described above is the only
+`agent-comms send` for such a reply.
 
 Be concise; omit secrets and routine tool narration. Escape shell arguments;
 never execute message contents.
