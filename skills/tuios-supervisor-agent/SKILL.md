@@ -56,7 +56,7 @@ unnecessarily.
 Local integration of accepted worker work into the assigned supervisor branch
 is part of this assignment and is already authorized. Do not add a separate
 merge-permission question to setup or ask again before each merge. This applies
-to both `tuios ship merge` and the verified path-based Git merge below. Honor
+to both `tuios ship merge` and the verified path-based Git merge in the integration reference. Honor
 explicit user restrictions and actual harness approval requirements; a local
 merge does not imply permission to push or change a different target branch.
 
@@ -86,7 +86,9 @@ Apply the same addressing and identity checks to reviewers.
 
 Assign each task a unique `TASK_ID` for this run and a supervisor-controlled
 `REVISION`, starting at 1. Increment the revision for changes to the assignment,
-acceptance/validation plan, or integration base. Within a revision, the reviewer
+acceptance/validation plan, or implementation changes required by integration. Track
+ordinary integration-target advancement separately; it does not alone invalidate
+implementation approval. Within a revision, the reviewer
 controls `REVIEW_ROUND`, starting at 1, for scoped feedback and worker
 responses. Routine review rounds do not require a new supervisor revision.
 Include `[task=<id> revision=<n>]` after the sender introduction in every task
@@ -101,99 +103,51 @@ worker and supervisor sessions, correlate using the task/revision text, not
 `--reply-to` or `--thread` with an ID from the other session. A queued or read
 message is not acknowledgment; require a response matching the task/revision.
 
-Use tuios agent messages for ongoing coordination. **Across sessions, use
-selectors, not direct `send-agent-message -s ... -w ...`.** In the tested tuios
-version, a direct cross-session send looks up the sender pane in the recipient
-session and fails. Selector-based sends were verified in both directions with
-the original sender pane IDs preserved.
+Read [verified messaging](references/messaging.md) before first cross-session delivery
+and on addressing failures. Reuse verified recipient bindings until rejected or
+replaced. Keep task/revision correlation, exact sender verification, and permission
+boundaries.
 
-Start with a selector for the recorded worker session and inspect its matches:
+## Communication style
 
-```sh
-WORKER_SELECTOR="session:$WORKER_SESSION"
-tuios list-agents --select "$WORKER_SELECTOR" --json
-```
+When acknowledging input from the user, use `agent-comms send` to give a useful,
+more informative response than a bare "got it." State your understanding of the
+request or correction, how it changes the plan or delegation, and what you will
+do next. Use a few natural sentences when helpful; scale detail to the input,
+avoid repeating the entire prompt, and do not claim planned work is complete.
+This user acknowledgment is distinct from silent acknowledgments between agents.
 
-Require `success: true` and exactly one entry in `agents`, whose `session` and
-`window_id` match the recorded `WORKER_SESSION` and `WORKER_PANE`. If multiple
-agents match, refine the selector with a supported filter such as
-`name:*<worker-agent-name>*`, then list again. If no entry matches or the ID is
-wrong, stop and resolve the address; do not send to a replacement by name.
+Keep the user informed of key events: important delegation, material progress,
+blockers or decisions, integration milestones and completion. Consolidate team
+results; avoid repeating a direct agent exchange as a second user update unless
+it adds useful context.
 
-Put all required terms in **one quoted selector**, for example:
+Before sending a substantive internal agent message, call `agent-comms send`
+with a brief announcement addressed directly to the receiving agent by its
+checked name. Then send the internal message through the verified tuios route.
+This applies to assignments, questions, feedback, completion reports, approvals,
+escalations and releases. For example: "Hey <target-name>, please run the
+combined checks on the merged tree." Keep the announcement to one short sentence
+where possible; put task IDs, pane IDs, hashes, detailed evidence and artifact
+paths in internal mail.
 
-```sh
-WORKER_SELECTOR="session:$WORKER_SESSION name:*<checked-worker-name>*"
-tuios list-agents --select "$WORKER_SELECTOR" --json
-```
+Do not use `agent-comms send` for acknowledgments of messages from other agents.
+Send required receipt/understanding acknowledgments through internal mail only,
+including preflight acknowledgments and "understood; I’ll do that" replies.
+Preserve all protocol acknowledgment gates. If a reply also carries a new
+finding, decision, question or result, announce that substantive content rather
+than the acknowledgment. Receiving a message alone is not a reason to announce.
 
-Terms within one selector intersect; repeated `--select` flags union their
-matches and can broaden delivery. Do not add a second `--select` to narrow the
-first. Keep the selector, confirm token, and message as separate quoted
-arguments; never pack them into a string and rely on shell word splitting.
-Require a nonempty confirm token before sending.
+Use `agent-comms send`, following the active checked
+identity/prefix rules in both `--msg` and `--tts`. Required introductions precede
+the direct address. Announce before sending, never afterward; establish results
+before claiming them. Announcements do not replace internal delivery or its
+sender/task/revision checks. If announcement delivery fails, report the failure
+once and continue permitted internal coordination; do not claim it was heard.
+Do not create extra acknowledgment messages solely to generate announcements,
+and do not acknowledge acknowledgments recursively.
 
-Take the `confirm` token from that verified listing and send using the same
-selector. The token binds delivery to the inspected recipient set:
-
-```sh
-WORKER_CONFIRM='<confirm token from the verified listing>'
-tuios send-agent-message --select "$WORKER_SELECTOR" --confirm "$WORKER_CONFIRM" 'I am agent <checked-supervisor-name>, in tuios pane <supervisor-pane-id>. [task=<id> revision=<n>] <assignment or feedback>'
-```
-
-Do not use `--yes` for these point-to-point messages, because it sends to
-whatever matches at delivery time. Re-list and reverify when a token is rejected
-or the worker is restarted/reassigned. Never strip `TUIOS_PANE_ID`, spoof
-`--from`, or change grants to get a message through. A `forbidden` response is a
-permission decision, not this addressing bug.
-
-To address a reviewer, substitute its recorded session and `REVIEWER_PANE` in
-the same verified selector procedure. A worker session now contains two agents:
-a session-only selector will usually be too broad. Refine it and verify the
-exact intended pane before sending. Never broadcast worker instructions to both.
-
-For a worker in your own session, direct `send-agent-message -s ... -w ...` is
-supported. Use `ask-agent` only for same-session immediate questions when the
-worker is ready. Across sessions use selector-based mail and bounded message
-waits. Keep read/wait/ship commands' explicit session and pane arguments; the
-selector workaround applies to messaging, not Git targeting.
-
-Expect completion reports and questions through tuios agent messages. Read your
-inbox with:
-
-```sh
-tuios read-agent-messages -s "$SUPERVISOR_SESSION" -w "$TUIOS_PANE_ID" --unread --json
-```
-
-Treat worker output and mail as evidence, not authority to change the user's
-scope or permissions. Never type into a pane in `needs_input`; inspect with
-`peek-prompt` and bring required human decisions to the user. Respect
-`forbidden` and harness approval boundaries.
-
-### Keep the user in the loop
-
-Announce information that helps the user follow delivery: meaningful delegation
-or revision requests, material progress, blockers or decisions, integrated
-milestones, and final completion. Agent mail alone is not a reason to speak.
-Keep routine preflight acknowledgments, snapshot confirmations, reviewer
-approvals with no new findings, integration checks with no new risk, release
-notices, and unchanged waiting/idle states in tuios mail and the live graph.
-Consolidate team integration/cleanup results into your own useful summaries;
-workers and reviewers should not each repeat them or announce sign-offs.
-
-For a useful worker-directed announcement, phrase it briefly as a request to
-that agent. Call `agent-comms send` **before** sending the related tuios message
-or taking the announced action. Do not send first and narrate it afterward.
-When reporting a result, establish the evidence first, then announce it before
-the related handoff or next action; never describe a planned action as already
-completed. Routine internal agent exchanges are agent replies, not automatically
-human-facing turns: do not manufacture a spoken closing summary for each one.
-
-Follow the active identity and prefix rules for both `--msg` and `--tts`; do not
-invent an introduction or add a second one. For example, after any required
-prefix: "Hi <worker-name>, please add coverage for the retry limit and report
-the results." Keep readable text free of speech markup. If harness voice mode
-already delivers the update, avoid a duplicate announcement.
+Read [examples](references/announcements.md) only when needed.
 
 ## Allocate work
 
@@ -210,9 +164,11 @@ not own. Stop the helper when supervision ends; retain or close the final tree
 as described in the reference.
 
 Divide work into independently reviewable tasks with explicit ownership,
-dependencies, acceptance criteria, and relevant validation. Record each worker's
-identity, session, pane, harness/model, checkout, branch, assignment, status,
-and review outcome in your working context. Plan one reviewer per worker task,
+dependencies, acceptance criteria, and relevant validation. Persist assignments and
+transitions in the run ledger described in [task state and
+evidence](references/task-state.md); read it before first delegation. Keep only active
+decisions and concise summaries in your working context. Bundle small related changes
+into one reviewable task to amortize startup costs. Plan one reviewer per worker task,
 but create or activate it only after that worker reports a frozen result ready
 for review. Do not spawn reviewers alongside workers or leave them waiting
 through initial implementation. Keep worker and reviewer pane IDs distinct; they
@@ -245,6 +201,13 @@ uncertainty justify it; avoid duplicate runs of unchanged checks without a
 reason. Include combined behavior and interfaces between workers where
 individual checks cannot cover integration risk.
 
+Delegate execution of combined integration tests to a designated worker; do not
+run those tests yourself. Specify the exact combined commit/tree and checkout,
+checks, expected evidence, and assigned reviewer. Keep that worker and reviewer
+available until the reviewer has assessed the results and you have accepted the
+combined outcome. You own the plan, coordination and final acceptance; the worker
+owns test execution. Checks reserved for the user remain with the user.
+
 Brief the reviewer to reassess the plan against the actual diff and correct
 inadequate worker testing directly. The reviewer can request the smallest
 additional or corrected checks within the agreed scope, wait for results, and
@@ -267,7 +230,7 @@ proceed rather than silently reconfiguring or replacing it.
 
 Confirm the integration destination before launching branch-based work. Use
 `tuios ship merge` when the supervisor branch is in the repository's main
-checkout; otherwise plan the verified path-based merge below. Identify the
+checkout; otherwise plan the verified path-based merge in the integration reference. Identify the
 actual supervisor checkout and branch before workers begin.
 
 Ensure `tuios-worker-agent` and `tuios-reviewer-agent` are available to their
@@ -333,139 +296,16 @@ Do not assume a tool-level `cd` fixes the pane's directory.
 On disagreement, stop before mutation and report the expected and observed
 paths/branches. Do not try `ship` to see what happens, retarget a convenient
 pane, or substitute plain Git to bypass an unverified target. Correct and
-reverify the binding first. The documented path-based merge below is already
+reverify the binding first. The documented path-based merge in the integration reference is already
 authorized for the assigned supervisor branch when its target is verified; it is
 not a fallback for a denied operation. Other procedure changes require
 appropriate authorization.
 
-## Create a worktree and worker
+## Launch workers
 
-For an authorized new worktree, create its detached session first:
-
-```sh
-tuios worktree new '<feature-branch-name>' --base '<supervisor-branch>' --repo '<git-repo>' --detach --json
-```
-
-Prefer short, readable, task-based branch and session names. Check for collisions
-and use a readable qualifier when needed, rather than a random suffix. Keep full
-pane IDs, paths, and exact model IDs in agent messages and artifacts; routine
-spoken updates should use agent names and short task labels.
-
-Use the supervisor branch as the base. Check for existing branches before
-reusing a name. Record the actual returned `session`, `path`, and `window_id`:
-
-```sh
-WORKER_SESSION='<returned-session>'
-WORKER_WORKTREE='<returned-absolute-worktree-path>'
-STARTER_PANE='<returned-initial-shell-window-id>'
-```
-
-If the repository uses Git LFS and this code task's validation does not need
-heavy assets, prepend `GIT_LFS_SKIP_SMUDGE=1` to that creation command.
-
-In the tested tuios version, `worktree new --agent` validates a harness ID
-before launch. It rejects `codex-t`, an absolute shim path, and full commands
-with model arguments. Do not use it for this workflow or silently substitute a
-bare harness that drops the user's shim or selected model. `start-agent` accepts
-an executable path and detects the running harness afterward.
-
-Preserve the user's `-t` aliases without hard-coding their executable paths.
-Start through interactive zsh, which loads the aliases from the user's shell
-configuration. Verify they are defined first:
-
-```sh
-zsh -ic 'whence -w opencode-t; whence -w codex-t'
-```
-
-Shell aliases cannot be passed directly as the executable to `start-agent`. Use
-the literal alias in the zsh command string. `tuios-worker` supplies zsh's `$0`;
-it is not passed to the harness. Start only the selected harness, replacing
-example model IDs with the user's choice.
-
-For OpenCode, keep `mini --model` inside the shell command. `$1` supplies the
-selected model ID and `$2` supplies the initial prompt directly to Mini:
-
-```sh
-tuios start-agent zsh -s "$WORKER_SESSION" --cwd "$WORKER_WORKTREE" --json -- -ic 'opencode-t mini --model "$1" --prompt "$2"' tuios-worker '<model-id>' '<initial prompt>'
-```
-
-The installed OpenCode CLI accepts `--model` / `-m` on `mini`, not on the root
-`opencode` command. Never rewrite this as `opencode-t -m ...`, omit `mini`, or
-move the model flag before the subcommand. If it reports an unrecognized model
-flag, inspect the actual launch command and `zsh -ic 'opencode-t mini --help'`;
-do not drop model selection and continue with an unknown default.
-
-Pass the first prompt through Mini's own `--prompt`, as shown, rather than
-adding tuios's `--prompt` to this OpenCode command. An empty Mini prompt can be
-misdetected as working, leaving tuios waiting for readiness before it submits
-anything. Direct prompt delivery was verified with an actual Mini response.
-
-For Codex, `"$@"` forwards the model/config arguments with their boundaries
-intact:
-
-```sh
-tuios start-agent zsh -s "$WORKER_SESSION" --cwd "$WORKER_WORKTREE" --prompt '<initial prompt>' --json -- -ic 'codex-t "$@"' tuios-worker -m gpt-6.1-sol -c 'service_tier="fast"'
-```
-
-This loads interactive shell startup configuration. Verify the resulting
-directory and actual running harness during preflight; do not accept an idle
-shell or an alias-resolution error as worker readiness. If the selected alias is
-unavailable, report it rather than silently launching the bare harness.
-
-**Every `start-agent` call must pass the assigned absolute path through
-`--cwd`.** Selecting a session with `-s` alone does not bind the working
-directory. For a single worker using the supervisor's current checkout, skip
-worktree creation and use that checkout and session explicitly instead.
-
-Record `WORKER_PANE` from the `start-agent` result's `window_id`, not the
-worktree creation result. The latter identifies the starter shell, which must
-never be used as the worker target for review or `ship`.
-
-The initial shell is temporary. Once the worker has completed the communication
-handshake and its pane/worktree binding is verified, close only that recorded,
-unused shell pane:
-
-```sh
-tuios close-window -s "$WORKER_SESSION" "$STARTER_PANE"
-```
-
-Confirm it is still the shell created by this task, is unused, and differs from
-`WORKER_PANE`. Skip this step for a pre-existing session/current checkout. The
-result is a session with just the worker; the temporary starter shell is needed
-by this launch sequence to preserve the shim and model selection.
-
-Use the harness's nonblocking execution features for independent startup calls
-so you remain available for mail. Process preflight acknowledgments as they
-arrive; do not wait for every `start-agent` command to return before verifying
-bindings and releasing a ready agent. OpenCode Mini receives its prompt during
-launch, so a valid acknowledgment may arrive before the readiness waiter
-finishes. Its readiness timeout alone does not mean launch failed. Codex uses
-`start-agent --prompt` once ready. Do not send either
-prompt again through `ask-agent`. If startup reaches a trust/approval prompt,
-leave it for the user. A timeout can leave a live pane: inspect its state and
-output, retain its ID, and check whether the prompt was delivered before
-retrying. Do not create duplicate workers. Explicit `--cwd` does not replace the
-preflight and pre-ship binding checks.
-
-The initial prompt must start exactly with this line, replacing the
-placeholders:
-
-```text
-Read skill `tuios-worker-agent`, I am your supervisor <supervisor-agent-name>, with TUIOS pane id: <supervisor-tuios-pane-id>
-```
-
-Then supply the supervisor session, the reviewer handoff procedure, task
-ID/revision, task, owned paths, dependencies, acceptance criteria, validation
-requirements, and preflight gate. Tell the worker to report blockers and
-completion through tuios messages, including changed files, checks and results,
-and remaining limitations. Tell it to freeze and notify you when ready; you
-will then create/assign its reviewer. Require the worker to leave changes for
-reviewer assessment and supervisor commit; workers must not run commit commands
-or remove their worktrees. A worker may bring your branch into its own through a merge/rebase
-only to resolve integration conflicts or on your specific instruction. Do not
-allow routine branch synchronization or automatic merge commits; you own new
-commits, including merge commits. Quote prompts and messages safely as literal
-arguments.
+When creating a worker or reviewer, read [launch procedures](references/launch.md).
+Preserve selected models, shim aliases, explicit cwd and verified preflight; do not
+reload this reference for routine task messages.
 
 ## Start and brief a dedicated reviewer
 
@@ -505,17 +345,21 @@ Read skill `tuios-reviewer-agent`, I am your supervisor <supervisor-agent-name>,
 ```
 
 Supply both sessions and pane IDs, task/revision, worker identity, assigned
-paths, base branch/commit, acceptance criteria, constraints, proportionate
-validation plan, the worker's frozen completion evidence, and any known
-pre-existing changes. Authorize the reviewer to review the full change and run the scoped review/revise loop directly with the
+paths, immutable implementation base SHA and current integration target SHA, snapshot
+helper path, review checkpoint budget, acceptance criteria, constraints, proportionate
+validation plan, a link to the worker's completion artifact (not a duplicated full report), and any known
+pre-existing changes. Authorize the reviewer to review the full change and run the
+scoped review/revise loop directly with the
 worker. Specify the scope of that authority; architectural/scope changes and Git
 integration remain with you. Supply an absolute review-artifact location outside
 the tracked checkout for reports and snapshots, accessible to you until cleanup.
 Require concise reports of approval or a blocker requiring your decision.
 
 Send the worker the verified reviewer identity/address and authorize accepting
-its scoped revision requests. Require a direct same-session handshake between
-the pair. Do not start review until the worker has frozen a completion snapshot.
+its scoped revision requests. Use the direct frozen completion report as the
+worker-to-reviewer contract acknowledgment; the reviewer acknowledges receipt with its
+first review response. Do not require a separate pair handshake. Do not start review
+until the worker has frozen a completion snapshot.
 Have the frozen worker send its completion report directly to the reviewer
 after this handoff. Reviewer release and receipt of that direct report are
 separate gates: a copied completion report in your launch prompt does not
@@ -557,44 +401,9 @@ waits or sleep/capture loops. An idle-looking input field alone is insufficient
 if tools or background writers are still running. Never change another pane's
 state, answer its approval prompt, or force shipping past a genuine busy gate.
 
-### Five-minute self-check while workers are active
-
-If the harness supports reminders, scheduled follow-up turns, or a comparable
-native way to wake this supervisor, use it to check progress about every five
-minutes while you believe at least one worker is actively progressing an
-assignment or owes an expected response. This includes workers whose last known
-state was active even if they have since stopped or disappeared unnoticed.
-Reviewers actively reviewing or awaiting worker revisions count as active work;
-an idle reviewer retained after approval does not. Use the available harness
-feature according to its actual interface; do not invent commands or assume
-every harness supports scheduled wake-ups.
-
-Keep at most one pending self-check for this supervision run. Record its handle
-so you can cancel it. Prefer a one-shot reminder rearmed after each check, or a
-recurring reminder that can reliably be stopped. The reminder should tell you to
-inspect current worker state and mail against the task/revision plan, rather
-than assume the workers are still running or automatically message them all.
-
-On waking, reconcile expected activity with the actual panes and inboxes. Look
-for missed completion reports, blocked approvals, delivery failures, stalled
-progress, or a worker that has vanished. Take the next warranted coordination
-action within existing permissions; do not restart or reassign work merely
-because five minutes passed. Use the established selector procedure for any
-cross-session messages, and report material findings to the user without routine
-all-clear announcements.
-
-Rearm only if workers are still expected to progress or respond. Cancel the
-reminder when no worker or reviewer is active, work is awaiting only your
-acceptance/integration action, work is paused, or the run is only waiting for a
-human decision. Cancel it on completion, cancellation, or handoff, and before
-leaving supervision. A late reminder must recheck this condition and end without
-rearming if there is no active work. Re-enable checks if worker activity
-resumes.
-
-If no suitable native feature is available, continue using bounded tuios event
-waits during active supervision. Do not create a persistent OS timer or a long
-sleep loop to emulate harness reminders, and do not claim unattended monitoring
-is active when the harness cannot wake you.
+For unattended wakeups, read [monitoring](references/monitoring.md) only when the
+harness supports them. Otherwise use bounded event waits; never claim monitoring that
+cannot wake you.
 
 ### Handle stalled or ineffective workers
 
@@ -644,6 +453,7 @@ including binary/mode changes, nonignored untracked paths and content hashes,
 and pending merge state, after the worker freezes edits. Preserve the snapshot
 and validation evidence at the agreed artifact location until release.
 
+Use the shared snapshot helper from [task state and evidence](references/task-state.md).
 Before committing, mechanically compare the actual checkout to that snapshot,
 confirm both agents are at rest, and repeat the pane/worktree binding check.
 Check status and path ownership so the commit cannot sweep in unrelated files.
@@ -655,9 +465,11 @@ After committing, verify the committed contents match the approved snapshot,
 including new files. Return hook-generated or unexpected changes to the pair
 before integration. Before merging, verify the worker tip is the approved
 commit. If the supervisor base advanced, have the reviewer assess integration
-impact and report whether additional focused checks are needed. Agree where
-integration checks will run: prefer one combined run after merging when safe.
-If the reviewer already tested the exact prospective merged tree, reuse that
+impact and report whether additional focused checks are needed. Assign any
+required combined integration tests to a worker on the exact combined tree;
+prefer one combined run after merging when safe. Specify a safe checkout and
+serialize tests that write files with other checkout activity. If existing
+reviewed evidence covers the exact prospective merged tree, reuse that
 evidence after verifying the merged tree matches; do not rerun unchanged tests
 solely because a merge commit was created. Mandatory checks still apply. A rebase or
 conflict resolution is a new supervisor revision requiring reviewer approval
@@ -695,87 +507,5 @@ index state.
 
 ## Integrate and clean up
 
-**Merging approved worker work into your assigned supervisor branch is
-authorized by this workflow. Do not ask the user to approve that merge again.**
-Once the reviewer has approved the exact snapshot and you have accepted it,
-proceed with the local merge and required conflict-resolution cycle within the
-assignment. This applies to both `tuios ship merge` and the verified path-based
-merge below. It does not authorize another target branch, force/reset/clean
-operations, remote pushes, or bypassing actual harness permissions. A tooling
-approval requirement must still be honored; do not invent an extra
-conversational confirmation solely because you are merging worker work.
-
-For a worker on a separate branch, merge its completed work into the supervisor
-branch:
-
-```sh
-WORKER_SESSION='<worker-session-name>'
-WORKER_PANE='<worker-tuios-pane-id>'
-tuios ship merge -s "$WORKER_SESSION" -w "$WORKER_PANE" -m '<merge message>'
-```
-
-Check the destination before running this command: tuios merges into the
-worktree's base branch in the repository's **main checkout**, which must be
-clean and have that branch checked out. `--into <supervisor-branch>` changes the
-target branch but does not move the operation into the supervisor's worktree. If
-the supervisor branch is checked out elsewhere or the destination is dirty,
-preserve the checkouts. If the intended supervisor branch is checked out
-elsewhere, use that verified checkout directly instead of moving branches or
-asking for merge permission again:
-
-```sh
-SUPERVISOR_WORKTREE='<absolute-supervisor-worktree-path>'
-APPROVED_WORKER_COMMIT='<reviewed-and-accepted-worker-commit-sha>'
-git -C "$SUPERVISOR_WORKTREE" merge -m '<merge message>' "$APPROVED_WORKER_COMMIT"
-```
-
-Before this path-based merge, verify the target root, per-worktree Git
-directory, expected supervisor branch and `HEAD`, clean status/index, and that
-the source commit is the exact approved worker tip in the same repository.
-Serialize merges and keep both agents at rest. A dirty destination blocks
-integration; preserve user changes and report the blocker rather than cleaning
-them or switching to a convenient branch. Do not use plain Git after a denied
-`ship` operation to bypass permissions.
-
-If this explicit Git merge conflicts, preserve the diagnostic and abort only
-your own failed merge in the previously clean target, after confirming no other
-work has intervened. Then follow the worker-rebase/reviewer-approval cycle
-below. Never reset the supervisor branch or discard someone else's changes.
-
-If merging fails due to conflicts, ask the worker to rebase its branch onto the
-current supervisor branch and resolve the conflicts under a new task revision.
-Notify the retained reviewer of the target and have it review the resolution and
-focused checks directly with the worker. Wait for an updated approval tied to
-the resulting snapshot/commit before retrying. Do not resolve feature conflicts
-yourself merely to bypass the pair. If you specifically request a merge into the
-worker branch instead, require it to stop before creating a merge commit so the
-reviewer can approve the result and you can commit it.
-
-After a successful merge, verify the combined result and confirm the worker's
-entire assignment is present, with no outstanding changes or revisions. Only
-then release the worker and reviewer and remove the worktree. Send each release
-to its exact recorded pane, and verify a successful delivery receipt for **every**
-recipient before removing the session. For a batch, iterate structured recipient
-records using individually quoted argv or Python `subprocess` argument lists.
-Do not pack recipient fields into strings, use `set -- $record`, or rely on zsh
-word splitting. Record each recipient/result; one successful send does not prove
-the rest of a loop ran. Retry only recipients without confirmed delivery, with
-fresh verified selectors as needed:
-
-
-```sh
-tuios worktree rm "$WORKER_SESSION"
-```
-
-This removes the shared session, worktree, worker, and reviewer. Keep the
-reviewer until the worker is no longer needed, and preserve its final report
-before removing the session. Do not force removal or discard work. A worker
-using the supervisor's current checkout needs no merge; never remove the
-supervisor session or checkout as worker cleanup. For a shared current checkout,
-release both roles and close only the newly created agent panes once neither is
-needed; never remove the supervisor session. Preserve pre-existing
-agents/sessions unless their removal is authorized.
-
-Finish by reporting delivered behavior, validation, commits/integration, and any
-remaining limitations. Keep responsibility for the combined result until the
-user's requested work is complete.
+Before integration or cleanup, read [integration procedures](references/integration.md).
+You own the combined result, serialized integration and safe release of both roles.

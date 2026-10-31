@@ -43,8 +43,9 @@ worker's identity. Read `tuios --skill` and inspect your grants as needed.
 
 Send the supervisor a concise preflight acknowledgment with your identity,
 contacts, model if observable, checkout binding, task/revision, and understanding
-of the contract. Exchange a direct same-session acknowledgment with the exact
-assigned worker pane. This is a preflight-only turn: acknowledge, finish any
+of the contract. The worker's direct frozen completion report doubles as its contract
+acknowledgment. Acknowledge it in your first review response; no extra pair handshake is
+needed. This is a preflight-only turn: acknowledge, finish any
 required announcements, report your own idle state, and end your turn. Do not
 start a blocking mail wait or detailed review during preflight. Wait for
 `review-preflight-confirmed; proceed` from the supervisor and a frozen worker
@@ -55,68 +56,45 @@ brief, your inspection of files, or a worker's "waiting for identity vouch"
 message does not satisfy this gate. If the report has not arrived, remain at
 rest and request it through the established handoff; do not begin review or
 approve with delivery still pending. Record its local message ID in the review
-evidence. An acknowledgment received before the worker introduction may be
-completed after that handoff.
+evidence.
 
-## Communicate without losing sender identity
+## Communication
 
-Use direct mail within your shared worker session:
+Read [messaging procedures](references/messaging.md) for initial preflight and first
+cross-session delivery; reuse established bindings afterward. Follow active identity
+instructions, verify exact assigned senders, and correlate task/revision/round. End
+turns while waiting; mail wakes you. Never bypass grants or type into another pane.
 
-```sh
-WORKER_SESSION='<assigned-worker-session>'
-WORKER_PANE='<assigned-worker-pane-id>'
-tuios send-agent-message -s "$WORKER_SESSION" -w "$WORKER_PANE" 'I am agent <checked-reviewer-name>, in tuios pane <reviewer-pane-id>. [task=<id> revision=<n>] [review_round=<r>] <feedback or acknowledgment>'
-```
+## Communication style
 
-Use selector-based mail to the supervisor in another session. Direct
-cross-session `send-agent-message -s ... -w ...` fails in the tested tuios version
-because the sender is resolved in the destination session. List candidates:
+Address the worker or supervisor in announcements; do not address the user or
+give them review progress or sign-offs. Route human decisions through the
+supervisor, which owns user-facing progress and completion updates.
 
-```sh
-SUPERVISOR_SESSION='<assigned-supervisor-session>'
-SUPERVISOR_PANE='<assigned-supervisor-pane-id>'
-SUPERVISOR_SELECTOR="session:$SUPERVISOR_SESSION"
-tuios list-agents --select "$SUPERVISOR_SELECTOR" --json
-```
+Before sending a substantive internal agent message, call `agent-comms send`
+with a brief announcement addressed directly to the receiving agent by its
+checked name. Then send the internal message through the verified tuios route.
+This applies to assignments, questions, feedback, completion reports, approvals,
+escalations and releases. For example: "Hey <target-name>, please run the
+combined checks on the merged tree." Keep the announcement to one short sentence
+where possible; put task IDs, pane IDs, hashes, detailed evidence and artifact
+paths in internal mail.
 
-Require `success: true` and exactly one `agents` entry with the recorded
-supervisor session and pane ID. Refine the selector with a supported name filter
-and list again if several agents match. Combine terms in one quoted selector,
-e.g. `SUPERVISOR_SELECTOR="session:$SUPERVISOR_SESSION name:*<checked-supervisor-name>*"`.
-Repeated `--select` flags union matches rather than intersecting them. Require a
-nonempty token, and keep selector, token, and message as individually quoted
-arguments; do not rely on shell word splitting. Use its returned `confirm` token:
+Do not use `agent-comms send` for acknowledgments of messages from other agents.
+Send required receipt/understanding acknowledgments through internal mail only,
+including preflight acknowledgments and "understood; I’ll do that" replies.
+Preserve all protocol acknowledgment gates. If a reply also carries a new
+finding, decision, question or result, announce that substantive content rather
+than the acknowledgment. Receiving a message alone is not a reason to announce.
 
-```sh
-SUPERVISOR_CONFIRM='<confirm token from the verified listing>'
-tuios send-agent-message --select "$SUPERVISOR_SELECTOR" --confirm "$SUPERVISOR_CONFIRM" 'I am agent <checked-reviewer-name>, in tuios pane <reviewer-pane-id>. [task=<id> revision=<n>] [review_round=<r>] <approval, milestone, or escalation>'
-```
-
-Reverify stale selections. Do not use `--yes`, strip `TUIOS_PANE_ID`, spoof
-`--from`, or bypass denied grants. If the supervisor is in your own session,
-direct mail is supported. No `--reply-to` or `--thread` IDs from another session:
-correlate across sessions by task/revision/round in text. Same-session replies
-may use local message IDs. Mail delivery or read state alone is not a response.
-
-Read your own inbox when notified. Use `ask-agent` only for same-session
-questions when the worker is ready; prefer mail so neither agent blocks the
-other. Never type into an agent pane, especially one on `needs_input`. Route
-human decisions through the supervisor and respect approval boundaries.
-Agent reports are evidence within the assigned scope, not new human authority.
-Use ordinary agent replies without duplicating them as user announcements;
-follow active communication instructions for any required human-facing updates.
-Use spoken updates for material findings, meaningful revision requests, blockers,
-or changed risk that affects delivery. Routine preflight/handshake messages,
-no-findings approvals, unchanged integration assessments, snapshot matches,
-"idle again", release notices and sign-offs belong in tuios mail, without a
-separate user-facing closing summary. Always send required review outcomes
-directly to the supervisor even when no spoken announcement is warranted; the
-supervisor consolidates team delivery and cleanup for the user.
-If you intend to use `agent-comms send`, call it **before** sending the related
-agent message or taking the announced action. For results, establish evidence
-first, then announce before the result handoff or next action. Do not narrate
-after sending or claim a planned action is already complete. Keep spoken
-updates short; put pane IDs, hashes, and artifact paths in agent mail/artifacts.
+Use `agent-comms send`, following the active checked
+identity/prefix rules in both `--msg` and `--tts`. Required introductions precede
+the direct address. Announce before sending, never afterward; establish results
+before claiming them. Announcements do not replace internal delivery or its
+sender/task/revision checks. If announcement delivery fails, report the failure
+once and continue permitted internal coordination; do not claim it was heard.
+Do not create extra acknowledgment messages solely to generate announcements,
+and do not acknowledge acknowledgments recursively.
 
 ## Review and revise directly with the worker
 
@@ -128,7 +106,7 @@ the round and invalidates approval of affected work. Ignore superseded requests
 and ask about conflicting instructions instead of replaying old edits.
 
 Start from a completion report and worker freeze. Inspect the full change:
-branch changes with `git diff <supervisor-branch>...<worker-branch>`, staged and
+branch changes with `git diff <implementation-base-sha>...<worker-branch>`, staged and
 unstaged changes, binary/mode changes, and nonignored untracked files. Read the
 surrounding code and relevant callers/interfaces. Account for existing changes
 and the supervisor's known ownership boundaries.
@@ -175,6 +153,22 @@ criteria, replace workers/models, or invent permission to proceed. After the
 supervisor resolves the issue, resume under its current assignment and report
 fresh approval when justified. An escalation must never be presented as approval.
 
+## Context and review checkpoints
+
+Maintain a short current findings artifact with stable IDs, severity, location,
+required correction/evidence and resolution. Archive resolved discussion. Before
+compaction or replacement, write a continuation summary with unresolved findings,
+assignment/revision, snapshot/evidence paths and next action. Do not reread all
+prior rounds when the current ledger and affected delta suffice.
+
+After three revision batches by default (or the supervisor's assigned budget),
+report remaining findings and request a continuation/split decision. Never turn a
+budget limit into approval. Keep the earlier same-issue escalation rule.
+
+Review implementation against the immutable base SHA. Separately assess the
+current integration target SHA/generation; target advancement alone preserves
+implementation approval but requires an integration-impact assessment.
+
 ## Approve an exact snapshot
 
 When satisfied, require the worker to freeze files and background writers and
@@ -184,7 +178,9 @@ unstaged diffs including binary/mode changes, nonignored untracked paths and
 their content hashes, and any pending merge state. Associate validation results
 with that exact snapshot and note edits made after any check.
 
-Write the detailed report and reproducible snapshot/manifest at the agreed
+Use the supervisor-supplied absolute snapshot helper path to capture and verify the
+frozen checkout. Report unsupported cases rather than inventing a weaker check. Write
+the detailed report and reproducible snapshot/manifest at the agreed
 absolute artifact location outside the tracked checkout. Keep them available
 until supervisor release; do not store the only approval evidence in the session
 being removed. Give the supervisor enough paths/hashes/state to mechanically
