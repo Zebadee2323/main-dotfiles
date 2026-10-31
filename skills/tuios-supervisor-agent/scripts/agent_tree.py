@@ -134,7 +134,7 @@ def fit_label(value, width=32):
 
 
 def graph_lines(nodes):
-    """A narrow, deterministic hierarchy with fixed-size labeled box nodes."""
+    """Three-row boxes with names in their borders and no spacer rows."""
     lines = []
 
     def emit(prefix, box, role):
@@ -143,12 +143,11 @@ def graph_lines(nodes):
     def draw(node, prefix="", branch=""):
         continuation = prefix + ("│  " if branch == "├──" else "   " if branch else "")
         role = node["role"]
-        emit(prefix + branch, "┌" + "─" * 34 + "┐", role)
-        emit(continuation, "│ " + fit_label(node["name"]) + " │", role)
+        title = fit_label(node["name"])
+        border = title.rstrip() + "─" * (len(title) - len(title.rstrip()))
+        emit(prefix + branch, "┌─" + border + "─┐", role)
         emit(continuation, "│ " + fit_label(node["detail"]) + " │", role)
         emit(continuation, "└─" + ("┬" if node["children"] else "─") + "─" * 32 + "┘", role)
-        if node["children"]:
-            emit(continuation + "  │", "", "dim")
         for index, child in enumerate(node["children"]):
             draw(child, continuation + "  ", "└──" if index == len(node["children"]) - 1 else "├──")
 
@@ -165,7 +164,7 @@ def document(nodes):
     return {
         "type": "tml", "version": 1, "title": "Agent tree",
         "state": {"nodes": nodes, "lines": graph_lines(nodes), "monitor": "live"},
-        "children": [{"type": "col", "pad": 1, "gap": 1, "children": [
+        "children": [{"type": "col", "pad": 0, "gap": 0, "children": [
             {"type": "text", "role": "dim", "children": ["Status: {state.monitor}"]},
             {"type": "text", "children": [
                 {"type": "c", "role": role, "children": [kind + "  "]}

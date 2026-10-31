@@ -6,7 +6,10 @@ Read `tuios --skill tml` and `tuios --skill events` for the installed contract.
 
 The display is a connected hierarchy of **labeled box nodes**, not a plain list:
 each agent box contains its name, role and live state; worktree boxes group
-their workers. Fixed-width boxes and stable ordering keep status changes from
+their workers. Each box uses three rows, with its name in the top border and
+its role/state on one interior row. There are no spacer rows between boxes or
+blank gaps around the header, leaving more room for the tree in short panes.
+Fixed-width boxes and stable ordering keep status changes from
 moving the graph. It uses Unicode box-drawing text in a bound TML list of
 colored text lines inside a scroll container. Each line has dim connector text
 and a box span bound to its role. Role colors are fixed: supervisor `accent`,

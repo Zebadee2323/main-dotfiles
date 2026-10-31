@@ -63,6 +63,23 @@ class AgentTreeTests(unittest.TestCase):
         self.assertNotIn("\x1b", value)
         self.assertEqual(sum(0 if tree.unicodedata.combining(c) else 2 if tree.unicodedata.east_asian_width(c) in "WF" else 1 for c in value), 32)
 
+    def test_compact_graph_keeps_all_nodes_in_three_rows_each(self):
+        self.registry["nodes"].append({
+            "id": "second-worker", "parent": "worktree:slug", "kind": "worker",
+            "label": "悪い名前", "session": "slug", "pane": "second-worker",
+        })
+        nodes, _, _ = tree.render_nodes(self.registry, {})
+        lines = tree.graph_lines(nodes)
+        self.assertEqual(len(lines), 3 * len(self.registry["nodes"]))
+        self.assertIn("├──┌─Jaden", tree.box_graph(nodes))
+        self.assertIn("│    └──┌─Tess", tree.box_graph(nodes))
+        for index, node in enumerate(self.registry["nodes"]):
+            box = lines[index * 3:index * 3 + 3]
+            self.assertIn(node["label"], box[0]["box"])
+            for line in box:
+                # Wide labels must not move the right border.
+                self.assertEqual(tree.fit_label(line["box"], 36), line["box"])
+
     def test_patch_batches_respect_wire_budget(self):
         ops = [{"op": "replace", "path": "/x", "value": "界" * 10000} for _ in range(3)]
         with patch.object(tree, "call_raw", return_value={}) as send:
