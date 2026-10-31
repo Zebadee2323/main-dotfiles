@@ -537,7 +537,7 @@ agent-comms audio mute --seconds 60
 agent-comms audio mute           # until explicitly unmuted
 agent-comms audio unmute
 agent-comms audio status         # JSON; no identity/config needed
-agent-comms audio cycle-volume   # 10% → 25% → 50% → 100% → 10%
+agent-comms audio cycle-volume   # mute → 10% → 25% → 50% → 100% → mute
 ```
 
 These commands control the shared listener, so every connected watcher honors
@@ -553,9 +553,11 @@ The dock shows `[Muted 43s]` or `[Muted]` ahead of the normal captions. Mute sta
 is in memory: restarting the listener resets it to unmuted.
 
 Voice volume starts at 100% and is shared across watchers. `cycle-volume`
-changes only speech playback gain, including ongoing speech, and briefly shows
-`[Volume 25%]` for two seconds. It preserves any mute countdown and does not
-change system volume. Restarting the listener resets voice volume to 100%.
+cycles through permanent mute, 10%, 25%, 50%, and 100%. From 100%, the next
+preset is actual mute: speech generation stops and `[Muted]` stays visible.
+Cycling from any mute selects 10% and cancels its countdown. Volume presets
+adjust ongoing speech playback gain and show `[Volume 25%]` for two seconds.
+This does not change system volume. Restarting the listener resets voice volume to 100%.
 
 The checked-in tuios config binds **Ctrl+A, Shift+M** to
 toggle mute indefinitely and **Ctrl+A, Alt+M** to mute for 15 seconds.
@@ -886,8 +888,9 @@ max-width = 80
 Left-click the agent-comms dock component to mute speech across all watchers for
 15 seconds. Each left-click restarts the countdown; captions continue, and speech
 resumes automatically without replaying skipped announcements. Ctrl+left-click to
-cycle voice volume through 10%, 25%, 50%, and 100%; the new value appears for two
-seconds. `dock-click` uses tuios's `TUIOS_CLICK_BUTTON` (1 left) and ignores other
+cycle through permanent mute, 10%, 25%, 50%, and 100%. Mute remains until another
+audio action changes it; volume values appear for two seconds. Cycling from a
+timed mute selects 10% and cancels the timer. `dock-click` uses tuios's `TUIOS_CLICK_BUTTON` (1 left) and ignores other
 buttons. Tuios does not forward modifiers, so on macOS and Windows the command
 checks whether Ctrl is held when it runs; keep Ctrl held through the click.
 Other platforms retain plain left-click mute only. Reload tuios config with

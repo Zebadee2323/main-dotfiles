@@ -41,30 +41,48 @@ class AudioControlTests(Fixture):
             self.assertTrue(json.loads(stream.readline())["audio"]["muted"])
             self.assertFalse(json.loads(stream.readline())["audio"]["muted"])
 
-    def test_volume_cycles_for_all_watchers_and_preserves_timed_mute(self):
+    def test_volume_cycle_includes_permanent_mute_for_all_watchers(self):
         self.start_server()
         watchers = [self.request("watch")[1] for _ in range(2)]
         for stream in watchers:
             self.assertEqual(json.loads(stream.readline())["audio"]["volume"], 100)
-        self.audio("mute", seconds=0.2)
-        for stream in watchers:
-            stream.readline()
-        for expected in (10, 25, 50, 100, 10):
+        for volume, muted in ((100, True), (10, False), (25, False),
+                              (50, False), (100, False), (100, True)):
             status = self.audio("cycle-volume")
-            self.assertEqual(status["volume"], expected)
-            self.assertTrue(status["muted"])
+            self.assertEqual(status["volume"], volume)
+            self.assertEqual(status["muted"], muted)
+            self.assertIsNone(status["remaining_seconds"])
+            if muted:
+                self.assertEqual(status["volume_notice_until"], 0)
             for stream in watchers:
                 self.assertEqual(json.loads(stream.readline())["audio"], status)
-        for stream in watchers:
-            resumed = json.loads(stream.readline())["audio"]
-            self.assertFalse(resumed["muted"])
-            self.assertEqual(resumed["volume"], 10)
+
+    def test_cycle_cancels_timed_mute_and_permanent_mute_rejects_speech(self):
+        self.start_server()
+        self.audio("mute", seconds=0.1)
+        status = self.audio("cycle-volume")
+        self.assertFalse(status["muted"])
+        self.assertEqual(status["volume"], 10)
+        self.assertIsNone(status["remaining_seconds"])
+        for _ in range(4):
+            self.audio("cycle-volume")
+        # The old timeout must not unmute the newly selected permanent preset.
+        import time
+        time.sleep(0.15)
+        self.assertTrue(self.audio("status")["muted"])
+        _, watcher = self.request("watch")
+        watcher.readline()
+        self.transport_send("a", "hello")
+        message = json.loads(watcher.readline())["message"]
+        _, claim = self.request("claim-speech", uid=message["uid"])
+        self.assertFalse(json.loads(claim.readline())["claimed"])
 
     def test_dock_click_routes_mouse_buttons(self):
         self.start_server()
         cases = (("3", False, 100, False), ("2", False, 100, False),
-                 ("1", True, 10, False), ("1", False, 10, True),
-                 ("1", True, 25, True), ("3", True, 25, True))
+                 ("1", True, 100, True), ("1", True, 10, False),
+                 ("1", False, 10, True), ("1", True, 10, False),
+                 ("1", True, 25, False), ("3", True, 25, False))
         for button, ctrl, volume, muted in cases:
             with patch.dict(os.environ, {**self.env, "TUIOS_CLICK_BUTTON": button}), \
                  patch.object(app, "control_pressed", return_value=ctrl), \

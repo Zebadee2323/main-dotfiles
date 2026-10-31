@@ -1415,11 +1415,17 @@ class Server:
         if action == "status":
             return self.audio_status()
         if action == "cycle-volume":
+            # Mute is a real shared speech state, not zero playback gain.
+            # Reuse the normal transition below to cancel timers/release leases.
             levels = (10, 25, 50, 100)
-            self.audio_volume = levels[(levels.index(self.audio_volume) + 1) % len(levels)]
-            self.volume_notice_until = time.monotonic() + 2
-            self.broadcast()
-            return self.audio_status()
+            if not self.audio_muted and self.audio_volume == levels[-1]:
+                action = "mute"
+                self.volume_notice_until = 0
+            else:
+                self.audio_volume = (levels[0] if self.audio_muted else
+                                     levels[levels.index(self.audio_volume) + 1])
+                action = "unmute"
+                self.volume_notice_until = time.monotonic() + 2
         if self.audio_timer:
             self.audio_timer.cancel()
             self.audio_timer = None
