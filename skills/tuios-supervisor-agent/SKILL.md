@@ -151,17 +151,16 @@ Read [examples](references/announcements.md) only when needed.
 
 ## Allocate work
 
-Maintain a live TML hierarchy graph with labeled, role-colored box nodes using
-the bundled
-[agent-tree helper and setup instructions](references/agent-tree.md). Read that
-reference before first delegation. Open one tree pane in your own session and
-actual workspace, with supervisor → worktree → worker → reviewer nodes. Update
-its registry only when adding/removing worktrees or participating agents; defer
-reviewer nodes until reviewers are actually launched. The helper listens to
-native tuios status events and patches box labels automatically. Do not spend turns
-rebuilding the view, relaying status, or having workers patch a surface they do
-not own. Stop the helper when supervision ends; retain or close the final tree
-as described in the reference.
+Maintain one named `agent-comms watch --view tree --tree <run-name>` watcher
+in your session and actual workspace. Read [tree setup](references/agent-tree.md)
+before first delegation. Set a descriptive main screen title using
+`tree set <run-name> --title <title>` (alongside `--file` on creation).
+Set your own persistent role to `supervisor`; instruct
+workers and reviewers to set theirs at preflight. Publish supervisor → worktree →
+worker → reviewer nodes, adding reviewers only when launched. Replace the named
+tree when membership, hierarchy, or optional `info` descriptions change. Use
+`info` for a worktree’s feature or your current understanding of an agent’s task. The listener drives queue counts,
+speaker/recipient highlights and arrows; do not relay message state manually.
 
 Also create one supervisor-owned TML **Delivery flow** todo pane using the
 [task-list instructions and template](references/task-list.md). Show all known
@@ -171,7 +170,7 @@ owners/lanes and prerequisite gates. Show planned concurrency separately from
 actual running work and resource limits; keep Git merges serialized. Update it from the durable ledger as scope/status changes. Tick code
 items immediately after verified integration and acceptance; a merge awaiting
 required checks stays labelled "Merged; validation pending". Keep completed
-items visible. This pane complements the agent tree's execution-state display.
+items visible. This pane complements the agent tree's communication display.
 
 Divide work into independently reviewable tasks with explicit ownership,
 dependencies, acceptance criteria, and relevant validation. Persist assignments and

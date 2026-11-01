@@ -1598,3 +1598,43 @@ guidance pointing here.
 
 Check the result with `agent-comms bags status`; the first `context` in each pane
 allocates its new name.
+
+
+### Named tree watcher and persistent roles
+
+`agent-comms role 'worker'` sets your own display role; `role --clear` removes it.
+Roles appear in conversation and tree views, independently of `send --role`.
+Publish a JSON node array with `agent-comms tree set RUN --file tree.json`, then
+open `agent-comms watch --view tree --tree RUN` in a terminal. Example array:
+
+```json
+[{"id":"root","agent":"Dennis"},{"id":"group","parent":"root","label":"engine"}]
+```
+
+Use actual current identities. Only the creator can replace/delete a named tree;
+`tree show RUN` inspects it and `tree delete RUN` removes it. Nodes use stable
+IDs, optional parent IDs, labels, and optional agent names. The silent watcher
+shows pending counts, active speaker/recipient highlights and directed arrows.
+External participants appear temporarily. State survives listener restarts;
+bag reset clears it. Restart the listener after upgrading to enable this feature.
+See [communication instructions](communication-instructions.md) for limits and usage.
+
+Nodes may also include optional `info` text (up to 160 printable characters).
+It appears as a dim, indented line beneath that node; omit it or use an empty
+string to keep the node on one line. For example:
+
+```json
+[{"id":"engine","label":"engine","info":"Implementing the new calculation engine"}]
+```
+
+Use it for a worktree's feature or the supervisor's current understanding of an
+agent's work. Replace the tree when those descriptions change; roles remain
+self-managed by each agent. Info stays on one line and clips to the pane width.
+
+Set a main screen title with
+`agent-comms tree set RUN_NAME --file tree.json --title 'Calculator implementation'`.
+For an existing tree, `agent-comms tree set RUN_NAME --title 'New title'` changes
+only its title. Titles are printable text up to 160 characters, persist with the
+tree and update live in every watcher. Omitting `--title` preserves the current
+title; `--title ''` restores the tree name as the heading. Titles clip to the
+pane width and share the existing header row, using no extra vertical space.

@@ -135,3 +135,60 @@ Respect harness permissions/approvals. On send failure or offline listener, cont
 the task: no retry spam, automatic listener startup, or success claims. Report
 permission/sandbox blocks once; never disable the sandbox, change permissions, or
 bypass restrictions. Additional access or messaging integrations need user approval.
+
+
+## Persistent roles and live trees
+
+After obtaining your checked same-pane or same-shell identity, set a descriptive
+role with `agent-comms role 'worker'` (or `supervisor`, `reviewer`, any printable
+string up to 128 characters). Change it as your assignment changes; use
+`agent-comms role --clear` to remove it. This command changes only your own role.
+Roles persist across listener restarts and appear next to agent names in tree
+and conversation views. They confer no authority and are separate from the
+per-message `send --role requester|responder` exchange metadata.
+
+A supervisor can publish a named tree with
+`agent-comms tree set RUN_NAME --file /absolute/path/tree.json`.
+The file is a JSON array of nodes: each has a unique `id`, optional `parent`
+referring to another node ID, a `label` for grouping nodes, and an optional
+`agent` containing a verified current generated identity. Agent nodes show the
+identity's name and self-set role. Supply the full array on each replacement;
+parents may follow children in the file, but cycles and duplicate identities
+are rejected. Up to 256 nodes and depth 32 are supported, subject to the shared
+metadata size limit. Only the creating identity may replace/delete its tree.
+Use stable IDs and short labels. Do not invent identities or modify other
+agents' roles. `tree show RUN_NAME` inspects a tree;
+`tree delete RUN_NAME` removes your tree. Names accept letters, digits, dots,
+underscores and hyphens. Trees and roles clear on an explicit bag reset.
+
+Run `agent-comms watch --view tree --tree RUN_NAME` in a terminal pane for a
+compact silent watcher. Separate supervisors should use distinct tree names.
+Update topology when membership or hierarchy changes, and descriptions when work changes. The listener supplies
+pending-message counts and preparing/displaying state automatically. The current
+speaker and recipient highlight, with an arrow to the recipient; participants
+outside the tree appear temporarily. Set `send --display-recipient NAME` (or
+`user`) on substantive agent-directed announcements to visualize that exchange;
+reply messages inherit their exchange through `--reply-to`. These fields only
+control display; use the authorized agent messaging channel for delivery.
+Tree watchers never claim speech or synthesize audio. Small panes clip long
+labels and show an omitted-line count while keeping the speaker visible.
+
+Nodes may also include optional `info` text (up to 160 printable characters).
+It appears as a dim, indented line beneath that node; omit it or use an empty
+string to keep the node on one line. For example:
+
+```json
+[{"id":"engine","label":"engine","info":"Implementing the new calculation engine"}]
+```
+
+Use it for a worktree's feature or the supervisor's current understanding of an
+agent's work. Replace the tree when those descriptions change; roles remain
+self-managed by each agent. Info stays on one line and clips to the pane width.
+
+Set a main screen title with
+`agent-comms tree set RUN_NAME --file tree.json --title 'Calculator implementation'`.
+For an existing tree, `agent-comms tree set RUN_NAME --title 'New title'` changes
+only its title. Titles are printable text up to 160 characters, persist with the
+tree and update live in every watcher. Omitting `--title` preserves the current
+title; `--title ''` restores the tree name as the heading. Titles clip to the
+pane width and share the existing header row, using no extra vertical space.

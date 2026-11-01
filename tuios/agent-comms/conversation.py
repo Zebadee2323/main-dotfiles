@@ -236,6 +236,15 @@ class ConversationView:
         self.exchange, self.entered, self.message = None, None, None
         self.offline, self.notice = True, None
         self.sessions, self.counts = {}, {}
+        self.roles = {}
+
+    def metadata(self, data, queued):
+        self.roles = data.get("roles", {})
+
+    def name_label(self, participant):
+        name = clean(participant.get("name", "?"))
+        role = self.roles.get(name.lower(), "") if participant.get("kind") == "agent" else ""
+        return name + (" · " + clean(role) if role else "")
 
     def update(self, message, now, *, offline=False):
         self.offline = offline
@@ -336,7 +345,7 @@ class ConversationView:
             active = side == speaking
             ink_style = ink(str(participant.get("name", "")))
             expression = face(message.get("emotion")) if active else FACES["neutral"]
-            name = fit(participant.get("name", "?"), label_width)
+            name = fit(self.name_label(participant), label_width)
             session = fit("◆ " + self.session_label(participant), label_width)
             if side == "requester":
                 left = round(-label_width + (2 + label_width) * progress)
@@ -418,7 +427,7 @@ class ConversationView:
         if not self.exchange or not message:
             canvas.put(0, 0, fit("○ comms: idle", width), "2")
             if self.exchange:
-                pair = f"{self.exchange['requester'].get('name', '?')} · {self.exchange['responder'].get('name', '?')}"
+                pair = f"{self.name_label(self.exchange['requester'])} · {self.name_label(self.exchange['responder'])}"
                 if height > 1:
                     canvas.put(0, 1, fit(pair, width), "2")
             return canvas.lines(self.color)
@@ -426,7 +435,7 @@ class ConversationView:
         speaker = self.exchange[speaking]
         listener = self.exchange["responder" if speaking == "requester" else "requester"]
         kind = message.get("kind")
-        head = f"{speaker.get('name', '?')} ▸ {listener.get('name', '?')}"
+        head = f"{self.name_label(speaker)} ▸ {self.name_label(listener)}"
         canvas.put(0, 0, fit(head, width), f"1;{ink(str(speaker.get('name', '')))}")
         if kind in KINDS and text_width(head) + len(kind) + 3 <= width:
             canvas.put(width - len(kind) - 2, 0, f" {kind.upper()} ", KIND_STYLES[kind])

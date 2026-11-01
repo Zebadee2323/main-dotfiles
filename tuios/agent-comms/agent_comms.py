@@ -32,6 +32,7 @@ import wave
 import allocation
 import audio_visualizer
 import conversation
+import tree_view
 import message_history
 import pane_identity
 import shell_identity
@@ -43,7 +44,7 @@ VERSION = 3
 PREFIX_POLICY = "explicit"
 CAPABILITIES = {"prefix_policy": PREFIX_POLICY, "spatial_prefix": True, "audio_control": True,
                 "pane_identity": True, "pane_identity_clear": True, "shell_identity": True,
-                "name_identity": True, "conversation_view": True, "presentation_lifecycle": True}
+                "name_identity": True, "conversation_view": True, "presentation_lifecycle": True, "tree_view": True}
 MAX_FRAME = 65536
 MAX_MESSAGE = 8192
 QUEUE_LIMIT = 256
@@ -1116,12 +1117,12 @@ def restart_watchers(paths: Paths):
 
 
 async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=True, settings=None, vfx=True,
-                view="captions", animate=True):
+                view="captions", animate=True, tree="default"):
     revision = watcher_revision(paths)
     worker = None
-    if view == "conversation":
+    if view in ("conversation", "tree"):
         # Always silent: never claims speech, synthesizes, or plays audio.
-        stream = asyncio.create_task(watch_conversation(paths, color=color, animate=animate))
+        stream = asyncio.create_task(watch_conversation(paths, color=color, animate=animate, tree=tree if view == "tree" else None))
     else:
         worker = (speech.PocketWorker((settings or {}).get("pocket_tts", {}))
                   if (settings or {}).get("mode") == "pocket_tts" else None)
@@ -1306,9 +1307,9 @@ def valid_display_message(message):
             and message.get("phase") in ("preparing", "displaying"))
 
 
-async def watch_conversation(paths: Paths, *, color=True, animate=True, size=None, writer=None):
+async def watch_conversation(paths: Paths, *, color=True, animate=True, size=None, writer=None, tree=None):
     """Silent conversation view driven only by the listener's shared lifecycle."""
-    view = conversation.ConversationView(color=color, animate=animate)
+    view = tree_view.TreeView(tree, color=color) if tree is not None else conversation.ConversationView(color=color, animate=animate)
     screen = ScreenWriter(writer)
     changed = asyncio.Event()
     seen = None
@@ -1320,15 +1321,18 @@ async def watch_conversation(paths: Paths, *, color=True, animate=True, size=Non
             connection = None
             try:
                 info = endpoint(paths)
-                if info.get("conversation_view") is not True or info.get("presentation_lifecycle") is not True:
+                if (info.get("conversation_view") is not True or info.get("presentation_lifecycle") is not True
+                        or (tree is not None and info.get("tree_view") is not True)):
                     view.notice = "listener too old; run 'agent-comms restart all'"
                     raise CommsError("Listener predates the conversation view.")
-                reader, connection, response = await connect(paths, "watch")
+                reader, connection, response = await connect(paths, "watch", presentation=True)
                 view.notice, delay = None, 0.25
                 while True:
                     lifecycle = response.get("lifecycle")
                     if response.get("event") != "state" or not isinstance(lifecycle, dict):
                         raise CommsError("Unexpected listener response.")
+                    view.metadata(response.get("presentation", {}), response.get("queued", []))
+                    changed.set()
                     position = (lifecycle.get("timeline"), lifecycle.get("seq"))
                     # Deduplicate by lifecycle position; a new timeline resynchronizes.
                     if seen is None or position[0] != seen[0] or (type(position[1]) is int and position[1] > seen[1]):
@@ -1431,6 +1435,9 @@ class Server:
         self.pending = {}
         self.preparing_started_at = None
         self.watchers = {}
+        self.presentation_watchers = set()
+        self.presentation = {}
+        self.presentation_stamp = None
         self.tasks = set()
         self.title_refreshes = {}
         self.stop = asyncio.Event()
@@ -1493,6 +1500,8 @@ class Server:
                     find_message=self.find_message)
             except conversation.ConversationError as exc:
                 raise CommsError(f"{exc} Message was not queued.") from None
+            message["agent_role"] = binding.get("agent_role", "")
+            self.presentation = tree_view.presentation(state)
             message.update(uid=uid, message_id=uid, created_at=datetime.now(timezone.utc).isoformat(),
                            epoch=state["epoch"], voice_profile_id=binding["voice_profile_id"], **fields)
             session = message.get("session_name")
@@ -1591,9 +1600,21 @@ class Server:
                 min(1, self.muted_until - time.monotonic()), self.audio_tick)
 
     def snapshot(self):
+        # The allocation document is atomically replaced. Read only after a change,
+        # including external bag resets and newly allocated identities.
+        try:
+            stat = (self.paths.state / allocation.STATE_FILE).stat()
+            stamp = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+        except FileNotFoundError:
+            stamp = None
+        if stamp != self.presentation_stamp or not self.presentation:
+            self.presentation = tree_view.presentation(allocation.read_state(self.paths.state))
+            self.presentation_stamp = stamp
         return {"ok": True, "protocol_version": VERSION, "event": "state", "listener_generation": self.generation,
                 "message": dict(self.current) if self.current else None,
-                "audio": self.audio_status(), "lifecycle": dict(self.lifecycle)}
+                "audio": self.audio_status(), "lifecycle": dict(self.lifecycle),
+                "presentation": self.presentation,
+                "queued": [{"name": m["name"]} for m in self.pending.values()]}
 
     def publish(self, message, event, message_id=None):
         """Advance the shared lifecycle: start, display (progress timing), end."""
@@ -1603,8 +1624,10 @@ class Server:
         self.display.show(message)
         self.broadcast()
 
-    def broadcast(self):
+    def broadcast(self, *, presentation_only=False):
         for writer, queue in list(self.watchers.items()):
+            if presentation_only and writer not in self.presentation_watchers:
+                continue
             try:
                 queue.put_nowait(self.snapshot())
             except asyncio.QueueFull:
@@ -1713,10 +1736,27 @@ class Server:
                     self.accepting -= 1
                 self.pending[message["uid"]] = message
                 self.queue.put_nowait(message)
+                self.broadcast(presentation_only=True)
                 await write_frame(writer, {"ok": True, "protocol_version": VERSION, "message_id": message["uid"],
                                            "warnings": warnings,
                                            "estimated_total_seconds": self.estimated_total_seconds()})
                 self.schedule_title_refresh(message["name"], request.get("pane_env"))
+            elif request.get("command") in ("role", "tree"):
+                env = await asyncio.to_thread(request_owner_env, request)
+                store = pane_identity.store(self.paths, lock=FileLock, atomic_json=atomic_json, private_dir=private_dir)
+                def change(state):
+                    key = pane_identity.owner(env)[0]
+                    binding = (state or {}).get("bindings", {}).get(key)
+                    if binding is None:
+                        raise CommsError("Run agent-comms context first.")
+                    try:
+                        result = tree_view.change(state, binding, request)
+                    except ValueError as exc:
+                        raise CommsError(str(exc)) from None
+                    return result, tree_view.presentation(state)
+                result, self.presentation = await asyncio.to_thread(store.update, change)
+                self.broadcast(presentation_only=True)
+                await write_frame(writer, {"ok": True, "protocol_version": VERSION, "result": result})
             elif request.get("command") == "audio":
                 status = self.set_audio(request.get("action"), request.get("seconds"))
                 await write_frame(writer, {"ok": True, "protocol_version": VERSION, "audio": status})
@@ -1748,6 +1788,8 @@ class Server:
             elif request.get("command") == "watch":
                 updates = asyncio.Queue(maxsize=16)
                 self.watchers[writer] = updates
+                if request.get("presentation") is True:
+                    self.presentation_watchers.add(writer)
                 updates.put_nowait(self.snapshot())
                 # A read task detects closed idle subscriptions without heartbeats.
                 disconnected = asyncio.create_task(reader.read(1))
@@ -1775,6 +1817,7 @@ class Server:
             pass
         finally:
             self.watchers.pop(writer, None)
+            self.presentation_watchers.discard(writer)
             await close_writer(writer)
             self.tasks.discard(task)
 
@@ -1873,9 +1916,10 @@ def parser():
     send_parser.add_argument("--kind", choices=conversation.KINDS, help="Displayed message kind (default: statement)")
     send_parser.add_argument("--emotion", help=f"Displayed expression: {', '.join(conversation.FACES)} (default: neutral)")
     send_parser.add_argument("--reply-to", metavar="MESSAGE_ID", help="Continue the displayed exchange of an accepted message")
-    watcher = subs.add_parser("watch", help="Stream current messages as tuios push lines, or show the conversation view")
-    watcher.add_argument("--view", choices=("captions", "conversation"), default="captions",
-                         help="captions: dock caption line with speech (default); conversation: silent pane-sized view")
+    watcher = subs.add_parser("watch", help="Stream captions or show a silent conversation/tree view")
+    watcher.add_argument("--view", choices=("captions", "conversation", "tree"), default="captions",
+                         help="captions: dock caption line with speech (default); conversation/tree: silent pane-sized views")
+    watcher.add_argument("--tree", default="default", help="Named tree to display (default: default)")
     watcher.add_argument("--no-animation", action="store_true", help="Conversation view: keep sides and emphasis without sliding")
     watcher.add_argument("--no-color", action="store_true")
     watcher.add_argument("--width", type=int, default=96, help="Maximum display cells (default: 96)")
@@ -1906,8 +1950,16 @@ def parser():
     history.add_argument("--no-color", action="store_true", help="Disable history heading colors")
     instructions = subs.add_parser("instructions", help="Print shared communication instructions without allocating identity")
     instructions.add_argument("--format", choices=("json", "text"), default="json")
+    role = subs.add_parser("role", help="Set your persistent display role (independent of send --role)")
+    role.add_argument("value", nargs="?")
+    role.add_argument("--clear", action="store_true")
+    tree = subs.add_parser("tree", help="Manage a named display tree owned by your identity")
+    tree.add_argument("action", choices=("set", "show", "delete"))
+    tree.add_argument("tree_name")
+    tree.add_argument("--title", help="Main screen title (set only); empty string restores the tree name")
+    tree.add_argument("--file", help="JSON array of nodes, or '-' for stdin (set only)")
     for sub in (identity, bags, bag_status, bag_reset, review, serve_parser, service, restart, send_parser, watcher,
-                instructions, history, audio):
+                instructions, history, audio, role, tree):
         common(sub, defaults=False)
     return result
 
@@ -2057,8 +2109,8 @@ def main(argv=None):
         elif args.command == "watch":
             if not 16 <= args.width <= 1000:
                 raise CommsError("--width must be between 16 and 1000.")
-            if args.view == "conversation" and not sys.stdout.isatty():
-                raise CommsError("--view conversation is pane-sized and requires a terminal.")
+            if args.view in ("conversation", "tree") and not sys.stdout.isatty():
+                raise CommsError("This view is pane-sized and requires a terminal.")
             try:
                 settings = load_config(paths.config).get("speech", {})
             except CommsError:
@@ -2068,7 +2120,7 @@ def main(argv=None):
             reload_watcher = asyncio.run(watch(
                 paths, color=not args.no_color and "NO_COLOR" not in os.environ, width=args.width,
                 muted=args.mute, flash=args.flash, settings=settings, vfx=args.vfx,
-                view=args.view, animate=not args.no_animation))
+                view=args.view, animate=not args.no_animation, tree=args.tree))
             if reload_watcher:
                 original_args = list(sys.argv[1:] if argv is None else argv)
                 os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve()), *original_args])
@@ -2079,6 +2131,29 @@ def main(argv=None):
                     print(json.dumps(asyncio.run(listener_context(paths, clear=True)), ensure_ascii=True, separators=(",", ":")))
                 else:
                     print(json.dumps(asyncio.run(listener_context(paths)), ensure_ascii=True, separators=(",", ":")))
+            elif args.command in ("role", "tree"):
+                env = {k: os.environ[k] for k in PANE_ENV_KEYS if k in os.environ}
+                owner = {"pane_env": env} if env.get("TUIOS_ENV") == "1" else {"shell_pid": os.getpid()}
+                if args.command == "role":
+                    if args.clear == (args.value is not None):
+                        raise CommsError("Supply a role string or --clear.")
+                    payload = {"value": "" if args.clear else args.value}
+                else:
+                    payload = {"action": args.action, "tree_name": args.tree_name}
+                    if args.action == "set":
+                        if not args.file and args.title is None:
+                            raise CommsError("tree set requires --file JSON_FILE and/or --title TEXT.")
+                        if args.title is not None:
+                            payload["title"] = args.title
+                        if args.file:
+                            try:
+                                payload["nodes"] = json.loads(sys.stdin.read() if args.file == "-" else Path(args.file).read_text())
+                            except (OSError, ValueError) as exc:
+                                raise CommsError(f"Cannot read tree: {exc}") from None
+                    elif args.file or args.title is not None:
+                        raise CommsError("--file and --title are only valid with tree set.")
+                require_capability(endpoint(paths), "tree_view", "Restart agent-comms listener to enable trees and roles.")
+                print(json.dumps(asyncio.run(rpc(paths, args.command, **payload, **owner))["result"]))
             elif args.command == "voice-review":
                 voice_review(paths, config, all_voices=args.all)
             elif args.command == "send":
