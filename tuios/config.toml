@@ -248,6 +248,20 @@ type = "popup"
 command = 'exec "$HOME/.local/bin/agent-comms" service restart'
 description = "Restart agent-comms service only"
 
+[[keybindings.command]]
+name = "cheatsheet-ai-model-pricing"
+key = "prefix+f20"
+type = "shell"
+command = 'tuios tml show "$HOME/.config/dotfiles/tuios/cheatsheets/ai-model-pricing.tml" --pane'
+description = "Cheatsheet: AI model pricing"
+
+[[keybindings.command]]
+name = "cheatsheet-tuios-commands"
+key = "prefix+f21"
+type = "shell"
+command = 'tuios tml show "$HOME/.config/dotfiles/tuios/cheatsheets/tuios-commands.tml" --pane'
+description = "Cheatsheet: tuios terminal commands"
+
 [appearance]
 theme = "ashen"
 border_style = "ascii"

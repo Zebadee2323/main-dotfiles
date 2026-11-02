@@ -1,0 +1,141 @@
+<tml version="1" title="OpenAI vs Anthropic: API pricing (Oct 30 2026)">
+  <state>{
+    "anthropic": [
+      {"model": "Claude Fable 5.1", "tier": "Frontier", "input": "$10.00", "output": "$50.00", "cache_hit": "$0.25", "cache_write": "$12.50 (5m) / $20 (1h)", "batch": "$5 / $25", "notes": "Top general model"},
+      {"model": "Claude Mythos 5.1", "tier": "Frontier (limited)", "input": "$10.00", "output": "$50.00", "cache_hit": "$0.25", "cache_write": "$12.50 (5m) / $20 (1h)", "batch": "$5 / $25", "notes": "Verified orgs only (cyber programme)"},
+      {"model": "Claude Opus 5.5", "tier": "Large", "input": "$4.00", "output": "$20.00", "cache_hit": "$0.20", "cache_write": "$5 (5m) / $8 (1h)", "batch": "$2 / $10", "notes": "Fast mode $8 / $40"},
+      {"model": "Claude Sonnet 5.5", "tier": "Mid", "input": "$2.00", "output": "$10.00", "cache_hit": "$0.10", "cache_write": "$2.50 (5m) / $4 (1h)", "batch": "$1 / $5", "notes": ""},
+      {"model": "Claude Haiku 5.5 (prompt up to 100K)", "tier": "Small", "input": "$0.10", "output": "$0.50", "cache_hit": "$0.01", "cache_write": "$0.125 (5m) / $0.20 (1h)", "batch": "$0.05 / $0.25", "notes": ""},
+      {"model": "Claude Haiku 5.5 (prompt over 100K)", "tier": "Small", "input": "$0.50", "output": "$2.50", "cache_hit": "$0.05", "cache_write": "$0.625 (5m) / $1 (1h)", "batch": "$0.25 / $1.25", "notes": "Whole request priced higher"}
+    ],
+    "anthropic_prev": [
+      {"model": "Claude Fable 5 / Mythos 5", "input": "$10.00", "output": "$50.00", "cache_hit": "$1.00", "batch": "$5 / $25"},
+      {"model": "Claude Opus 5 / 4.8 / 4.7 / 4.6 / 4.5", "input": "$5.00", "output": "$25.00", "cache_hit": "$0.50", "batch": "$2.50 / $12.50"},
+      {"model": "Claude Sonnet 5", "input": "$2.00", "output": "$10.00", "cache_hit": "$0.20", "batch": "$1 / $5"},
+      {"model": "Claude Sonnet 4.6 / 4.5", "input": "$3.00", "output": "$15.00", "cache_hit": "$0.30", "batch": "$1.50 / $7.50"},
+      {"model": "Claude Haiku 4.5", "input": "$1.00", "output": "$5.00", "cache_hit": "$0.10", "batch": "$0.50 / $2.50"}
+    ],
+    "openai": [
+      {"model": "gpt-6-astra", "tier": "Frontier", "input": "$10.00", "output": "$50.00", "cache_hit": "$1.00", "long_ctx": "$20 / $75", "batch": "$5 / $25", "notes": "Most capable"},
+      {"model": "gpt-6.1-sol", "tier": "Large", "input": "$2.00", "output": "$10.00", "cache_hit": "$0.10", "long_ctx": "$4 / $15", "batch": "$1 / $5", "notes": "Near-Astra; Fast $4 / $20"},
+      {"model": "gpt-6.1-terra", "tier": "Mid", "input": "$1.00", "output": "$5.00", "cache_hit": "$0.05", "long_ctx": "$2 / $7.50", "batch": "$0.50 / $2.50", "notes": "Fast, efficient"},
+      {"model": "gpt-6-luna", "tier": "Small", "input": "$0.10", "output": "$0.50", "cache_hit": "$0.01", "long_ctx": "$0.20 / $0.75", "batch": "$0.05 / $0.25", "notes": "High-volume"},
+      {"model": "gpt-6-sol", "tier": "Large (prev)", "input": "$2.00", "output": "$10.00", "cache_hit": "$0.20", "long_ctx": "$4 / $15", "batch": "$1 / $5", "notes": "Superseded by 6.1 Sol"},
+      {"model": "gpt-5.6-cyber", "tier": "Cyber (limited)", "input": "$12.50", "output": "$75.00", "cache_hit": "$1.25", "long_ctx": "-", "batch": "-", "notes": "Authorised security work"}
+    ],
+    "openai_prev": [
+      {"model": "gpt-5.6-sol", "input": "$4.00", "output": "$20.00", "cache_hit": "$0.40", "batch": "$2 / $10"},
+      {"model": "gpt-5.6-terra", "input": "$2.00", "output": "$12.00", "cache_hit": "$0.20", "batch": "$1 / $6"},
+      {"model": "gpt-5.6-luna", "input": "$0.20", "output": "$1.20", "cache_hit": "$0.02", "batch": "$0.10 / $0.60"},
+      {"model": "gpt-5.5", "input": "$5.00", "output": "$30.00", "cache_hit": "$0.50", "batch": "$2.50 / $15"},
+      {"model": "gpt-5.5-pro", "input": "$30.00", "output": "$180.00", "cache_hit": "-", "batch": "$15 / $90"},
+      {"model": "gpt-5.4", "input": "$2.50", "output": "$15.00", "cache_hit": "$0.25", "batch": "$1.25 / $7.50"},
+      {"model": "gpt-5.4-mini", "input": "$0.75", "output": "$4.50", "cache_hit": "$0.075", "batch": "$0.375 / $2.25"},
+      {"model": "gpt-5.4-nano", "input": "$0.20", "output": "$1.25", "cache_hit": "$0.02", "batch": "$0.10 / $0.625"}
+    ],
+    "matchup": [
+      {"tier": "Frontier", "anthropic": "Claude Fable 5.1", "a_price": "$10 / $50", "openai": "GPT-6 Astra", "o_price": "$10 / $50", "verdict": "Same list price. Claude cache hits are $0.25 vs $1.00."},
+      {"tier": "Large / flagship workhorse", "anthropic": "Claude Opus 5.5", "a_price": "$4 / $20", "openai": "GPT-6.1 Sol", "o_price": "$2 / $10", "verdict": "Sol is half the price."},
+      {"tier": "Mid / balanced", "anthropic": "Claude Sonnet 5.5", "a_price": "$2 / $10", "openai": "GPT-6.1 Terra", "o_price": "$1 / $5", "verdict": "Terra is half the price."},
+      {"tier": "Small / high-volume", "anthropic": "Claude Haiku 5.5", "a_price": "$0.10 / $0.50", "openai": "GPT-6 Luna", "o_price": "$0.10 / $0.50", "verdict": "Same price under 100K tokens. Haiku costs 5x above 100K, Luna 2x above 272K."},
+      {"tier": "Restricted cyber", "anthropic": "Claude Mythos 5.1", "a_price": "$10 / $50", "openai": "GPT-5.6 Cyber", "o_price": "$12.50 / $75", "verdict": "Both need vetted access. Mythos is cheaper."}
+    ],
+    "chart_input": [
+      {"model": "Fable 5.1", "price": 10}, {"model": "Astra", "price": 10},
+      {"model": "Opus 5.5", "price": 4}, {"model": "6.1 Sol", "price": 2},
+      {"model": "Sonnet 5.5", "price": 2}, {"model": "6.1 Terra", "price": 1},
+      {"model": "Haiku 5.5", "price": 0.1}, {"model": "Luna", "price": 0.1}
+    ],
+    "chart_output": [
+      {"model": "Fable 5.1", "price": 50}, {"model": "Astra", "price": 50},
+      {"model": "Opus 5.5", "price": 20}, {"model": "6.1 Sol", "price": 10},
+      {"model": "Sonnet 5.5", "price": 10}, {"model": "6.1 Terra", "price": 5},
+      {"model": "Haiku 5.5", "price": 0.5}, {"model": "Luna", "price": 0.5}
+    ]
+  }</state>
+  <col pad="1" gap="1">
+    <text role="dim">Prices are USD per 1M tokens (input / output) at standard rates. Sources: platform.claude.com pricing and developers.openai.com pricing, fetched Oct 30 2026.</text>
+    <tabs>
+      <tab id="matchup" title="Matchup">
+        <col gap="1">
+          <heading level="2">Like-for-like by tier</heading>
+          <table rows="state.matchup">
+            <column field="tier" title="Tier"/>
+            <column field="anthropic" title="Anthropic"/>
+            <column field="a_price" title="In / Out" align="right"/>
+            <column field="openai" title="OpenAI"/>
+            <column field="o_price" title="In / Out" align="right"/>
+            <column field="verdict" title="Notes"/>
+          </table>
+          <grid cols="2" gap="2">
+            <bar data="state.chart_input" x="model" y="price" dir="h" title="Input $/MTok" role="series1"/>
+            <bar data="state.chart_output" x="model" y="price" dir="h" title="Output $/MTok" role="series2"/>
+          </grid>
+          <text role="mute" wrap="word">Tiers are matched on each vendor's own positioning (frontier, workhorse, balanced, efficient) and list price. They are not based on benchmarks. Claude 4.7 and later use a tokenizer that produces about 30% more tokens for the same text, so effective cost per word is higher than the list price suggests.</text>
+        </col>
+      </tab>
+      <tab id="anthropic" title="Anthropic">
+        <col gap="1">
+          <heading level="2">Current lineup</heading>
+          <table rows="state.anthropic">
+            <column field="model" title="Model"/>
+            <column field="tier" title="Tier"/>
+            <column field="input" title="Input" align="right"/>
+            <column field="output" title="Output" align="right"/>
+            <column field="cache_hit" title="Cache hit" align="right"/>
+            <column field="cache_write" title="Cache write"/>
+            <column field="batch" title="Batch in/out"/>
+            <column field="notes" title="Notes"/>
+          </table>
+          <heading level="3">Previous generations</heading>
+          <table rows="state.anthropic_prev">
+            <column field="model" title="Model"/>
+            <column field="input" title="Input" align="right"/>
+            <column field="output" title="Output" align="right"/>
+            <column field="cache_hit" title="Cache hit" align="right"/>
+            <column field="batch" title="Batch in/out"/>
+          </table>
+          <kv>
+            <item k="Context" v="1M tokens at standard price (except Haiku 5.5 tiering)"/>
+            <item k="Batch" v="50% off input and output"/>
+            <item k="US-only inference" v="1.1x on Claude 4.6+"/>
+            <item k="Web search" v="$10 per 1K searches"/>
+          </kv>
+        </col>
+      </tab>
+      <tab id="openai" title="OpenAI">
+        <col gap="1">
+          <heading level="2">Current lineup</heading>
+          <table rows="state.openai">
+            <column field="model" title="Model"/>
+            <column field="tier" title="Tier"/>
+            <column field="input" title="Input" align="right"/>
+            <column field="output" title="Output" align="right"/>
+            <column field="cache_hit" title="Cached in" align="right"/>
+            <column field="long_ctx" title="&gt;272K in/out"/>
+            <column field="batch" title="Batch in/out"/>
+            <column field="notes" title="Notes"/>
+          </table>
+          <heading level="3">Previous generations</heading>
+          <table rows="state.openai_prev">
+            <column field="model" title="Model"/>
+            <column field="input" title="Input" align="right"/>
+            <column field="output" title="Output" align="right"/>
+            <column field="cache_hit" title="Cached in" align="right"/>
+            <column field="batch" title="Batch in/out"/>
+          </table>
+          <kv>
+            <item k="Long context" v="&gt;272K input tokens: about 2x input, 1.5x output"/>
+            <item k="Batch / Flex" v="50% off"/>
+            <item k="Fast mode" v="2x standard; Ultrafast 6x (Astra, 6.1 Sol)"/>
+            <item k="Cache writes" v="1.25x (30m) / 2.5x (12h) of input"/>
+            <item k="Data residency" v="+10% for models from Mar 5 2026 on"/>
+          </kv>
+        </col>
+      </tab>
+    </tabs>
+    <row gap="2">
+      <button key="q" on-press="close(null)">Close</button>
+    </row>
+  </col>
+</tml>
