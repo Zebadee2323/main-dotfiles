@@ -122,7 +122,7 @@ center = ["custom/agent-comms", "windows"]
 
 [dock.custom.agent-comms]
 command = 'exec "$HOME/.local/bin/agent-comms" watch --width 80 --flash --vfx'
-# Left-click: mute for 15 seconds. Ctrl+left-click: cycle voice volume.
+# Shift+left-click: mute for 15 seconds. Ctrl+left-click: cycle voice volume.
 on-click = 'exec "$HOME/.local/bin/agent-comms" audio dock-click'
 refresh = "push"
 max-width = 80

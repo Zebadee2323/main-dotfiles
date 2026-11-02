@@ -1565,17 +1565,11 @@ class Server:
         if action == "status":
             return self.audio_status()
         if action == "cycle-volume":
-            # Mute is a real shared speech state, not zero playback gain.
-            # Reuse the normal transition below to cancel timers/release leases.
             levels = (10, 25, 50, 100)
-            if not self.audio_muted and self.audio_volume == levels[-1]:
-                action = "mute"
-                self.volume_notice_until = 0
-            else:
-                self.audio_volume = (levels[0] if self.audio_muted else
-                                     levels[levels.index(self.audio_volume) + 1])
-                action = "unmute"
-                self.volume_notice_until = time.monotonic() + 2
+            self.audio_volume = (levels[0] if self.audio_muted else
+                                 levels[(levels.index(self.audio_volume) + 1) % len(levels)])
+            action = "unmute"
+            self.volume_notice_until = time.monotonic() + 2
         if self.audio_timer:
             self.audio_timer.cancel()
             self.audio_timer = None
@@ -1763,11 +1757,20 @@ class Server:
             elif request.get("command") in ("role", "tree"):
                 env = await asyncio.to_thread(request_owner_env, request)
                 store = pane_identity.store(self.paths, lock=FileLock, atomic_json=atomic_json, private_dir=private_dir)
+                key, daemon, own = pane_identity.owner(env)
+                collect = request.get("command") == "tree" and request.get("action") == "set"
+                live = None
+                if collect:
+                    live = await asyncio.to_thread(
+                        shell_identity.inventory if daemon.startswith("shell:") else
+                        lambda: pane_identity.inventory(env=env))
                 def change(state):
                     key = pane_identity.owner(env)[0]
                     binding = (state or {}).get("bindings", {}).get(key)
                     if binding is None:
                         raise CommsError("Run agent-comms context first.")
+                    if collect:
+                        pane_identity.prune_tree_metadata(state, daemon, own, live, time.time())
                     try:
                         result = tree_view.change(state, binding, request)
                     except ValueError as exc:
@@ -2000,7 +2003,7 @@ def prepare_output():
             kernel.SetConsoleMode(handle, mode.value | 0x0004)
 
 
-def control_pressed():
+def modifier_pressed(modifier):
     """Tuios click hooks omit modifiers; sample the local keyboard state."""
     import ctypes
     if sys.platform == "darwin":
@@ -2008,10 +2011,18 @@ def control_pressed():
         flags = quartz.CGEventSourceFlagsState
         flags.argtypes = [ctypes.c_int32]
         flags.restype = ctypes.c_uint64
-        return bool(flags(0) & (1 << 18))  # Combined session state, Control flag.
+        return bool(flags(0) & (1 << {"control": 18, "shift": 17}[modifier]))
     if os.name == "nt":
-        return bool(ctypes.windll.user32.GetAsyncKeyState(0x11) & 0x8000)
+        return bool(ctypes.windll.user32.GetAsyncKeyState({"control": 0x11, "shift": 0x10}[modifier]) & 0x8000)
     return False
+
+
+def control_pressed():
+    return modifier_pressed("control")
+
+
+def shift_pressed():
+    return modifier_pressed("shift")
 
 
 def main(argv=None):
@@ -2085,7 +2096,12 @@ def main(argv=None):
                 button = os.environ.get("TUIOS_CLICK_BUTTON", "1")
                 if button != "1":
                     return 0
-                args.action = "cycle-volume" if control_pressed() else "mute"
+                if shift_pressed():
+                    args.action = "mute"
+                elif control_pressed():
+                    args.action = "cycle-volume"
+                else:
+                    return 0
                 args.seconds = 15 if args.action == "mute" else None
             if args.seconds is not None and (args.action != "mute" or not math.isfinite(args.seconds) or not 0 < args.seconds <= 86400):
                 raise CommsError("--seconds must be greater than 0 and at most 86400, for mute only.")
