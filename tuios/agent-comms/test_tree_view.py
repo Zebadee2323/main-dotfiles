@@ -120,7 +120,9 @@ class TreeProtocolTests(Fixture):
                          [dict(nodes[0], label='Alice'), dict(nodes[1], label='Bob')])
         request('send', **sender, msg='hello')
         queued = json.loads(stream.readline())
-        self.assertEqual(queued['queued'], [{'name': 'Alice'}])
+        self.assertEqual(queued['queued'][0]['name'], 'Alice')
+        self.assertEqual(queued['queued'][0]['msg'], 'hello')
+        self.assertGreaterEqual(queued['queued'][0]['wait_seconds'], 0)
         # A newly constructed listener gets the persisted metadata without clients
         # replaying role assignments or topology.
         server = app.Server(self.paths, app.load_config(self.paths.config))

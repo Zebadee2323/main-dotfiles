@@ -32,6 +32,8 @@ import wave
 import allocation
 import audio_visualizer
 import conversation
+import history_view
+import watcher_input
 import tree_view
 import message_history
 import pane_identity
@@ -43,7 +45,7 @@ import tuios_context
 VERSION = 3
 PREFIX_POLICY = "explicit"
 CAPABILITIES = {"prefix_policy": PREFIX_POLICY, "spatial_prefix": True, "audio_control": True,
-                "pane_identity": True, "pane_identity_clear": True, "shell_identity": True,
+                "pane_identity": True, "pane_identity_clear": True, "shell_identity": True, "queue_preview": True, "tree_navigation": True, "log_view": True,
                 "name_identity": True, "conversation_view": True, "presentation_lifecycle": True, "tree_view": True}
 MAX_FRAME = 65536
 MAX_MESSAGE = 8192
@@ -232,32 +234,7 @@ def clean_text(value: str, *, multiline: bool = False) -> str:
 
 def format_history(messages, *, width=88, color=False):
     """Readable history; JSON and raw output deliberately bypass this renderer."""
-    if not messages:
-        return "No messages in history."
-    width = max(24, min(width, 100))
-    lines = [f"Agent communications · {len(messages)} message{'s' if len(messages) != 1 else ''}", "─" * width]
-    for message in messages:
-        timestamp = clean_text(message["created_at"])
-        with suppress(ValueError, OverflowError, OSError):
-            timestamp = datetime.fromisoformat(timestamp).astimezone().strftime("%b %d %H:%M:%S")
-        name = clean_text(message["name"])
-        recipient = message.get("recipient")
-        if (isinstance(recipient, dict) and isinstance(recipient.get("name"), str)
-                and (recipient.get("kind") == "agent" or recipient.get("selector") is not None)):
-            name += " → " + clean_text(recipient["name"])
-        metadata = []
-        if isinstance(message.get("session_name"), str):
-            metadata.append(clean_text(message["session_name"]))
-        if type(message.get("workspace")) is int:
-            metadata.append(f"workspace {message['workspace']}")
-        heading = truncate(f"{timestamp}  {name}" + (" · " + " / ".join(metadata) if metadata else ""), width - 2)
-        lines.extend(["", "  " + (f"\x1b[1;36m{heading}\x1b[0m" if color else heading)])
-        for paragraph in clean_text(message["msg"], multiline=True).splitlines():
-            wrapped = speech.pages(paragraph, width - 4)
-            lines.extend("    " + text for text, _ in wrapped)
-            if not wrapped:
-                lines.append("")
-    return "\n".join(lines)
+    return history_view.document(messages, width=width, color=color)
 
 
 def voice_fields(mode):
@@ -1120,7 +1097,9 @@ async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=Tru
                 view="captions", animate=True, tree="default"):
     revision = watcher_revision(paths)
     worker = None
-    if view in ("conversation", "tree"):
+    if view == "log":
+        stream = asyncio.create_task(watch_log(paths, color=color, animate=animate))
+    elif view in ("conversation", "tree"):
         # Always silent: never claims speech, synthesizes, or plays audio.
         stream = asyncio.create_task(watch_conversation(paths, color=color, animate=animate, tree=tree if view == "tree" else None))
     else:
@@ -1307,9 +1286,20 @@ def valid_display_message(message):
             and message.get("phase") in ("preparing", "displaying"))
 
 
-async def watch_conversation(paths: Paths, *, color=True, animate=True, size=None, writer=None, tree=None):
-    """Silent conversation view driven only by the listener's shared lifecycle."""
-    view = tree_view.TreeView(tree, color=color) if tree is not None else conversation.ConversationView(color=color, animate=animate)
+async def watch_log(paths: Paths, *, color=True, animate=True, size=None, writer=None):
+    return await watch_conversation(paths, color=color, animate=animate, size=size, writer=writer, log=True)
+
+
+async def watch_conversation(paths: Paths, *, color=True, animate=True, size=None, writer=None, tree=None, log=False):
+    """Silent pane watchers driven by the listener's shared queue and lifecycle."""
+    if log:
+        view = history_view.LogView(color=color, animate=animate)
+        config = load_config(paths.config) if paths.config.exists() else {}
+        history_size = config.get("history_size", message_history.MAX_ENTRIES)
+        view.update(await asyncio.to_thread(message_history.read, paths.state, history_size,
+                                            max_entries=history_size), time.monotonic(), snapshot=True)
+    else:
+        view = tree_view.TreeView(tree, color=color) if tree is not None else conversation.ConversationView(color=color, animate=animate)
     screen = ScreenWriter(writer)
     changed = asyncio.Event()
     seen = None
@@ -1321,17 +1311,28 @@ async def watch_conversation(paths: Paths, *, color=True, animate=True, size=Non
             connection = None
             try:
                 info = endpoint(paths)
-                if (info.get("conversation_view") is not True or info.get("presentation_lifecycle") is not True
-                        or (tree is not None and info.get("tree_view") is not True)):
+                if (info.get("presentation_lifecycle") is not True
+                        or (log and info.get("log_view") is not True)
+                        or (not log and tree is not None and info.get("tree_navigation") is not True)
+                        or (not log and tree is None and info.get("queue_preview") is not True)):
                     view.notice = "listener too old; run 'agent-comms restart all'"
                     raise CommsError("Listener predates the conversation view.")
                 reader, connection, response = await connect(paths, "watch", presentation=True)
                 view.notice, delay = None, 0.25
+                snapshot = True
                 while True:
                     lifecycle = response.get("lifecycle")
                     if response.get("event") != "state" or not isinstance(lifecycle, dict):
                         raise CommsError("Unexpected listener response.")
-                    view.metadata(response.get("presentation", {}), response.get("queued", []))
+                    if log:
+                        messages = await asyncio.to_thread(message_history.read, paths.state, history_size,
+                                                           max_entries=history_size)
+                        view.receive(messages, response, time.monotonic(), snapshot=snapshot)
+                        snapshot = False
+                        changed.set()
+                        response = await read_frame(reader, timeout=False)
+                        continue
+                    view.metadata(response.get("presentation", {}), response.get("queued", []), now=time.monotonic())
                     changed.set()
                     position = (lifecycle.get("timeline"), lifecycle.get("seq"))
                     # Deduplicate by lifecycle position; a new timeline resynchronizes.
@@ -1342,7 +1343,10 @@ async def watch_conversation(paths: Paths, *, color=True, animate=True, size=Non
                         changed.set()
                     response = await read_frame(reader, timeout=False)
             except (CommsError, OSError, asyncio.TimeoutError):
-                view.update(None, time.monotonic(), offline=True)
+                if log:
+                    view.disconnect()
+                else:
+                    view.update(None, time.monotonic(), offline=True)
                 changed.set()
             finally:
                 if connection is not None:
@@ -1352,8 +1356,19 @@ async def watch_conversation(paths: Paths, *, color=True, animate=True, size=Non
 
     task = asyncio.create_task(subscribe())
     try:
-        with terminal_screen():
+        with terminal_screen(), watcher_input.terminal_input(mouse=tree is not None) as inputs:
             while True:
+                for event in inputs.events():
+                    if event[0] == "queue" and tree is None and not log:
+                        view.expanded_queue = not view.expanded_queue
+                    elif event[0] == "click" and tree is not None:
+                        binding = view.hit_test(event[1], event[2])
+                        if binding:
+                            try:
+                                await asyncio.to_thread(watcher_input.focus_agent, binding)
+                                view.notice = None
+                            except (ValueError, OSError) as exc:
+                                view.notice = clean_text(str(exc))[:180]
                 columns, rows = size() if size else shutil.get_terminal_size((80, 24))
                 screen.draw(view.render(max(1, columns - 1), max(1, rows), time.monotonic()), (columns, rows))
                 if task.done():
@@ -1365,20 +1380,6 @@ async def watch_conversation(paths: Paths, *, color=True, animate=True, size=Non
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-
-def history_watch(paths: Paths, *, limit, history_size, refresh, color, filters, sleep=time.sleep, size=None):
-    """Poll retained history and redraw only on change. Never speaks or submits."""
-    screen = ScreenWriter()
-    with terminal_screen():
-        try:
-            while True:
-                messages = message_history.read(paths.state, limit, max_entries=history_size, **filters)
-                columns, rows = size() if size else shutil.get_terminal_size((88, 24))
-                lines = format_history(messages, width=columns, color=color).splitlines()
-                screen.draw(lines[-max(1, rows):], (columns, rows))
-                sleep(refresh)
-        except KeyboardInterrupt:
-            return 0
 
 
 class TerminalDisplay:
@@ -1599,6 +1600,21 @@ class Server:
             self.audio_timer = asyncio.get_running_loop().call_later(
                 min(1, self.muted_until - time.monotonic()), self.audio_tick)
 
+    def queue_preview(self):
+        pending = list(self.pending.values())
+        durations = [self.estimated_message_seconds(m) for m in pending]
+        wait = max(0, self.estimated_total_seconds() - sum(durations))
+        result = []
+        for index, (message, duration) in enumerate(zip(pending, durations)):
+            item = {"name": message["name"], "uid": message["uid"]}
+            # Bound previews independently of queue length and message size.
+            if index < 5:
+                item.update(msg=message["msg"][:400] + ("…" if len(message["msg"]) > 400 else ""), recipient=message.get("recipient"),
+                            wait_seconds=round(wait, 1), duration_seconds=round(duration, 1))
+            result.append(item)
+            wait += duration
+        return result
+
     def snapshot(self):
         # The allocation document is atomically replaced. Read only after a change,
         # including external bag resets and newly allocated identities.
@@ -1614,7 +1630,7 @@ class Server:
                 "message": dict(self.current) if self.current else None,
                 "audio": self.audio_status(), "lifecycle": dict(self.lifecycle),
                 "presentation": self.presentation,
-                "queued": [{"name": m["name"]} for m in self.pending.values()]}
+                "queued": self.queue_preview()}
 
     def publish(self, message, event, message_id=None):
         """Advance the shared lifecycle: start, display (progress timing), end."""
@@ -1625,11 +1641,14 @@ class Server:
         self.broadcast()
 
     def broadcast(self, *, presentation_only=False):
+        snapshot = None
         for writer, queue in list(self.watchers.items()):
             if presentation_only and writer not in self.presentation_watchers:
                 continue
             try:
-                queue.put_nowait(self.snapshot())
+                if snapshot is None:
+                    snapshot = self.snapshot()
+                queue.put_nowait(snapshot)
             except asyncio.QueueFull:
                 writer.close()  # A slow subscriber must not hold up global delivery.
 
@@ -1916,11 +1935,11 @@ def parser():
     send_parser.add_argument("--kind", choices=conversation.KINDS, help="Displayed message kind (default: statement)")
     send_parser.add_argument("--emotion", help=f"Displayed expression: {', '.join(conversation.FACES)} (default: neutral)")
     send_parser.add_argument("--reply-to", metavar="MESSAGE_ID", help="Continue the displayed exchange of an accepted message")
-    watcher = subs.add_parser("watch", help="Stream captions or show a silent conversation/tree view")
-    watcher.add_argument("--view", choices=("captions", "conversation", "tree"), default="captions",
-                         help="captions: dock caption line with speech (default); conversation/tree: silent pane-sized views")
+    watcher = subs.add_parser("watch", help="Stream captions or show a silent conversation/tree/log view")
+    watcher.add_argument("--view", choices=("captions", "conversation", "tree", "log"), default="captions",
+                         help="captions: dock caption line with speech (default); conversation/tree/log: silent pane-sized views")
     watcher.add_argument("--tree", default="default", help="Named tree to display (default: default)")
-    watcher.add_argument("--no-animation", action="store_true", help="Conversation view: keep sides and emphasis without sliding")
+    watcher.add_argument("--no-animation", action="store_true", help="Disable arrival slides in conversation and log views")
     watcher.add_argument("--no-color", action="store_true")
     watcher.add_argument("--width", type=int, default=96, help="Maximum display cells (default: 96)")
     watcher.add_argument("--mute", action="store_true", help="Display captions without generating or playing speech")
@@ -1942,8 +1961,6 @@ def parser():
     history_name.add_argument("--id", help="Deprecated alias: filter by record ID (the name, or a legacy identity ID)")
     history.add_argument("--epoch", help="Filter by reset epoch, disambiguating repeated names")
     history.add_argument("--session", help="Filter by tuios session name")
-    history.add_argument("--watch", action="store_true", help="Keep the view open and redraw as messages arrive")
-    history.add_argument("--refresh-time", type=float, metavar="SECONDS", help="Watch polling interval (default: 1.0)")
     history_format = history.add_mutually_exclusive_group()
     history_format.add_argument("--json", action="store_true", help="Print machine-readable full records including speech text")
     history_format.add_argument("--raw", action="store_true", help="Print unstyled timestamp/name/message lines")
@@ -2085,18 +2102,6 @@ def main(argv=None):
             if args.id is not None:
                 print("agent-comms: history --id is deprecated; use --name.", file=sys.stderr)
             filters = {"identity": args.id, "name": args.name, "epoch": args.epoch, "session": args.session}
-            if args.refresh_time is not None and not args.watch:
-                raise CommsError("--refresh-time requires --watch.")
-            if args.watch:
-                refresh = 1.0 if args.refresh_time is None else args.refresh_time
-                if not math.isfinite(refresh) or refresh <= 0:
-                    raise CommsError("--refresh-time must be a positive, finite number of seconds.")
-                if args.json or args.raw:
-                    raise CommsError("--watch cannot be combined with --json or --raw.")
-                if not sys.stdout.isatty():
-                    raise CommsError("--watch requires a terminal; use one-shot history for redirected output.")
-                return history_watch(paths, limit=limit, history_size=history_size, refresh=refresh, filters=filters,
-                                     color=not args.no_color and "NO_COLOR" not in os.environ)
             messages = message_history.read(paths.state, limit, max_entries=history_size, **filters)
             if args.json:
                 print(json.dumps(messages, ensure_ascii=True))
@@ -2109,7 +2114,7 @@ def main(argv=None):
         elif args.command == "watch":
             if not 16 <= args.width <= 1000:
                 raise CommsError("--width must be between 16 and 1000.")
-            if args.view in ("conversation", "tree") and not sys.stdout.isatty():
+            if args.view in ("conversation", "tree", "log") and not sys.stdout.isatty():
                 raise CommsError("This view is pane-sized and requires a terminal.")
             try:
                 settings = load_config(paths.config).get("speech", {})

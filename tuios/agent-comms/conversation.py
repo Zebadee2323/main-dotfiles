@@ -237,9 +237,12 @@ class ConversationView:
         self.offline, self.notice = True, None
         self.sessions, self.counts = {}, {}
         self.roles = {}
+        self.queued, self.expanded_queue, self.queue_received = [], False, None
 
-    def metadata(self, data, queued):
+    def metadata(self, data, queued, *, now=None):
         self.roles = data.get("roles", {})
+        self.queued = queued
+        self.queue_received = now
 
     def name_label(self, participant):
         name = clean(participant.get("name", "?"))
@@ -322,6 +325,45 @@ class ConversationView:
         canvas.put(right - text_width(status), 0, status, style)
 
     def render(self, width, height, now):
+        width, height = max(1, width), max(1, height)
+        if not self.queued or self.offline or height < 4:
+            return self.render_main(width, height, now)
+        panel_height = height - 2 if self.expanded_queue else min(height - 2, max(2, min(7, height // 3)))
+        main = self.render_main(width, height - panel_height, now)
+        panel = Canvas(width, panel_height)
+        elapsed = max(0, now - self.queue_received) if self.queue_received is not None else 0
+        wait = self.queued[0].get("wait_seconds")
+        heading = f"Up next · {len(self.queued)} queued"
+        if isinstance(wait, (int, float)):
+            heading += f" · next in ~{max(0, wait - elapsed):.0f}s"
+        heading += " · Q: " + ("collapse" if self.expanded_queue else "expand")
+        panel.put(0, 0, fit(heading, width), "1;36")
+        row, shown = 1, 0
+        for index, message in enumerate(self.queued[:5]):
+            if row >= panel_height:
+                break
+            name = clean(message.get("name", "?"))
+            recipient = message.get("recipient") or {}
+            label = f"{index + 1}. {name}"
+            if recipient.get("name"):
+                label += " → " + clean(recipient["name"])
+            wait = message.get("wait_seconds")
+            if isinstance(wait, (int, float)):
+                label += f" · ~{max(0, wait - elapsed):.0f}s"
+            panel.put(0, row, fit(label, width), "1;" + ink(name))
+            row += 1
+            if row < panel_height and message.get("msg"):
+                pages = speech.pages(clean(message["msg"].replace("\n", " ").replace("\t", " ")), max(1, width - 2))
+                limit = min(3 if self.expanded_queue else 1, panel_height - row)
+                for line, _ in pages[:limit]:
+                    panel.put(2, row, fit(line, width - 2), "2")
+                    row += 1
+            shown += 1
+        if shown < len(self.queued) and panel_height > 2:
+            panel.put(0, min(row, panel_height - 1), fit(f"… {len(self.queued) - shown} more queued", width), "2")
+        return main + panel.lines(self.color)
+
+    def render_main(self, width, height, now):
         width, height = max(1, width), max(1, height)
         if width < 48 or height < 14:
             return self.compact(width, height, now)

@@ -31,15 +31,16 @@ controls how many retained, matching records are displayed.
 
 ```sh
 agent-comms history --limit 10
-agent-comms history --watch
-agent-comms history --watch --limit 10 --refresh-time 0.5
+agent-comms watch --view log
+agent-comms watch --view log --no-animation
 ```
 
 ### Behavior
 
-- `--watch` immediately displays a snapshot, then polls for changes.
-- `--refresh-time <seconds>` defaults to `1.0`; accept only positive, finite
-  numbers. Reject it when `--watch` is absent.
+- `history` produces one-shot output; live mode belongs to `watch --view log`.
+- The log watcher hydrates retained messages and follows listener queue/lifecycle
+  events, without polling the history file on a timer.
+- `watch --no-animation` disables arrival slides.
 - Preserve existing identity/session filters, ordering, formatting, and color
   options. Display the latest matching records in chronological order.
 - Keep existing `--limit` validation: an integer from 1 through `history_size`.

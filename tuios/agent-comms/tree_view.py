@@ -11,6 +11,9 @@ import conversation as c
 def presentation(state):
     state = state or {}
     return {"trees": state.get("display_trees", {}),
+            "agents": {b["name"].lower(): {"session": b.get("session_name"), "pane": b.get("pane_id"),
+                                              "daemon": b.get("daemon")}
+                       for b in state.get("bindings", {}).values()},
             "roles": {b["name"].lower(): b.get("agent_role", "") for b in state.get("bindings", {}).values()}}
 
 
@@ -106,18 +109,28 @@ class TreeView:
         self.name, self.color = name, color
         self.data, self.queued, self.message = {}, [], None
         self.offline, self.notice = True, None
+        self.hits = {}
 
-    def metadata(self, data, queued):
+    def metadata(self, data, queued, *, now=None):
         self.data, self.queued = data, queued
 
     def update(self, message, now, *, offline=False):
         self.offline = offline
         self.message = None if offline else message
 
+    def hit_test(self, x, y):
+        if self.offline:
+            return None
+        hit = self.hits.get(y)
+        if hit and 0 <= x < hit[0]:
+            return self.data.get("agents", {}).get(hit[1])
+        return None
+
     def render(self, width, height, now):
+        self.hits = {}
         canvas = c.Canvas(width, height)
         tree = self.data.get("trees", {}).get(self.name)
-        status = (self.notice or "offline") if self.offline else ("live" if tree else "waiting for tree")
+        status = self.notice or ("offline" if self.offline else ("live · click an agent" if tree else "waiting for tree"))
         title = (tree or {}).get("title") or self.name
         canvas.put(0, 0, c.fit(f"{title} · {status}", width), "1")
         if not tree or height < 2:
@@ -180,6 +193,8 @@ class TreeView:
                 if char != " ":
                     canvas.put(x, offset + 1, char, style)
             x = len(prefix)
+            if name and not node.get("_info"):
+                self.hits[offset + 1] = (min(width, x + c.text_width(marker + label)), name)
             canvas.put(x, offset + 1, c.fit(marker + label, max(0, width - x)), style)
         if overflow and capacity > 1:
             canvas.put(0, height - 1, c.fit(f"… {len(rows) - len(visible)} lines outside view", width), "2")

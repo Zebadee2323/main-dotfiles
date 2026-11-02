@@ -71,7 +71,7 @@ $message = if ($prefix) { "$prefix Hello from Windows!" } else { "Hello from Win
 | `history --json` | Print full machine-readable records, including speech text. Mutually exclusive with `--raw`. |
 | `history --limit 5 --name Alice --json` | Filter/limit retained history and optionally include complete metadata and speech text. Add `--epoch EPOCH` to tell apart names repeated after a reset. |
 | `history --session work` | Filter by the sender's tuios session name. |
-| `history --watch [--refresh-time SECONDS]` | Keep the history view open in a terminal and redraw as messages are accepted. |
+| `watch --view log` | Follow accepted messages, queue state, and live playback in a silent animated log. |
 | `watch` | Show animated, timed caption chunks and optionally generate/play speech. |
 | `watch --no-color --width 80` | Plain-text output, at most 80 display cells. |
 | `watch --no-vfx --no-flash` | Steady captions without delivery animation or arrival flashes. |
@@ -832,21 +832,27 @@ within the retained window, not a separate per-name/session history. Reducing th
 size trims older messages on the next accepted send; increasing it cannot recover
 messages already dropped.
 
-To keep a live view open:
+For a live, event-driven log, use a watcher:
 
 ```sh
-agent-comms history --watch
-agent-comms history --watch --limit 10 --refresh-time 0.5 --name Alice
+agent-comms watch --view log
+agent-comms watch --view log --no-animation
 ```
 
-`--watch` shows a snapshot immediately, then polls the history file every
-`--refresh-time` seconds (default 1.0; positive and finite; only valid with
-`--watch`). It redraws in place on an alternate screen only when the displayed
-records or terminal size change, so your scrollback is untouched, and exits
-cleanly on Ctrl+C. Filters, `--limit`, and `--no-color` work as usual. It requires
-a terminal and cannot be combined with `--json` or `--raw`. It keeps working while
-the listener is offline (a missing file is an empty view) and never speaks or
-sends anything.
+The log watcher loads retained messages, then subscribes to the listener's shared
+queue and presentation events. New messages slide in on acceptance; queued records
+are labelled, and the current speaker highlights while preparing or speaking,
+with a live playback progress bar. It never claims speech or generates audio.
+It keeps the last retained records visible while offline, reconnects automatically,
+and resynchronizes without replaying arrival animations. Like the other watchers,
+it reloads after `agent-comms restart watchers` or `restart all`, responds to
+terminal resizing, preserves scrollback, and exits cleanly on Ctrl+C.
+
+`history` is one-shot output, including when the listener is offline. Its filters,
+`--limit`, JSON, and raw output remain available. The old `--watch`,
+`--refresh-time`, and history-specific `--no-animation` options are removed.
+The log watcher displays the configured retained window; it does not use the
+one-shot history filters.
 
 Private `state/history.jsonl` contains **at most `history_size` entries**. Each acceptance
 atomically replaces it with the newest retained messages, flushing before acknowledging
@@ -1638,3 +1644,30 @@ only its title. Titles are printable text up to 160 characters, persist with the
 tree and update live in every watcher. Omitting `--title` preserves the current
 title; `--title ''` restores the tree name as the heading. Titles clip to the
 pane width and share the existing header row, using no extra vertical space.
+
+### Watcher navigation, queue previews, and history
+
+Click an agent name or role in the tree watcher to focus that agent's verified
+pane. Cross-session targets also switch the client to the target session.
+Grouping and info rows do not navigate. The watcher resolves current identity
+bindings and checks that the exact pane still exists; unavailable destinations
+and denied operations appear in the header. Navigation requires the watcher's
+normal tuios read, focus, and session-switch permissions and never types into an
+agent pane. Terminal mouse reporting is enabled only while the tree is open and
+restored on exit. Terminal emulators may use Shift-click for text selection.
+
+The conversation watcher includes an **Up next** panel when messages are queued:
+FIFO ordering, pending count, sender/recipient, estimated wait, and silent text
+previews. Press **Q** to expand/collapse the panel. The first five messages have
+bounded previews (up to 400 characters each); additional messages still count
+in the queue total. Waits count down and are estimates, since speech preparation
+and playback can vary. The panel follows the shared queue without claiming speech.
+
+`agent-comms history` now groups chronological messages by local date, with
+speaker/role/recipient headings, subdued session metadata, and wrapped paragraphs.
+`watch --view log` keeps a fixed header and follows listener events. Newly arriving
+messages slide in from the right; initial loads, reconnect snapshots, and terminal
+resizes do not trigger arrival animations. Queue labels, speaker highlights, and
+playback progress react to the same lifecycle as the other watchers. Use
+`watch --view log --no-animation` for immediate arrivals. `history` stays a
+standard one-shot log with filters, JSON, and raw output.

@@ -192,3 +192,16 @@ only its title. Titles are printable text up to 160 characters, persist with the
 tree and update live in every watcher. Omitting `--title` preserves the current
 title; `--title ''` restores the tree name as the heading. Titles clip to the
 pane width and share the existing header row, using no extra vertical space.
+
+Tree watchers accept clicks on agent rows to focus their exact bound tuios pane,
+switching sessions when necessary. Grouping and info rows do not navigate.
+Unavailable or denied destinations appear in the header; do not bypass grants.
+Conversation watchers show queued senders, recipients, estimated waits, and text
+previews. Press Q to expand/collapse the silent queue panel. Previews are bounded
+to the first five messages, while pending counts include the full queue.
+`agent-comms history` groups messages by date with readable message cards;
+`agent-comms watch --view log` provides the live log: incoming messages slide in,
+queued records are labelled, and the current speaker highlights with shared
+playback progress. It reconnects and reloads with the other watchers and stays
+silent. Use `watch --view log --no-animation` to disable arrival slides.
+`history` is one-shot only; its JSON/raw formats and filters remain available.
