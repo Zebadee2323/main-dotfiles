@@ -18,47 +18,41 @@ Understand the requested outcome, acceptance criteria, repository, and
 supervisor branch. Inspect the current checkout and its changes before
 allocating work. Ask about material gaps in the user's quality expectations.
 
-Before any delegation, obtain these decisions from the user. Reuse answers and
-permissions already supplied in this conversation; do not ask again
-unnecessarily.
+Before delegation, obtain these user decisions; reuse existing answers and
+permissions.
 
 1. Ask for either existing worker and reviewer identities provided through
    `agent-comms`, or permission to create the agents needed for both roles.
    Never infer permission to spawn from an agent listing. Resolve each identity to its actual
    tuios session and pane before addressing it.
-2. Use one shared harness for workers and reviewers. Only **OpenCode** and
-   **Codex** are supported; do not ask for a separate reviewer harness.
-   Ask whether the user wants defaults or custom choices, unless already known.
-   If they want defaults, ask whether to use the **work** or **personal** profile:
+2. Use one shared **OpenCode** or **Codex** harness; do not ask for a separate reviewer harness.
+   Ask for defaults or custom choices unless known.
+   For defaults, ask for the **work** or **personal** profile:
 
    | Default | Shared harness | Worker model ID | Reviewer model ID |
    | --- | --- | --- | --- |
    | Work | `opencode` | `github-copilot/gpt-6.1-sol` | `github-copilot/claude-opus-5.5` |
    | Personal | `opencode` | `openai/gpt-6.1-sol-fast` | `openai/gpt-6-astra` |
 
-   This table is the editable source of defaults for both roles. To change a
-   reviewer's default, edit the **Reviewer model ID** in the relevant row;
-   worker defaults remain independent.
+   This table defines editable role defaults; change **Reviewer model ID** independently
+   of worker defaults.
 
-   If the user declines defaults, obtain the shared harness, the exact worker
-   model ID, and the exact reviewer model ID. Ask explicitly for the reviewer
-   ID if it has not been supplied. Do not infer it from the worker model or
-   fall back to the default reviewer model. An explicit instruction to use
-   the same model for both roles satisfies both model choices.
+   For custom choices, obtain the shared harness and exact worker and reviewer model
+   IDs. Ask explicitly for the reviewer ID if it has not been supplied. Do not infer it
+   from the worker model or fall back to the default reviewer model. Explicitly
+   selecting one model for both roles satisfies both choices.
 
    Do not silently pick a profile, change a model, or fall back to another
    harness. Prefer reviewer capability appropriate to the review complexity.
    The Codex example below uses `gpt-6.1-sol` with fast service; it does not
    override either role's selected model.
-3. Ask whether you may create worktrees for workers. Permission permits their
-   use where appropriate; it does not require a worktree for every task.
+3. Ask whether you may create worktrees for workers. Permission allows worktrees where appropriate, not necessarily for every task.
 
-Local integration of accepted worker work into the assigned supervisor branch
-is part of this assignment and is already authorized. Do not add a separate
-merge-permission question to setup or ask again before each merge. This applies
-to both `tuios ship merge` and the verified path-based Git merge in the integration reference. Honor
-explicit user restrictions and actual harness approval requirements; a local
-merge does not imply permission to push or change a different target branch.
+Local integration of accepted work into the assigned supervisor branch is authorized;
+do not ask separate setup or per-merge permission. This applies to both `tuios ship
+merge` and the verified path-based Git merge in the integration reference. Honor
+explicit user restrictions and actual harness approval requirements; a local merge
+does not imply permission to push or change a different target branch.
 
 Bundle these questions where practical. Use `tuios ask-human` following the
 active communication instructions; accept only `verified_human: true` answers. A
@@ -122,30 +116,23 @@ blockers or decisions, integration milestones and completion. Consolidate team
 results; avoid repeating a direct agent exchange as a second user update unless
 it adds useful context.
 
-Before sending a substantive internal agent message, call `agent-comms send`
-with a brief announcement addressed directly to the receiving agent by its
-checked name. Then send the internal message through the verified tuios route.
-This applies to assignments, questions, feedback, completion reports, approvals,
-escalations and releases. For example: "Hey <target-name>, please run the
-combined checks on the merged tree." Keep the announcement to one short sentence
-where possible; put task IDs, pane IDs, hashes, detailed evidence and artifact
-paths in internal mail.
+Before substantive internal agent mail, call `agent-comms send` with a brief
+announcement addressing the recipient by its checked name; then deliver through the
+verified tuios route. Announce assignments, questions, feedback, completion reports,
+approvals, escalations and releases. For example: "Hey <target-name>, please run the
+combined checks on the merged tree." Prefer one short sentence; keep task/pane IDs,
+hashes, evidence and artifact paths in internal mail.
 
-Do not use `agent-comms send` for acknowledgments of messages from other agents.
-Send required receipt/understanding acknowledgments through internal mail only,
-including preflight acknowledgments and "understood; I’ll do that" replies.
-Preserve all protocol acknowledgment gates. If a reply also carries a new
-finding, decision, question or result, announce that substantive content rather
-than the acknowledgment. Receiving a message alone is not a reason to announce.
+Send acknowledgment-only replies, including required preflight receipts, through
+internal mail only, without `agent-comms send`. Preserve every acknowledgment gate.
+For mixed replies, announce only the new finding, decision, question or result;
+receipt alone needs no announcement.
 
-Use `agent-comms send`, following the active checked
-identity/prefix rules in both `--msg` and `--tts`. Required introductions precede
-the direct address. Announce before sending, never afterward; establish results
-before claiming them. Announcements do not replace internal delivery or its
-sender/task/revision checks. If announcement delivery fails, report the failure
-once and continue permitted internal coordination; do not claim it was heard.
-Do not create extra acknowledgment messages solely to generate announcements,
-and do not acknowledge acknowledgments recursively.
+Follow active checked identity/prefix rules in both `--msg` and `--tts`; required
+introductions precede the recipient address. Announce before sending, never
+afterward; establish results before claiming them. Announcements do not replace
+internal delivery or its sender/task/revision checks. Report announcement failure
+once, continue permitted internal coordination, and do not claim delivery. Do not create acknowledgments solely for announcements or acknowledge acknowledgments.
 
 Read [examples](references/announcements.md) only when needed.
 
@@ -157,10 +144,15 @@ before first delegation. Set a descriptive main screen title using
 `tree set <run-name> --title <title>` (alongside `--file` on creation).
 Set your own persistent role to `supervisor`; instruct
 workers and reviewers to set theirs at preflight. Publish supervisor → worktree →
-worker → reviewer nodes, adding reviewers only when launched. Replace the named
-tree when membership, hierarchy, or optional `info` descriptions change. Use
-`info` for a worktree’s feature or your current understanding of an agent’s task. The listener drives queue counts,
-speaker/recipient highlights and arrows; do not relay message state manually.
+worker → reviewer nodes, adding reviewers only when launched. You must keep the
+tree current throughout the run. Update it as part of any launch, reassignment,
+replacement, release, or cleanup that changes its structure or displayed information.
+Correct stale membership, hierarchy, labels, title, and optional `info` descriptions
+as soon as you learn they are out of date, before your next progress update or wait.
+Use `info` for a worktree’s feature or your current understanding of an agent’s task.
+Publish changes with `agent-comms tree set`; editing the local JSON alone does not
+update the view. The listener drives queue counts, speaker/recipient highlights
+and arrows; do not relay message state manually.
 
 Also create one supervisor-owned TML **Delivery flow** todo pane using the
 [task-list instructions and template](references/task-list.md). Show all known
@@ -186,13 +178,11 @@ review-round logs in the reviewer context, and ask for concise
 milestone/approval/escalation reports.
 
 Expect that you may be a larger, more capable model than the worker. Tailor the
-assignment to its selected model and demonstrated performance: give concrete
-goals, bounded ownership, relevant context, expected behavior, and explicit
-completion evidence. Break complex or ambiguous work into smaller checkpoints
-and resolve architectural decisions yourself before delegating implementation.
-Do not assume a worker will infer constraints or assess project-wide impact as
-well as you can. Adjust guidance from its actual results rather than model size
-alone.
+assignment to its selected model and demonstrated performance: give concrete goals,
+bounded ownership, relevant context, expected behavior, and explicit completion
+evidence. Break complex or ambiguous work into smaller checkpoints and resolve
+architectural decisions yourself before delegating implementation. Do not assume the worker infers constraints or assesses project-wide impact as well as you. Adjust guidance from its
+actual results rather than model size alone.
 
 ### Use fresh contexts between independent tasks
 
@@ -314,15 +304,14 @@ coordination, review, commit, merge, and cleanup. Existing workers and reviewers
 need the same communication check. Do not assume a grant that reaches launched
 sessions also allows a worker to reach back into your session.
 
-Make the initial prompt a preflight gate: the worker checks its checkout and
-grants, acknowledges the task/revision through tuios mail, and ends its turn
-without editing. After receiving that acknowledgment, send a matching
-`preflight-confirmed; proceed` message. Require the worker to acknowledge
-receipt before beginning implementation. This verifies communication in both
-directions and the supervisor has confirmed the checkout before edits start. The
-reviewer also acknowledges its checkout and both contacts before review begins.
-Include the selector messaging procedure in the assignment so workers do not
-retry a failing direct cross-session send. Verify that the acknowledgment's
+Make the initial prompt a preflight gate: the worker checks its checkout and grants,
+acknowledges the task/revision through tuios mail, and ends its turn without editing.
+After receiving that acknowledgment, send a matching `preflight-confirmed; proceed`
+message. Require the worker to acknowledge receipt before implementing. This verifies
+communication in both directions and the supervisor has confirmed the checkout before
+edits start. The reviewer also acknowledges its checkout and both contacts before
+review begins. Include the selector messaging procedure in the assignment so workers
+do not retry a failing direct cross-session send. Verify that the acknowledgment's
 sender pane is the recorded worker; selector delivery should preserve it.
 
 If acknowledgment is missing, inspect the pane and delivery state; do not keep
@@ -398,15 +387,14 @@ tuios start-agent zsh -s "$REVIEWER_SESSION" --cwd "$WORKER_WORKTREE" --json -- 
 tuios start-agent zsh -s "$REVIEWER_SESSION" --cwd "$WORKER_WORKTREE" --prompt '<reviewer prompt>' --json -- -ic 'codex-t "$@"' tuios-reviewer -m '<reviewer-model-id>' -c 'service_tier="fast"'
 ```
 
-Start only the selected harness. Record the returned `window_id` as
-`REVIEWER_PANE`; never overwrite `WORKER_PANE` or use the reviewer as a ship
-command target. Verify its identity, model, checkout binding, and communication.
-Make reviewer startup a short preflight turn: it acknowledges and ends its turn
-instead of blocking on mail. After verification, first send the worker the
-verified reviewer identity/address, then send `review-preflight-confirmed; proceed`
-to the reviewer. Require the worker to deliver its frozen completion report
-directly; reviewer release alone does not complete that handoff.
-Do not require detailed review before sending this release.
+Start only the selected harness. Record the returned `window_id` as `REVIEWER_PANE`;
+never overwrite `WORKER_PANE` or use the reviewer as a ship command target. Verify
+its identity, model, checkout binding, and communication. Make reviewer startup a
+short preflight turn: it acknowledges and ends its turn without blocking on mail.
+After verification, first send the worker the verified reviewer identity/address,
+then send `review-preflight-confirmed; proceed` to the reviewer. Require the worker
+to deliver its frozen completion report directly; reviewer release alone does not
+complete that handoff. Do not require detailed review before sending this release.
 The reviewer prompt must start with:
 
 ```text
@@ -456,6 +444,18 @@ sleep/capture polling:
 tuios wait-for agent-message -s "$SUPERVISOR_SESSION" -w "$TUIOS_PANE_ID" --timeout 30000
 tuios list-agents -s "$WORKER_SESSION" --json
 ```
+
+Occasionally check that agents you expect to be working have not stopped unnoticed,
+roughly every five minutes during active supervision. Use only
+`tuios list-agents -s <session> --json` for the routine check: query each relevant
+session once and compare the assigned pane IDs and states with expected activity.
+Batch independent session queries; do not capture panes, read transcripts, or ask
+every agent for progress. Follow up only on unexpected states such as `idle`,
+`done`, `needs_input`, `errored`, `unknown`, `none`, or a missing agent. Reconcile
+any already-received report or planned wait before treating it as a stoppage;
+then use targeted mail or prompt inspection as warranted. Expected frozen workers
+and retained idle reviewers need no intervention. Do not restart or reassign work
+based on status alone, and never type into a `needs_input` pane.
 
 An idle or done state alone is not a satisfactory completion report. Require
 the assigned reviewer's report and compare the approved snapshot with the actual
@@ -567,12 +567,11 @@ author or co-author. Verify the resulting commits cover the worker's complete
 approved assignment before integration.
 
 If a commit or merge unexpectedly affects another checkout, stop shipping and
-cleanup. Preserve the commit IDs, affected branch, status, index, and relevant
-reflog evidence, and tell the user what happened. Do not automatically reset,
-revert, or clean the unrelated checkout. In particular, `git reset --mixed`
-changes staging state and does not by itself prove restoration of the user's
-previous state. Agree on a targeted repair before changing unrelated history or
-index state.
+cleanup. Preserve the commit IDs, affected branch, status, index, and relevant reflog
+evidence, and tell the user what happened. Do not automatically reset, revert, or
+clean the unrelated checkout. In particular, `git reset --mixed` changes staging
+state and does not prove restoration of the user's previous state. Agree on a
+targeted repair before changing unrelated history or index state.
 
 ## Integrate and clean up
 

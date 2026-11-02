@@ -62,10 +62,10 @@ additional workers, harness subagents, or worktrees on your own.
 
 ## Communication
 
-Read [messaging procedures](references/messaging.md) for initial preflight and first
-cross-session delivery; reuse established bindings afterward. Follow active identity
-instructions, verify exact assigned senders, and correlate task/revision/round. End
-turns while waiting; mail wakes you. Never bypass grants or type into another pane.
+Read [messaging procedures](references/messaging.md) at initial preflight and first
+cross-session delivery; then reuse bindings. Follow active identity rules, verify
+assigned senders, and correlate task/revision/round. End turns while waiting for
+mail. Never bypass grants or type into another pane.
 
 ## Communication style
 
@@ -73,30 +73,23 @@ Address the supervisor or reviewer in announcements; do not address the user or
 narrate implementation progress to them. Route human decisions through the
 supervisor, which owns user-facing progress and completion updates.
 
-Before sending a substantive internal agent message, call `agent-comms send`
-with a brief announcement addressed directly to the receiving agent by its
-checked name. Then send the internal message through the verified tuios route.
-This applies to assignments, questions, feedback, completion reports, approvals,
-escalations and releases. For example: "Hey <target-name>, please run the
-combined checks on the merged tree." Keep the announcement to one short sentence
-where possible; put task IDs, pane IDs, hashes, detailed evidence and artifact
-paths in internal mail.
+Before substantive internal agent mail, call `agent-comms send` with a brief
+announcement addressing the recipient by its checked name; then deliver through the
+verified tuios route. Announce assignments, questions, feedback, completion reports,
+approvals, escalations and releases. For example: "Hey <target-name>, please run the
+combined checks on the merged tree." Prefer one short sentence; keep task/pane IDs,
+hashes, evidence and artifact paths in internal mail.
 
-Do not use `agent-comms send` for acknowledgments of messages from other agents.
-Send required receipt/understanding acknowledgments through internal mail only,
-including preflight acknowledgments and "understood; I’ll do that" replies.
-Preserve all protocol acknowledgment gates. If a reply also carries a new
-finding, decision, question or result, announce that substantive content rather
-than the acknowledgment. Receiving a message alone is not a reason to announce.
+Send acknowledgment-only replies, including required preflight receipts, through
+internal mail only, without `agent-comms send`. Preserve every acknowledgment gate.
+For mixed replies, announce only the new finding, decision, question or result;
+receipt alone needs no announcement.
 
-Use `agent-comms send`, following the active checked
-identity/prefix rules in both `--msg` and `--tts`. Required introductions precede
-the direct address. Announce before sending, never afterward; establish results
-before claiming them. Announcements do not replace internal delivery or its
-sender/task/revision checks. If announcement delivery fails, report the failure
-once and continue permitted internal coordination; do not claim it was heard.
-Do not create extra acknowledgment messages solely to generate announcements,
-and do not acknowledge acknowledgments recursively.
+Follow active checked identity/prefix rules in both `--msg` and `--tts`; required
+introductions precede the recipient address. Announce before sending, never
+afterward; establish results before claiming them. Announcements do not replace
+internal delivery or its sender/task/revision checks. Report announcement failure
+once, continue permitted internal coordination, and do not claim delivery. Do not create acknowledgments solely for announcements or acknowledge acknowledgments.
 
 Read [examples](references/announcements.md) only when needed.
 
@@ -139,14 +132,13 @@ existing tests and relevant static or manual checks. Do not add tests that
 merely repeat the implementation, run broad suites by default, or rerun
 unchanged checks without a reason. Preserve mandatory project checks.
 
-If the implementation reveals additional impact or a gap in the plan, report it
-and propose the smallest useful adjustment. Do not silently omit assigned checks
-or substitute weaker evidence. Give the reviewer exact commands or manual
-procedures, results, and what behavior each check covers. The supervisor has the
-final say on whether this is sufficient for completion. The reviewer assesses
-the actual diff and can request corrected or additional focused validation
-within that plan. Treat those requests as revision work; perform the checks and
-report the evidence back to the reviewer. Escalate a materially broader or
+If the implementation reveals additional impact or a gap in the plan, report it and
+propose the smallest useful adjustment. Never silently omit assigned checks or weaken
+evidence. Give the reviewer exact commands or manual procedures, results, and what
+behavior each check covers. The supervisor decides completion sufficiency. The
+reviewer assesses the actual diff and can request corrected or additional focused
+validation within that plan. Treat those requests as revision work; perform the
+checks and report the evidence back to the reviewer. Escalate a materially broader or
 forbidden test requirement to the supervisor.
 
 If LFS assets were intentionally left unhydrated, account for that when choosing
@@ -187,11 +179,11 @@ from this exception. Rebase continuation may rewrite existing commits; it does
 not permit separate new commits. A merge must stop before creating a merge
 commit, leaving that commit to the supervisor (see below).
 
-Do not otherwise stage changes, push, open a PR, or remove the worktree/session.
-The supervisor uses `tuios ship commit`, which stages every nonignored change,
-including untracked files. Keep temporary outputs out of the checkout and report
-unrelated changes that would be swept into that commit. Never delete user files
-to obtain a clean status.
+Do not otherwise stage changes, push, open a PR, or remove the worktree/session. The
+supervisor uses `tuios ship commit`, which stages every nonignored change, including
+untracked files. Keep temporary outputs out of the checkout and report unrelated
+changes that would be swept into that commit. Never delete user files to clean
+status.
 
 ## Hand work to the reviewer and respond to revisions
 
@@ -221,18 +213,18 @@ REVIEWER_PANE='<supervisor-assigned-reviewer-pane-id>'
 tuios send-agent-message -s "$WORKER_SESSION" -w "$REVIEWER_PANE" 'I am agent <checked-worker-name>, in tuios pane <worker-pane-id>. [task=<id> revision=<n>] Ready for review; <completion evidence and frozen checkout state>.'
 ```
 
-After reviewer handoff, send the supervisor only a short milestone saying review
-is underway, using its verified cross-session selector. Do not copy detailed diffs or every review
-round into the supervisor context. If no reviewer has been assigned or its
-address is unavailable, notify the supervisor, remain frozen, and wait for
-handoff; do not self-approve or substitute a final chat response for mail.
+After reviewer handoff, send the supervisor only a short milestone saying review is
+underway, using its verified cross-session selector. Do not copy detailed diffs or
+every review round into the supervisor context. If the reviewer is unassigned or
+unreachable, notify the supervisor, remain frozen, and wait for handoff; do not self-
+approve or substitute a final chat response for mail.
 
 End your turn while waiting, remain in the harness, and stay reachable. Report
 your own pane idle if hooks still say working, using `tuios set-agent-state idle
 -m 'ready for review'`. Finish required announcements first, then report idle as
 your last tool action and end the turn. Do not start a blocking `wait-for`,
 sleep, or inbox-poll loop after preflight or completion; tuios mail will notify
-you when there is new work. Staying available means leaving the harness open,
+you for new work. Staying available means leaving the harness open,
 not keeping a tool call running. Never report idle while background edits
 continue, or alter someone else's state to bypass a gate.
 
@@ -243,17 +235,17 @@ completion report. Explain any disagreement or blocker instead of silently
 skipping feedback. The reviewer reinspects; do not treat fixing one finding as
 approval of the full assignment. Do not commit revisions.
 
-After each completion report, freeze files until another request from the
-assigned reviewer or supervisor. If you discover a problem while frozen, notify
-the reviewer first and wait for coordination before editing. Any edit
-invalidates approval of the affected snapshot. The reviewer reports final
-approval or an escalation directly to the supervisor; it does not commit or
-authorize you to commit. **You must not report, relay, or summarize the reviewer's
-result to the supervisor on its behalf, including claims that review passed or
-that the reviewer approved.** Report only your own implementation, validation,
-blockers, and progress. If the reviewer has not reported or cannot communicate,
-notify the supervisor of that communication blocker without claiming a review
-outcome. The supervisor must receive the result from the reviewer itself.
+After each completion report, freeze files until another request from the assigned
+reviewer or supervisor. If a problem emerges while frozen, notify the reviewer and
+await coordination before editing. Any edit invalidates approval of the affected
+snapshot. The reviewer reports final approval or an escalation directly to the
+supervisor; it does not commit or authorize you to commit. **You must not report,
+relay, or summarize the reviewer's result to the supervisor on its behalf, including
+claims that review passed or that the reviewer approved.** Report only your own
+implementation, validation, blockers, and progress. If the reviewer has not reported
+or cannot communicate, notify the supervisor of that communication blocker without
+claiming a review outcome. The supervisor must receive the result from the reviewer
+itself.
 
 The reviewer may resolve ordinary review findings and testing gaps within the
 assignment. Scope/design changes, repeated unproductive rounds, human decisions,
@@ -297,9 +289,8 @@ limitations to the retained reviewer. It must review the resolution and report a
 fresh approval before the supervisor commits a pending merge or retries
 integration. Send the supervisor a concise progress update and return to rest.
 
-The supervisor decides when the work is accepted, committed, integrated, and
-safe to remove. Until then, preserve the worker checkout and remain available
-for follow-up.
+The supervisor decides acceptance, commit, integration and safe removal. Until then,
+preserve the worker checkout and remain available for follow-up.
 
 ## Preserve continuation context
 
