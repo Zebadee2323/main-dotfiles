@@ -209,6 +209,38 @@ assignment. Reuse a previous task's context only for a closely related continuat
 with a concrete benefit; record that reason and supply the current contract.
 Respect existing limits on creating agents and preserve user-provided agents.
 
+### Budget system RAM and heavy-job concurrency
+
+Before scheduling parallel work, inspect total RAM, current memory pressure,
+available memory, and swap activity on the host running the jobs (for example,
+`memory_pressure`, `vm_stat`, and `sysctl hw.memsize` on macOS, or `free -h`
+and `vmstat` on Linux). Account for the user's applications, agent processes,
+build services, and other active jobs; CPU count and worker count alone do not
+determine safe concurrency. Separate worktrees still share system RAM.
+
+Set a shared concurrency budget for memory-heavy compilation, linking, and
+large test suites across workers, reviewers, and integration checks. Estimate
+peak memory per job from prior runs or a single measured run, leave headroom
+for the OS and user, and cap both simultaneous jobs and each tool's internal
+parallelism. When memory requirements are unknown or headroom is low, start
+with one heavy job and increase concurrency only after observing its usage.
+Workers may continue lightweight editing or inspection while heavy jobs queue.
+
+Record the budget and active/queued heavy jobs in the run ledger and Delivery
+flow pane. Tell workers and reviewers which checks require a supervisor-granted
+slot and what internal parallelism to use. Require them to request a slot before
+starting those checks, including review-requested reruns, and report completion
+or failure so you can release it. Coordinate slots through messages; waiting
+agents should end their turns rather than block on a slot.
+
+Recheck memory pressure while heavy jobs run and before admitting another one.
+If pressure or swap activity rises materially, or a job is killed for lack of
+memory, stop admitting heavy jobs and coordinate with their owners to reduce
+parallelism or safely stop an assigned job. Confirm its processes have stopped
+before releasing its slot. Retry with lower concurrency after pressure recovers;
+do not blindly restart the same workload or terminate unrelated user processes.
+Report memory-blocked validation explicitly rather than treating it as passed.
+
 ### Choose proportionate validation
 
 Own the validation plan and the final judgment of whether the evidence is
@@ -235,7 +267,8 @@ owns test execution. Checks reserved for the user remain with the user.
 Brief the reviewer to reassess the plan against the actual diff and correct
 inadequate worker testing directly. The reviewer can request the smallest
 additional or corrected checks within the agreed scope, wait for results, and
-review them. Escalate changes to scope, major validation cost, forbidden checks,
+review them. Additional checks and reruns remain subject to the shared RAM
+budget and supervisor-granted heavy-job slots. Escalate changes to scope, major validation cost, forbidden checks,
 or unresolved risk to you. You retain final acceptance authority: judge the
 reviewer's concise evidence against the agreed plan and user requirements,
 return incomplete reports to the reviewer, and report checks left for the user.
