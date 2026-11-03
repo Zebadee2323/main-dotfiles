@@ -2011,9 +2011,9 @@ def modifier_pressed(modifier):
         flags = quartz.CGEventSourceFlagsState
         flags.argtypes = [ctypes.c_int32]
         flags.restype = ctypes.c_uint64
-        return bool(flags(0) & (1 << {"control": 18, "shift": 17}[modifier]))
+        return bool(flags(0) & (1 << {"control": 18, "alt": 19}[modifier]))
     if os.name == "nt":
-        return bool(ctypes.windll.user32.GetAsyncKeyState({"control": 0x11, "shift": 0x10}[modifier]) & 0x8000)
+        return bool(ctypes.windll.user32.GetAsyncKeyState({"control": 0x11, "alt": 0x12}[modifier]) & 0x8000)
     return False
 
 
@@ -2021,8 +2021,9 @@ def control_pressed():
     return modifier_pressed("control")
 
 
-def shift_pressed():
-    return modifier_pressed("shift")
+def alt_pressed():
+    """Option on macOS, Alt on Windows."""
+    return modifier_pressed("alt")
 
 
 def main(argv=None):
@@ -2096,13 +2097,21 @@ def main(argv=None):
                 button = os.environ.get("TUIOS_CLICK_BUTTON", "1")
                 if button != "1":
                     return 0
-                if shift_pressed():
-                    args.action = "mute"
-                elif control_pressed():
-                    args.action = "cycle-volume"
+                if control_pressed() and not alt_pressed():
+                    args.action, args.seconds = "cycle-volume", None
                 else:
-                    return 0
-                args.seconds = 15 if args.action == "mute" else None
+                    if endpoint(paths).get("audio_control") is not True:
+                        raise CommsError("Listener predates live audio controls; restart 'agent-comms serve' and existing watchers once.")
+                    status = asyncio.run(rpc(paths, "audio", action="status", seconds=None))["audio"]
+                    fully_muted = status["muted"] and status["remaining_seconds"] is None
+                    if alt_pressed():
+                        # Option/Alt toggles full mute; a running snooze is upgraded to full mute.
+                        args.action, args.seconds = ("unmute" if fully_muted else "mute"), None
+                    elif fully_muted:
+                        print(json.dumps(status))
+                        return 0
+                    else:
+                        args.action, args.seconds = "mute", 15
             if args.seconds is not None and (args.action != "mute" or not math.isfinite(args.seconds) or not 0 < args.seconds <= 86400):
                 raise CommsError("--seconds must be greater than 0 and at most 86400, for mute only.")
             if endpoint(paths).get("audio_control") is not True:

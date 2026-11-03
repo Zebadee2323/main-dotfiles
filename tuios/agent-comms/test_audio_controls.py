@@ -80,32 +80,37 @@ class AudioControlTests(Fixture):
 
     def test_dock_click_routes_mouse_buttons(self):
         self.start_server()
-        cases = (("3", False, True, 100, False), ("2", False, True, 100, False),
-                 ("1", False, False, 100, False), ("1", True, False, 10, False),
-                 ("1", False, True, 10, True), ("1", True, False, 10, False),
-                 ("1", True, False, 25, False), ("1", True, True, 25, True))
-        for button, ctrl, shift, volume, muted in cases:
+        # mute: None (unmuted), "snooze" (timed) or "full" (indefinite).
+        cases = (("3", False, True, 100, None), ("2", False, True, 100, None),
+                 ("1", False, False, 100, "snooze"), ("1", True, False, 10, None),
+                 ("1", False, True, 10, "full"), ("1", False, False, 10, "full"),
+                 ("1", False, True, 10, None), ("1", True, True, 10, "full"),
+                 ("1", True, False, 10, None), ("1", True, False, 25, None),
+                 ("1", False, False, 25, "snooze"), ("1", False, True, 25, "full"))
+        for button, ctrl, alt, volume, mute in cases:
             with patch.dict(os.environ, {**self.env, "TUIOS_CLICK_BUTTON": button}), \
                  patch.object(app, "control_pressed", return_value=ctrl), \
-                 patch.object(app, "shift_pressed", return_value=shift), \
+                 patch.object(app, "alt_pressed", return_value=alt), \
                  patch("sys.stdout", new_callable=io.StringIO):
                 result = app.main(["audio", "dock-click"])
             self.assertEqual(result, 0)
             status = self.audio("status")
             self.assertEqual(status["volume"], volume)
-            self.assertEqual(status["muted"], muted)
-            if muted:
+            self.assertEqual(status["muted"], mute is not None)
+            if mute == "snooze":
                 self.assertGreater(status["remaining_seconds"], 0)
+            elif mute == "full":
+                self.assertIsNone(status["remaining_seconds"])
 
     def test_macos_control_modifier_mask(self):
         quartz = Mock()
         with patch.object(app.sys, "platform", "darwin"), \
              patch("ctypes.CDLL", return_value=quartz):
-            for flags, expected in ((0, False), (1 << 17, False), (1 << 18, True),
-                                    ((1 << 18) | (1 << 17), True)):
+            for flags, expected in ((0, False), (1 << 19, False), (1 << 17, False), (1 << 18, True),
+                                    ((1 << 18) | (1 << 19), True)):
                 quartz.CGEventSourceFlagsState.return_value = flags
                 self.assertEqual(app.control_pressed(), expected)
-                self.assertEqual(app.shift_pressed(), bool(flags & (1 << 17)))
+                self.assertEqual(app.alt_pressed(), bool(flags & (1 << 19)))
                 quartz.CGEventSourceFlagsState.assert_called_with(0)
 
     def test_unmute_cancels_old_timer_and_muting_releases_a_speech_lease(self):

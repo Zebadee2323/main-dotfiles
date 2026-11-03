@@ -1195,12 +1195,14 @@ refresh = "push"
 max-width = 80
 ```
 
-Shift+left-click the agent-comms dock component to mute speech across all watchers
-for 15 seconds. Each Shift-click restarts the countdown; captions continue, and
+Left-click the agent-comms dock component to snooze speech across all watchers
+for 15 seconds. Each click restarts the countdown; captions continue, and
 speech resumes automatically without replaying skipped announcements.
+Option+left-click (Alt+left-click on Windows) toggles full mute; it also turns a
+running snooze into full mute, and plain clicks leave a full mute in place.
 Ctrl+left-click cycles 10%, 25%, 50%, and 100%, with no mute step; values appear
 for two seconds. Cycling while muted selects 10% and cancels the timer.
-Shift takes precedence if both modifiers are held. Plain clicks leave audio unchanged.
+Option/Alt takes precedence if both modifiers are held.
 `dock-click` uses tuios's `TUIOS_CLICK_BUTTON` (1 left) and ignores other buttons.
 Tuios does not forward modifiers, so macOS and Windows sample keyboard state;
 keep the modifier held through the click. Other platforms do not handle these
