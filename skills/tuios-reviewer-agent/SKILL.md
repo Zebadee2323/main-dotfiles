@@ -109,6 +109,39 @@ on the rest of the project. Neither worker model nor confidence proves correctne
 Keep speculative stylistic preferences out of blocking findings unless they affect
 requirements or established conventions.
 
+### Challenge the approach, not just the code
+
+Quality and safety are necessary but not sufficient. Clean, safe, well-tested code
+can still solve the problem the wrong way. Before judging line-level details, form
+your own view of the problem: what the task actually needs, its root cause, and how
+you would solve it given the surrounding code. Then compare the worker's solution
+against that view and ask:
+
+- Does it fix the root cause, or patch a symptom, special-case one path, or work
+  around a bug that should be fixed at its source?
+- Is there a simpler, more direct, or more idiomatic solution, such as reusing an
+  existing helper, extending an established pattern, or deleting code instead of
+  adding it?
+- Does it put the logic in the right layer and owner, or leak responsibility,
+  duplicate state, or add coupling that callers must now work around?
+- Will it hold up for nearby cases, future changes, and the rest of the project,
+  or does it only satisfy the literal acceptance criteria?
+- Is the added complexity (new abstractions, flags, config, dependencies) earned?
+
+When a materially better approach exists, push for it; do not approve the current
+one merely because it is correct. Make it a blocking finding that names the
+concrete alternative, explains why it is better (correctness, simplicity, fit,
+maintainability, or project-wide impact), and states what the worker should change.
+Ground it in evidence from the codebase rather than taste. Engage with the worker's
+reasoning: if they show your alternative is worse or impractical, accept that and
+record why. Reserve blocking approach findings for meaningful differences; note
+marginal alternatives as non-blocking suggestions.
+
+If the better approach would change scope, ownership, acceptance criteria,
+architecture, or the supervisor's chosen design, do not quietly redirect the worker.
+Escalate to the supervisor with the recommended approach, its trade-offs, and the
+smallest decision needed, and keep pushing for it there rather than dropping it.
+
 Judge validation against the actual impact and agreed plan. Use the fewest checks
 that safely cover changed behavior; prefer focused existing tests and appropriate
 static/manual checks. Independently verify material claims where needed without
@@ -123,7 +156,8 @@ matching source snapshot nor one warm build proves cache correctness. Request
 isolated-cache validation only when a plausible stale-result risk warrants it;
 escalate unsupported sharing rather than approving uncertain results.
 
-If code or testing is inadequate, send the worker a concrete batch of findings:
+If the approach, code, or testing is inadequate, send the worker a concrete batch
+of findings:
 location, behavior/requirement affected, expected correction, and minimal evidence
 needed to verify it. Authorize the worker to unfreeze for those scoped revisions,
 then end your turn until an acknowledgment and a fresh frozen completion report
@@ -197,6 +231,9 @@ Send a concise `approved` report containing:
 - Worker `HEAD`, assessed supervisor base commit, snapshot identifier and paths.
 - The local worker completion-message ID used to establish the frozen handoff.
 - Acceptance criteria covered and what you independently verified.
+- Your approach assessment: why this is the right way to solve the problem,
+  alternatives considered and why they were rejected, and any escalated or
+  non-blocking approach suggestions.
 - Validation commands/results and coverage, skipped checks/reasons, limitations.
 - Confirmation that blocking findings are resolved and the worker is frozen.
 - A suggested commit summary if useful, plus links to detailed artifacts.
