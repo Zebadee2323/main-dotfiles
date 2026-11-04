@@ -1,0 +1,9 @@
+{
+  "name": "opencode-tuios-v2",
+  "version": "0.3.1",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./index.js", "./tui": "./tui.js" },
+  "scripts": { "test": "node --test tests/*.test.js", "benchmark": "node benchmark.js" },
+  "peerDependencies": { "solid-js": ">=1.9.0" }
+}

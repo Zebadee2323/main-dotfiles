@@ -1,0 +1,6 @@
+{
+  "name": "agent-comms",
+  "version": "0.1.0",
+  "description": "Assign a persistent communications identity and inject messaging guidance at session start.",
+  "hooks": "./hooks/hooks.json"
+}

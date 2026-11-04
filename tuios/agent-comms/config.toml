@@ -1,0 +1,372 @@
+# Shared agent-comms configuration. Read by default regardless of working directory.
+# Agent names come from names_file (relative to this file); voices come from the
+# voice profiles below. A new agent draws the next name from a shuffled name bag
+# and a voice profile of the same gender from a shuffled voice bag.
+names_file = "names.toml"
+display_seconds = 5
+# Accepted messages retained on disk. Positive integer; restart listener after edits.
+history_size = 30
+active_groups = ["phonon"] # Voice groups eligible for NEW assignments only.
+
+# Required message introductions by the sender's relation to the viewed pane.
+# Available fields: name, session, workspace, position. [] disables the prefix.
+# Fields render in that fixed order. Fallback replaces fields if position is
+# requested but geometry is unavailable. Restart the listener after edits.
+[prefix.focused]
+fields = []
+fallback_fields = []
+only_when_multiple_agents = false
+omit_single_workspace = true
+
+[prefix.same_workspace]
+fields = ["name", "position"]
+fallback_fields = ["name", "session"]
+only_when_multiple_agents = true
+omit_single_workspace = true
+
+[prefix.different_workspace]
+fields = ["name", "workspace"]
+fallback_fields = ["name", "session"]
+only_when_multiple_agents = false
+omit_single_workspace = true
+
+[prefix.different_session]
+fields = ["name", "session"]
+fallback_fields = ["name", "session"]
+only_when_multiple_agents = false
+omit_single_workspace = true
+
+# Human user injected by the harness plugins, separate from generated agent names.
+[user]
+name = "Oli" # Written responses and --msg.
+tts_name = "Ollie" # --tts pronunciation; defaults to name when omitted.
+
+# Select local Pocket TTS / Phonon 31m or ElevenLabs. Credentials are read only
+# from ELEVENLABS_API_KEY in watcher processes, never from this file.
+[speech]
+mode = "phonon" # "pocket_tts", "phonon", or "elevenlabs".
+model = "eleven_v4_turbo"
+elevenlabs_speed = 1.0
+phonon_speed = 1.0
+pocket_tts_speed = 1.0
+normalize = true # FFmpeg loudness normalization for watch; false keeps original levels.
+robot_mode = true # Match Naia's robot voice effects; false disables effects.
+
+# Runtime installed outside this repo with: uv tool install ptts==0.4.2
+# Weights/voices download to the user Hugging Face cache, not the source tree.
+[speech.phonon]
+model = "hf://gradium/phonon-31m-en"
+executable = "~/.local/bin/ptts"
+
+# Installed outside the repo: uv tool install --python 3.11 pocket-tts==4.0.1
+# Built-in voices use the public preset model; cached under ~/.cache/.
+[speech.pocket_tts]
+executable = "~/.local/bin/pocket-tts"
+language = "english"
+# Watcher keeps its model warm; voice states are loaded only when first used.
+# Optional for nonstandard installs: python_executable = "/path/to/python"
+# Profile pocket_tts_voice values accept presets ("alba") or local files:
+# "voices/my-voice.wav" / "voices/my-voice.safetensors", relative to this config.
+# Absolute paths and ~/ paths also work. Only clone recordings with permission.
+
+# Permanent avoidance list for agents finding replacement ElevenLabs voices.
+# voice-review adds IDs here on an explicit no; do not reuse these IDs.
+[rejected_elevenlabs_voices]
+ids = ["h1K1TprdvtRaF85PAeFm", "coGBjiDSBfC2iRSxO4Nx", "xZOJqW4KGiIUDbmeUtiQ", "97jEQBNtD2IprbdQulGE", "OLw8Wi4Ch4C4T0zHZrfh", "EapfDLltFBB0FczFoInh", "KNCVWpJC415rKzE8bX73", "bIoCL0WawJqLkKp9VM8G", "UV6yBNpEWyJBMHdNQx6U", "YL60CGR2g3oaFF6Ogt2r", "4uN5YeBITFJsw8t45RIV", "TX3LPaxmHKxFdv7VOQHJ", "weA4Q36twV5kwSaTEL0Q", "VGEVi3E0hARQ99wIXvJG", "ZTcel8Lkn2zVO3kGsfRD", "PtAEeZ6bHB6UxPL8CyWP", "6ZZR4JY6rOriLSDtV54M", "mrmh5i7zNpOwftrj8xdS", "ZEcx3Wdpj4EvM8PltzHY", "VRQpQ0xrgTWOWkLrRU0k", "r8XTDZCx9nnTPYmkFIeg", "QgAHZCKeKxsZTcp84rgh", "G1rETYlYD0sdOyGc7ulo", "XdbTvfQSkW1sgZYKdZdF", "1koyuv6vFWwrfTeqpDzq", "8ZYhGJrsDOe4C8yzEEhP", "bAq8AI9QURijOtmeFFqT", "fbIG6gEosVIM95R5qOna", "CyuaHFjYAn74u3mOqDX6", "pqWHDiU3kG9H0RxCmqXX", "5oOUpLU3e4Q55YyHGbk0", "eiNgkRczHJmif3gxSoyz", "bQnIpi9pYcG1X7IArv1Z", "4nYSFOmSJIRmj2ov2rlD", "ljo9gAlSqKOvF6D8sOsX", "onwK4e9ZLuTAKqWW03F9", "9gKJk2fZsPLQCuOnaVLS", "Fi3dLHel1zm7aneSMnph", ]
+
+# Voice matches use catalog descriptions, not audio auditions. All IDs below were
+# returned by the account's read-only GET /v2/voices on 2026-10-26 (no TTS generated).
+# Voice catalog: https://elevenlabs.io/docs/api-reference/voices/search
+# Catalog labels are comments for maintenance, not extra runtime config fields.
+# Avoid voice-specific surcharges: check sharing.rate = 1.0 and no positive
+# sharing.fiat_rate before assigning library voices; "professional" is a category,
+# not a surcharge by itself. Standard model/plan usage charges still apply.
+
+# Voice profiles: [voice_groups.GROUP.voices.PROFILE_ID]. Profile IDs are stable
+# config keys, unique across groups, and never agent names. Every profile needs an
+# explicit gender = "male" or "female"; keep each provider's voice the same gender
+# so switching speech.mode never changes how an agent sounds. A profile can serve
+# many agents; each agent keeps a snapshot of its profile until its binding clears.
+# Optional elevenlabs_speed / phonon_speed = 0.7–1.2 in a profile overrides that
+# provider's global speed. Legacy speed still works as a fallback.
+# phonon_voice is a catalog name (ptts --list-voices); blank/missing is text-only
+# in Phonon mode. voice-review saves phonon_voice_approved separately from
+# ElevenLabs voice_approved.
+# 24 profiles: one per conversational English Phonon voice (12 male / 12 female).
+# ElevenLabs genders were checked against GET /v1/voices labels; "formerly" notes
+# record the retired static identity that used each voice.
+[voice_groups.phonon.voices.voice_trevor] # formerly Will (ag_376b7d0a)
+gender = "male"
+voice_approved = true
+phonon_voice = "Trevor"
+eleven_labs_voice_id = "bIHbv24MWmeRgasZH58o"
+
+[voice_groups.phonon.voices.voice_juniper] # formerly Jessica (ag_aa23eb53)
+gender = "female"
+voice_approved = true
+phonon_voice = "Juniper"
+eleven_labs_voice_id = "cgSgspJ2msm6clMCkdW9"
+
+[voice_groups.phonon.voices.voice_miles] # formerly Brian (ag_dc0b25a6)
+gender = "male"
+voice_approved = true
+phonon_voice = "Miles"
+eleven_labs_voice_id = "nPczCjzI2devNBz1zQrb"
+
+[voice_groups.phonon.voices.voice_harper] # formerly Echo (ag_1c31499e)
+gender = "female"
+voice_approved = true
+phonon_voice = "Harper"
+eleven_labs_voice_id = "pYYFYeYrSgj4lcmIMcOL"
+
+# Expanded set: each profile has a distinct voice.
+
+# ElevenLabs: Tess - Direct and Grounded
+[voice_groups.phonon.voices.voice_delia] # formerly Tess (ag_517e7bff)
+gender = "female"
+voice_approved = true
+phonon_voice = "Delia"
+eleven_labs_voice_id = "4BAlflaQyhIcCfHiEI7x"
+
+# ElevenLabs: David Joel - Deep and Engaging Narrator
+[voice_groups.phonon.voices.voice_preston] # formerly Curt (ag_38414f1e)
+gender = "male"
+voice_approved = true
+phonon_voice = "Preston"
+eleven_labs_voice_id = "UQ15q3Vf9AQQ2owcMKQ0"
+
+# ElevenLabs: Donovan - Articulate, Strong and Deep
+[voice_groups.phonon.voices.voice_edwin] # formerly Severin (ag_49addd82)
+gender = "male"
+voice_approved = true
+phonon_voice = "Edwin"
+eleven_labs_voice_id = "DMyrgzQFny3JI1Y1paM5"
+
+# ElevenLabs: Knox Dark - Serious, Deep, and Steady
+[voice_groups.phonon.voices.voice_hugh] # formerly John (ag_7b70bc6a)
+gender = "male"
+voice_approved = true
+phonon_voice = "Hugh"
+eleven_labs_voice_id = "dPah2VEoifKnZT37774q"
+
+# ElevenLabs: Chuck - Regular guy
+[voice_groups.phonon.voices.voice_easton] # formerly Justin (ag_10a0836f)
+gender = "male"
+voice_approved = true
+phonon_voice = "Easton"
+eleven_labs_voice_id = "IXa3pM2v3YjF2UVeGPGR"
+
+# ElevenLabs: Nathaniel C – Kid's Bedtime Storyteller
+[voice_groups.phonon.voices.voice_toby] # formerly Tarquin (ag_aca24036)
+gender = "male"
+voice_approved = true
+phonon_voice = "Toby"
+eleven_labs_voice_id = "h9CKu0pq1LSjIPhJEGCv"
+elevenlabs_speed = 1.2
+phonon_speed = 1.2
+
+# ElevenLabs: Henry - Deep, Professional, and Soothing
+[voice_groups.phonon.voices.voice_spencer] # formerly Potato (ag_af82eafa)
+gender = "male"
+voice_approved = true
+phonon_voice = "Spencer"
+eleven_labs_voice_id = "pVnrL6sighQX7hVz89cp"
+
+# ElevenLabs: Gideon – Rugged, Gravelly and Northern
+[voice_groups.phonon.voices.voice_russell] # formerly Gideon (ag_e3d29cbd)
+gender = "male"
+voice_approved = true
+phonon_voice = "Russell"
+eleven_labs_voice_id = "q1h5HGdnfVxp4TXTJRNN"
+
+# ElevenLabs: Jett - Gritty, Spunky Young Hero
+[voice_groups.phonon.voices.voice_micah] # formerly Jett (ag_44fcf01d)
+gender = "male"
+voice_approved = true
+phonon_voice = "Micah"
+eleven_labs_voice_id = "6IwYbsNENZgAB1dtBZDp"
+
+# ElevenLabs: Lamarina
+[voice_groups.phonon.voices.voice_bryony] # formerly Lamarina (ag_221d3a32)
+gender = "female"
+voice_approved = true
+phonon_voice = "Bryony"
+eleven_labs_voice_id = "XdflFrQO8wbGpWMNZHFr"
+
+# ElevenLabs: Tiffany - Warm, Conversational Narrator
+[voice_groups.phonon.voices.voice_everly] # formerly Beth (ag_c21d6dc4)
+gender = "female"
+voice_approved = true
+phonon_voice = "Everly"
+eleven_labs_voice_id = "6fLd3vCll0LutxnciLI8"
+
+# ElevenLabs: Monika Sogam - Natural Conversations
+[voice_groups.phonon.voices.voice_hadley] # formerly Aakancha (ag_8d272cd9)
+gender = "female"
+voice_approved = true
+phonon_voice = "Hadley"
+eleven_labs_voice_id = "EaBs7G1VibMrNAuz2Na7"
+
+# ElevenLabs: Adam - Classic Scottish Storyteller
+[voice_groups.phonon.voices.voice_teddy] # formerly Rowan (ag_d2d4dd5f)
+gender = "male"
+voice_approved = true
+phonon_voice = "Teddy"
+eleven_labs_voice_id = "U5UjeJMsOvyhYhXfZdvZ"
+
+# ElevenLabs: Matilda - Knowledgable, Professional
+[voice_groups.phonon.voices.voice_maeve] # formerly Kim (ag_30dadedd)
+gender = "female"
+voice_approved = true
+phonon_voice = "Maeve"
+eleven_labs_voice_id = "XrExE9yKIg1WjnnlVkGX"
+
+# ElevenLabs: Veda Sky - Youthful Cool & Relatable Social Media Voice
+[voice_groups.phonon.voices.voice_zoey] # formerly Veda (ag_e21f715a)
+gender = "female"
+voice_approved = true
+phonon_voice = "Zoey"
+eleven_labs_voice_id = "GWparLcEBJuQc36gyF2J"
+
+# ElevenLabs: Eric - Smooth, Trustworthy
+[voice_groups.phonon.voices.voice_alfie] # formerly Jaden (ag_2e9d0a47)
+gender = "male"
+voice_approved = true
+phonon_voice = "Alfie"
+eleven_labs_voice_id = "cjVigY5qzO86Huf0OWal"
+
+# ElevenLabs: Georgia K - Warm Engaging Customer Care
+[voice_groups.phonon.voices.voice_pippa] # formerly Emma (ag_9012fa4f)
+gender = "female"
+voice_approved = true
+phonon_voice = "Pippa"
+eleven_labs_voice_id = "bGnz83yTAb7caZSC7BBz"
+
+# ElevenLabs: Clara V - Warm & Articulate
+[voice_groups.phonon.voices.voice_imogen] # formerly Claudette (ag_0d555bae)
+gender = "female"
+voice_approved = true
+phonon_voice = "Imogen"
+eleven_labs_voice_id = "0ggs85h7hrWz8ExXnsBc"
+
+# ElevenLabs: Shuratta - Emotive, Warm & Calm
+[voice_groups.phonon.voices.voice_freya] # formerly Marie (ag_a1d2c8a9)
+gender = "female"
+voice_approved = true
+phonon_voice = "Freya"
+eleven_labs_voice_id = "5UkNoRUDhqQOOzSLmd8W"
+
+# ElevenLabs: Briseida - Clear, Warm
+[voice_groups.phonon.voices.voice_elodie_rose] # formerly Sophia (ag_76aca77f)
+gender = "female"
+voice_approved = true
+phonon_voice = "Elodie-Rose"
+eleven_labs_voice_id = "OYq3gdwlWVVaI8ECjSk1"
+
+# Pocket TTS 4.0.1: one profile per English default voice (21 total).
+# Profile IDs follow the presets; no voice approval is implied by this initial set.
+# The six other-language defaults are deliberately not in this English group.
+#[voice_groups.pocket_tts.voices.voice_cosette] # formerly Cosette (ag_bffdaf43)
+#gender = "female"
+#pocket_tts_voice_approved = false
+#pocket_tts_voice = "cosette"
+
+#[voice_groups.pocket_tts.voices.voice_marius] # formerly Marius (ag_3e8fb290)
+#gender = "male"
+#pocket_tts_voice_approved = false
+#pocket_tts_voice = "marius"
+
+#[voice_groups.pocket_tts.voices.voice_javert] # formerly Javert (ag_16bd866b)
+#gender = "male"
+#pocket_tts_voice_approved = false
+#pocket_tts_voice = "javert"
+
+[voice_groups.pocket_tts.voices.voice_alba] # formerly Alba (ag_d4d73e28)
+gender = "female"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "alba"
+
+[voice_groups.pocket_tts.voices.voice_jean] # formerly Jean (ag_e0a7a996)
+gender = "male"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "jean"
+
+[voice_groups.pocket_tts.voices.voice_anna] # formerly Anna (ag_cd99797a)
+gender = "female"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "anna"
+
+[voice_groups.pocket_tts.voices.voice_vera] # formerly Vera (ag_930afd4a)
+gender = "female"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "vera"
+
+[voice_groups.pocket_tts.voices.voice_fantine] # formerly Fantine (ag_fb9b3b2c)
+gender = "female"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "fantine"
+
+[voice_groups.pocket_tts.voices.voice_charles] # formerly Charles (ag_bd8e15f2)
+gender = "male"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "charles"
+
+[voice_groups.pocket_tts.voices.voice_paul] # formerly Paul (ag_a3459e91)
+gender = "male"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "paul"
+
+[voice_groups.pocket_tts.voices.voice_eponine] # formerly Eponine (ag_c6b6975f)
+gender = "female"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "eponine"
+
+[voice_groups.pocket_tts.voices.voice_azelma] # formerly Azelma (ag_838bb07c)
+gender = "female"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "azelma"
+
+[voice_groups.pocket_tts.voices.voice_george] # formerly George (ag_aa418110)
+gender = "male"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "george"
+
+[voice_groups.pocket_tts.voices.voice_mary] # formerly Mary (ag_d99e47ed)
+gender = "female"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "mary"
+
+[voice_groups.pocket_tts.voices.voice_jane] # formerly Jane (ag_6a8ad06c)
+gender = "female"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "jane"
+
+[voice_groups.pocket_tts.voices.voice_michael] # formerly Michael (ag_d59e7aba)
+gender = "male"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "michael"
+
+[voice_groups.pocket_tts.voices.voice_eve] # formerly Eve (ag_2212f6f6)
+gender = "female"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "eve"
+
+[voice_groups.pocket_tts.voices.voice_bill_boerst] # formerly Bill (ag_e6f179bb)
+gender = "male"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "bill_boerst"
+
+[voice_groups.pocket_tts.voices.voice_peter_yearsley] # formerly Peter (ag_78301812)
+gender = "male"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "peter_yearsley"
+
+[voice_groups.pocket_tts.voices.voice_stuart_bell] # formerly Stuart (ag_21f4d7a7)
+gender = "male"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "stuart_bell"
+
+[voice_groups.pocket_tts.voices.voice_caro_davy] # formerly Caro (ag_e4babc25)
+gender = "female"
+pocket_tts_voice_approved = true
+pocket_tts_voice = "caro_davy"

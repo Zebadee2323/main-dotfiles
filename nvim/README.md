@@ -9,7 +9,7 @@
 - `lua/config/` contains the larger setup modules, loaded only by the owning
   spec's `config` callback. Small setups can use `opts` directly in the spec.
 - `lua/features/` contains custom functionality, grouped by feature rather than
-  scattered among runtime scripts. `voice/`, `naia_ui/`, and `file_change_fx/`
+  scattered among runtime scripts. `voice/` and `file_change_fx/`
   own their related modules; small utilities stay as single modules.
 - `after/plugin/features.lua` is the sole custom-feature runtime hook. It calls
   `features.setup()` after plugin loading, preserving the existing startup phase
@@ -26,11 +26,65 @@ their implementation intact; splitting providers, rendering, or watching into
 smaller modules can happen separately without mixing behaviour changes into moves.
 Small standalone helpers register commands on their first `require`.
 
-Naia-dependent setup belongs to `config/naia.lua`, called by Naia's Lazy spec:
-custom MCP tools live in `features/naia_tools.lua`, UI modules in
-`features/naia_ui/`, and the walkthrough is provided by the external Naia plugin.
-The `naia` module namespace remains reserved for that plugin. UI commands and
-cleanup hooks are registered when the UI module is first required.
+Naia is a first-party subsystem in `lua/naia/`, not a local Lazy plugin. The
+MCP dependency's setup callback loads `config/naia.lua` after configuring the
+shared bridge; CodeCompanion depends on that same MCP plugin.
+There is no runtime dependency on `~/Development/nvim-naia`.
+
+- `naia/init.lua`, `backend.lua`, `state.lua`, `config.lua`: provider API,
+  registration ownership and connection information (not transport lifecycle).
+- `naia/commands.lua`: explicit, idempotent setup for `:Naia*` commands.
+- `naia/tools.lua`: voice notifications and permission-gated Ex commands.
+- `naia/ui/`: companion, cards, approval policy, actions, styling and MCP tools.
+- `naia/walkthrough/init.lua`: lazy public facade; requiring it installs nothing.
+  `setup()` initializes one controller and is safe to repeat during an active tour;
+  `stop()` dismisses confirmation, releases the tour UI and restores borrowed state.
+- `naia/walkthrough/runtime.lua`: playback transitions, voice events, timers and
+  integration wiring, with module-local state rather than a setup-sized closure.
+- Walkthrough presentation is in `view.lua` (source windows, highlights and
+  narration) and `browser.lua` (step browser). `commands.lua` wires user actions,
+  `chat.lua` owns optional CodeCompanion instructions/folds, `tree.lua` owns tree
+  queries, and `paths.lua` resolves live source locations.
+- `naia/walkthrough/response.lua` decodes/normalizes legacy chat/YAML responses;
+  `file.lua` retains strict portable-file validation. MCP editing/registration
+  remains in `tools.lua`, placement in `layout.lua`, confirmation in `prompt.lua`.
+- `bin/naia-attach`: launch-scoped MCP configuration and skill discovery.
+- `bin/agent-notice.md`: the short attachment notice, without detailed UI rules.
+- `agent/skills/naia/SKILL.md`: on-demand editor usage guidance for all harnesses.
+- `agent/.claude-plugin/plugin.json`: Claude's session-only skill packaging.
+- `config/ai.lua`: tuios messaging and clipboard commands, independent of Sidekick.
+
+Voice playback remains in `features/voice/`; the shared MCP safety guard stays
+independent in `features/mcp_tools_runtime.lua`. UI commands and cleanup hooks
+are registered when the UI module is first required. Tools register once during
+setup, not again on a scheduled retry. Existing MCP names, walkthrough revision
+guards, approval policy and normal provider operations are preserved. The unused
+`relay_host()`, `relay_port()` and `status().child` compatibility aliases have been
+removed: use `server_url()` and `status().bridge`. Naia owns no relay or child.
+The legacy walkthrough stop/foldtext globals are gone; stop through
+`require('naia.walkthrough').stop()` and resolve chat folds through `chat.foldtext()`.
+The separate voice runtime's existing integration API remains unchanged.
+
+Lifecycle regressions cover repeated setup without interrupting active tours,
+confirmation cleanup, restored user mappings, stale scheduled callbacks, browser
+navigation/deletion, CodeCompanion folds, and path lookup outside Git. Timers are
+invalidated on stop and cleaned up on editor shutdown.
+
+Run `make check` from this directory for configuration specs plus the imported
+provider, launcher, skill-discovery and walkthrough regressions. Imported tests
+live in `tests/naia/`, without the standalone project's historical phase folders.
+The config specs using the real bridge registry require the installed MCP plugin.
+`make test-integration` exercises live HTTP transport; `make
+test-opencode-integration` exercises an installed OpenCode against a fake model;
+`make test-codex-integration` verifies native skill discovery without model calls.
+These integration suites are opt-in. See [walkthrough reference](docs/walkthrough.md)
+and [bridge notes](docs/mcp-tools.md) for details.
+
+The launcher requires Python 3.9+; the bridge requires Bun or Node.js 18.19+
+with its npm dependencies installed. Walkthroughs require Neovim 0.11+.
+After this migration, restart Neovim and relaunch the attached agents rather than hot-reloading
+the existing bridge/session. The old standalone repository is not modified or
+deleted, but is no longer loaded by this configuration.
 
 Assets have not moved: voice models remain in `after/ai_voices/`, and the effect
 sound remains at `after/plugin/change-fx.mp3`. Their paths are independent of the
@@ -48,14 +102,63 @@ Use `:Lazy profile` to inspect loading costs. Plugin versions remain pinned in
 
 ## Naia companion and editor tools
 
-Naia exposes `show_companion`, `show_card`, `set_quickfix`, and
-`jump_to_location` through MCP. Requests return an ID immediately rather than
-blocking Neovim. `get_ui_request_status` reports the actual outcome; pending
+### Shared MCP bridge ownership
+
+`guill/mcp-tools.nvim` is independently configured by `config/mcp_tools.lua` and
+starts before Naia loads. Naia registers individual tools alongside other
+providers; it does not initialize, configure, start or stop this shared server.
+The upstream OpenCode integration stays disabled because `naia-attach` handles the
+OpenCode V2 connection to the exact parent editor.
+
+`features/mcp_tools_runtime.lua` is a temporary, Naia-independent safety guard:
+the pinned upstream shutdown handler sends `qa!` to Neovim. The guard retains
+the normal mcp-tools public API/settings but runs a direct Node/Bun child and
+terminates only that child on stop. It relies on upstream bridge internals and
+should be revisited when upstream fixes shutdown. The dependency's npm security
+advisories also remain unresolved; review package updates before production use.
+The Node import loader is passed as an escaped file URL, including on Windows;
+the script entry point remains a normal filesystem path.
+
+- `:MCPToolsStart`, `:MCPToolsStop`, `:MCPToolsRestart`, `:MCPToolsStatus` control
+  the shared transport independently of Naia.
+- `:NaiaStart`, `:NaiaStop`, `:NaiaRestart` attach/detach only Naia registrations.
+- The attachment shim configures native HTTP connections to the existing bridge; no stdio
+  adapter is used and it never starts transport. Relaunch through the shim after
+  a bridge restart to refresh its launch-scoped URL/token. Claude/Codex approvals follow the
+  harness's policy rather than blanket approval of every shared-server tool.
+- Run `nvim --headless -u NONE -l tests/mcp_tools_spec.lua` to test configuration
+  and editor-safe transport stop/restart without loading Naia.
+- Tool definitions use upstream `args`, not full input schemas. Responses are
+  ordinary text/JSON; all MCP tool names have upstream's `nvim_` prefix.
+  Walkthrough tools are `nvim_walkthrough_*` (no `ai_`). Register before connecting;
+  reconnect after adding/removing tools. Existing walkthrough edits need no reconnect.
+- The shim injects only the short attachment notice. Detailed UI guidance is an
+  optional Naia skill (`naia` in OpenCode, `naia:naia` in Codex/Claude), not an
+  automatically loaded prompt or reminder hook.
+  OpenCode's private server uses native `instructions` and `skills` config;
+  Claude uses `--append-system-prompt` and the local skill-only `--plugin-dir`.
+  Codex uses `developer_instructions` and ensures `$CODEX_HOME/skills/naia`
+  (default `~/.codex/skills/naia`) links to `agent/skills/naia` before launching.
+  A correct link is reused; conflicting files, directories or links are preserved
+  and the launch is cancelled. The link persists and is discoverable in ordinary
+  Codex sessions too. No approval policy or global harness config is changed.
+- Sidekick is no longer installed. Its `:AI` toggle and terminal keybinding are
+  removed. `:AISend`, `:AIMessage` and commit prompts route only to tuios agents;
+  outside tuios they explain how to use `:AICopy`, which remains available.
+- Run `nvim --headless -u NONE -l tests/naia_native_tools_spec.lua` to verify your
+  configured tools against the upstream registry without starting a bridge.
+
+Naia exposes `nvim_show_companion`, `nvim_show_card`, `nvim_set_quickfix`, and
+`nvim_jump_to_location` through MCP. Requests return an ID immediately rather than
+blocking Neovim. `nvim_get_ui_request_status` reports the actual outcome; pending
 does not mean an action has happened. Approval requests expire after two minutes.
 
-Companion splits, quickfix updates, and navigation require approval by default.
-The small pinned card is allowed by default, opens without taking focus, and is
-limited to eight wrapped rows at 46 columns. It does not replace the voice panel.
+All four UI policies—companion, card, quickfix and navigation—**auto-allow by
+default**. Explicit startup/session policies can still require approval or
+disable a capability. Auto-allowed requests are queued non-blockingly; pending
+does not yet mean applied. The small pinned card opens without taking focus and
+is limited to eight wrapped rows at 46 columns. It does not replace the voice panel.
+These defaults do not change harness tool permissions or walkthrough confirmation.
 
 - Approval prompts sit at the bottom centre; pinned cards remain in the top-right.
 - Passive approvals show a compact summary with action, target, reason, and plain
@@ -88,7 +191,7 @@ vim.g.naia_ui_policies = {
 }
 ```
 
-Omitted features retain their defaults. Change a feature immediately for the
+Omitted features remain auto-allowed. Change a feature immediately for the
 current session with `:NaiaUIPolicy companion allow` (auto-approve),
 `:NaiaUIPolicy companion off` (auto-reject), or `:NaiaUIPolicy companion ask`.
 Setting `off` also cancels that feature's pending approvals. Configuration is
@@ -102,6 +205,9 @@ user-owned; agents must not change it to bypass approvals.
   and its links remain intact until you delete those buffers. The companion
   window is reused rather than accumulating splits. Use `:NaiaCompanionPrevious`
   / `:NaiaCompanionNext`, or `[h` / `]h` inside a companion, to cycle history.
+  Companion buffers stay read-only, but the split is not buffer-locked: Telescope
+  or ordinary buffer commands may replace it. The snapshot remains in history;
+  reopening notes will not overwrite a window you have repurposed for a file.
   Normal buffer pickers and `:buffers` also show these snapshots.
 - `:NaiaCard` toggles the pinned float: close it if showing, otherwise reopen/focus
   the selected snapshot. `q` or `:NaiaCardClose` explicitly dismisses it.
@@ -148,5 +254,7 @@ Run the isolated UI regression tests with:
 ```sh
 nvim --headless -u NONE -l tests/naia_ui_spec.lua
 nvim --headless -u NONE -l tests/naia_ui_policy_spec.lua
+nvim --headless -u NONE -l tests/naia_ui_defaults_spec.lua
+nvim --headless -u NONE -l tests/mcp_tools_loader_spec.lua
 nvim --headless -u NONE -l tests/layout_spec.lua
 ```

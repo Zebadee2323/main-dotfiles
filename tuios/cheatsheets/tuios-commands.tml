@@ -1,0 +1,165 @@
+<tml version="1" title="tuios: useful terminal commands">
+  <state>{
+    "sessions": [
+      {"cmd": "tuios ls", "desc": "List sessions"},
+      {"cmd": "tuios new NAME --cwd DIR --detach", "desc": "Create a session (optionally detached, in a folder)"},
+      {"cmd": "tuios attach NAME", "desc": "Attach to a session (-d detaches other clients)"},
+      {"cmd": "tuios switch-session NAME --create --cwd DIR", "desc": "Switch this client to a session, creating it if missing"},
+      {"cmd": "tuios rename-session NEW [OLD]", "desc": "Rename a session (changes how -s addresses it)"},
+      {"cmd": "tuios set-session-name \"Label\"", "desc": "Set a display label only"},
+      {"cmd": "tuios set-session-space SPACE", "desc": "File the session under a space (no arg removes it)"},
+      {"cmd": "tuios set-session-accent cyan", "desc": "Set the session accent colour"},
+      {"cmd": "tuios kill-session NAME", "desc": "Kill a session"},
+      {"cmd": "tuios resurrect [NAME]", "desc": "Restore a previously saved session"},
+      {"cmd": "tuios session-info", "desc": "Current session information"},
+      {"cmd": "tuios detach-client", "desc": "Detach clients from their sessions"}
+    ],
+    "panes": [
+      {"cmd": "tuios list-windows [--all --json]", "desc": "List panes in the session (or every session)"},
+      {"cmd": "tuios new-window NAME -- CMD", "desc": "Open a pane running a command (--no-focus, --keep-open, --wait)"},
+      {"cmd": "tuios split-window vertical|horizontal|left|right|up|down", "desc": "Split the focused (or -w) pane"},
+      {"cmd": "tuios popup --width 90% --height 80% -- CMD", "desc": "Floating pane that closes on exit (--wait, --capture-stdout)"},
+      {"cmd": "tuios focus-window NAME", "desc": "Focus a pane (or --direction left|right|up|down)"},
+      {"cmd": "tuios set-window -w NAME --name \"api tests\"", "desc": "Rename a pane (--minimize / --restore)"},
+      {"cmd": "tuios move-window 2 -w NAME --follow", "desc": "Move a pane to workspace 2 (--to-session for another session)"},
+      {"cmd": "tuios close-window NAME", "desc": "Close one pane"},
+      {"cmd": "tuios get-window NAME", "desc": "Detailed info about a pane"},
+      {"cmd": "tuios pip NAME", "desc": "Pin/unpin a pane as picture-in-picture (--off)"},
+      {"cmd": "tuios pane-view -w NAME", "desc": "Show one pane in this terminal, without tuios chrome"},
+      {"cmd": "tuios xpanes a b c", "desc": "One pane per item in a new workspace, multifocus on"}
+    ],
+    "io": [
+      {"cmd": "tuios capture-pane -w NAME --scrollback --lines 40", "desc": "Read the end of a pane"},
+      {"cmd": "tuios capture-pane -w NAME --commands 10", "desc": "Last 10 commands and their output"},
+      {"cmd": "tuios send-text -w NAME 'make test'", "desc": "Type text verbatim into a pane"},
+      {"cmd": "tuios send-keys -w NAME Enter", "desc": "Send keys (Enter, Down, ctrl+c, --repeat N)"},
+      {"cmd": "tuios run -w NAME -- make test", "desc": "Run at a pane's prompt and exit with its status"},
+      {"cmd": "tuios wait-for window-output -w NAME --pattern 'OK'", "desc": "Block until text appears (--timeout ms)"},
+      {"cmd": "tuios clear-history -w NAME", "desc": "Clear a pane's scrollback"},
+      {"cmd": "tuios set-buffer TEXT / show-buffer / list-buffers", "desc": "Paste buffers"},
+      {"cmd": "tuios paste-buffer -w NAME", "desc": "Paste a buffer into a pane"},
+      {"cmd": "tuios screenshot -w NAME", "desc": "Render a pane to an image file"}
+    ],
+    "workspaces": [
+      {"cmd": "tuios list-workspaces", "desc": "List workspaces in the session"},
+      {"cmd": "tuios select-workspace 2", "desc": "Show a workspace"},
+      {"cmd": "tuios set-workspace-name 2 review", "desc": "Name a workspace"},
+      {"cmd": "tuios close-workspace 2", "desc": "Close every pane on a workspace"},
+      {"cmd": "tuios set-layout", "desc": "Toggle tiling, equalize splits, shape master-stack"},
+      {"cmd": "tuios layout list", "desc": "Saved layout templates (delete, export, dir)"},
+      {"cmd": "tuios tape list / exec FILE.tape", "desc": "List or run .tape automation scripts"},
+      {"cmd": "tuios run-command --list", "desc": "List actions runnable by name"},
+      {"cmd": "tuios run-command ToggleZoom", "desc": "Run any keybinding action by name"}
+    ],
+    "agents": [
+      {"cmd": "tuios list-agents", "desc": "Agent panes and what each is doing"},
+      {"cmd": "tuios list-attention", "desc": "The Inbox: everything waiting for you, all sessions"},
+      {"cmd": "tuios peek-prompt -w NAME", "desc": "Show the prompt an agent is blocked on"},
+      {"cmd": "tuios respond -w NAME --prompt-id ID approve", "desc": "Answer the prompt an agent is blocked on (ID from peek-prompt)"},
+      {"cmd": "tuios agent-log -w NAME", "desc": "What the agent in a pane has been doing"},
+      {"cmd": "tuios start-agent claude", "desc": "Start an agent in a new pane, return when ready"},
+      {"cmd": "tuios ask-agent -w NAME 'question'", "desc": "Ask an agent and wait for its answer"},
+      {"cmd": "tuios send-agent-message -w NAME 'note'", "desc": "Leave mail for an agent"},
+      {"cmd": "tuios queue -w NAME 'next task'", "desc": "Type a prompt when the agent comes to rest"},
+      {"cmd": "tuios ask-human 'Q?' -o yes -o no", "desc": "Ask the person a multiple-choice question"},
+      {"cmd": "tuios fan 3 --agent claude 'prompt'", "desc": "Fan a prompt to N agents, each in a worktree"},
+      {"cmd": "tuios resume-agent -w NAME", "desc": "Resume an agent conversation after a daemon restart"},
+      {"cmd": "tuios checkpoint list / diff N / restore N", "desc": "Checkpoints of an agent's turns"},
+      {"cmd": "tuios review notes / note FILE:LINE TEXT / send", "desc": "Review notes on a pane's changes"},
+      {"cmd": "tuios integration install claude-code", "desc": "Wire a harness's hooks to tuios agent state"}
+    ],
+    "worktrees": [
+      {"cmd": "tuios worktree new BRANCH", "desc": "Create a worktree and a session in it"},
+      {"cmd": "tuios worktree ls", "desc": "List worktree sessions"},
+      {"cmd": "tuios worktree diff SESSION --stat", "desc": "What a worktree session changed"},
+      {"cmd": "tuios worktree rm SESSION", "desc": "Remove a worktree and kill its session"},
+      {"cmd": "tuios ship", "desc": "Commit, merge, push and open a PR for a pane's worktree"},
+      {"cmd": "tuios stash put FILE / list / get PATH", "desc": "Session file store, shared between agents"}
+    ],
+    "config": [
+      {"cmd": "tuios config edit", "desc": "Edit config.toml in $EDITOR"},
+      {"cmd": "tuios config apply", "desc": "Apply config.toml to the running daemon now"},
+      {"cmd": "tuios config origin [KEY]", "desc": "Which file sets each key"},
+      {"cmd": "tuios list-options [PREFIX]", "desc": "Every settable option, type and default"},
+      {"cmd": "tuios get-config PATH / set-config PATH VALUE", "desc": "Read or change a live option"},
+      {"cmd": "tuios keybinds list", "desc": "Every keybinding and its action"},
+      {"cmd": "tuios keybinds explain KEY", "desc": "What tuios does with one key"},
+      {"cmd": "tuios keybinds doctor", "desc": "Conflicts and dead bindings"},
+      {"cmd": "tuios keybinds browse", "desc": "Search keybindings in an explorer"},
+      {"cmd": "tuios keybinds cheatsheet tmux", "desc": "What the tmux preset keeps, moves, lacks"},
+      {"cmd": "tuios list-themes / --preview-theme NAME", "desc": "Themes and their colours"},
+      {"cmd": "tuios list-dock-components / refresh-dock NAME", "desc": "Dock components and re-running them"},
+      {"cmd": "tuios list-hooks", "desc": "Hooks and what each last did"}
+    ],
+    "daemon": [
+      {"cmd": "tuios restart-server", "desc": "Restart the daemon with the newest tuios"},
+      {"cmd": "tuios kill-server", "desc": "Stop the daemon"},
+      {"cmd": "tuios logs", "desc": "View daemon logs"},
+      {"cmd": "tuios list-clients", "desc": "Daemon client connections"},
+      {"cmd": "tuios doctor agents / shell", "desc": "Check integrations and shell command marking"},
+      {"cmd": "tuios hosts", "desc": "Machines in [hosts] and their link state"},
+      {"cmd": "tuios subscribe", "desc": "Print the daemon event stream as JSON lines"},
+      {"cmd": "tuios update", "desc": "Install the newest release"},
+      {"cmd": "tuios tml show FILE.tml [--pane]", "desc": "Show a TML document as a popup or pane"},
+      {"cmd": "tuios tml validate FILE.tml", "desc": "Check a TML document"},
+      {"cmd": "tuios mermaid FILE", "desc": "Draw Mermaid diagrams in the terminal"},
+      {"cmd": "tuios --skill [TOPIC|all]", "desc": "Print the agent skill docs"}
+    ]
+  }</state>
+  <col pad="1" gap="1">
+    <text role="dim">Most commands take -s SESSION and -w PANE (name or id). Defaults: this pane's session, the focused pane. Add --json for scripting.</text>
+    <tabs>
+      <tab id="sessions" title="Sessions">
+        <table rows="state.sessions">
+          <column field="cmd" title="Command"/>
+          <column field="desc" title="What it does"/>
+        </table>
+      </tab>
+      <tab id="panes" title="Panes">
+        <table rows="state.panes">
+          <column field="cmd" title="Command"/>
+          <column field="desc" title="What it does"/>
+        </table>
+      </tab>
+      <tab id="io" title="Read / Type">
+        <table rows="state.io">
+          <column field="cmd" title="Command"/>
+          <column field="desc" title="What it does"/>
+        </table>
+      </tab>
+      <tab id="workspaces" title="Workspaces">
+        <table rows="state.workspaces">
+          <column field="cmd" title="Command"/>
+          <column field="desc" title="What it does"/>
+        </table>
+      </tab>
+      <tab id="agents" title="Agents">
+        <table rows="state.agents">
+          <column field="cmd" title="Command"/>
+          <column field="desc" title="What it does"/>
+        </table>
+      </tab>
+      <tab id="worktrees" title="Worktrees">
+        <table rows="state.worktrees">
+          <column field="cmd" title="Command"/>
+          <column field="desc" title="What it does"/>
+        </table>
+      </tab>
+      <tab id="config" title="Config">
+        <table rows="state.config">
+          <column field="cmd" title="Command"/>
+          <column field="desc" title="What it does"/>
+        </table>
+      </tab>
+      <tab id="daemon" title="Daemon / Tools">
+        <table rows="state.daemon">
+          <column field="cmd" title="Command"/>
+          <column field="desc" title="What it does"/>
+        </table>
+      </tab>
+    </tabs>
+    <row gap="2">
+      <button key="q" on-press="close(null)">Close</button>
+    </row>
+  </col>
+</tml>

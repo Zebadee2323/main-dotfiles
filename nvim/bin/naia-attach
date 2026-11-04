@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from urllib.parse import urlsplit
+
+
+def warn(message):
+    print(f"naia-attach: {message}", file=sys.stderr)
+
+
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+NOTICE_FILE = Path(SCRIPT_DIR) / "agent-notice.md"
+AGENT_DIR = Path(SCRIPT_DIR).parent / "agent"
+SKILLS_DIR = AGENT_DIR / "skills"
+NAIA_SKILL = SKILLS_DIR / "naia"
+MCP_TOKEN_ENV = "NAIA_MCP_TOKEN"
+
+
+def ensure_codex_skill(env):
+    """Install only our missing link; never overwrite another skill or stale link."""
+    home = Path(env.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    link = home / "skills" / "naia"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(NAIA_SKILL, target_is_directory=True)
+    except FileExistsError:
+        pass  # Includes concurrent launches and dangling links; verify below.
+    if not link.is_symlink() or link.resolve() != NAIA_SKILL.resolve():
+        raise ValueError(f"{link} already exists and is not a symlink to {NAIA_SKILL}; left untouched")
+
+
+def get_naia_connection_info():
+    nvim_server = os.environ.get("NVIM") or os.environ.get("NVIM_LISTEN_ADDRESS")
+    if not nvim_server:
+        return None
+
+    lua_chunk = """
+(function()
+  local ok, naia = pcall(require, "naia")
+  if not ok then
+    return ""
+  end
+
+  local info = naia.connection_info()
+  return info and vim.json.encode(info) or ""
+end)()
+""".strip()
+    expr = "luaeval(%s)" % json.dumps(lua_chunk)
+
+    try:
+        result = subprocess.run(
+            ["nvim", "--headless", "--server", nvim_server, "--remote-expr", expr],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        warn("failed to query Naia bridge info from Neovim")
+        return None
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        if stderr:
+            warn("failed to query Naia bridge info from Neovim")
+        return None
+
+    payload = result.stdout.strip()
+    if not payload:
+        return None
+
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError:
+        warn("unexpected Naia bridge info response")
+        return None
+
+    try:
+        endpoint = urlsplit(parsed["url"])
+        valid = (endpoint.scheme == "http" and endpoint.hostname == "127.0.0.1"
+                 and endpoint.port is not None and 0 < endpoint.port < 65536
+                 and not endpoint.username and not endpoint.password
+                 and endpoint.path == "/" and not endpoint.query and not endpoint.fragment
+                 and isinstance(parsed["token"], str) and bool(parsed["token"])
+                 and not any(c.isspace() or ord(c) < 32 for c in parsed["token"]))
+    except (KeyError, TypeError, ValueError):
+        valid = False
+    if not valid:
+        warn("unexpected Naia bridge info payload")
+        return None
+
+    return {"url": parsed["url"], "token": parsed["token"]}
+
+
+def build_opencode_env(env, connection_info):
+    env = dict(env)
+    env[MCP_TOKEN_ENV] = connection_info["token"]
+    config = json.loads(env.get("OPENCODE_CONFIG_CONTENT") or "{}")
+    mcp = config.setdefault("mcp", {})
+    mcp.setdefault("servers", {})["naia"] = {
+        "type": "remote", "url": connection_info["url"], "oauth": False,
+        "headers": {"Authorization": "Bearer {env:" + MCP_TOKEN_ENV + "}"},
+    }
+    for key, path in (("instructions", NOTICE_FILE), ("skills", SKILLS_DIR)):
+        entries = config.setdefault(key, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"OpenCode {key} must be a list")
+        if str(path) not in entries:
+            entries.append(str(path))
+    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
+    return env
+
+
+def opencode_session_options(argv):
+    """Identify session launches without treating run messages as directories."""
+    mode = "tui"
+    connection_args = []
+    value_flags = {
+        "--server", "--session", "-s", "--prompt", "--log-level",
+        "--model", "-m", "--agent", "--format", "--file", "-f",
+        "--title", "--replay-limit",
+    }
+    index = 0
+    positional_seen = False
+    while index < len(argv):
+        arg = argv[index]
+        flag, separator, value = arg.partition("=")
+        if flag in {"--help", "-h", "--version", "-v", "--completions", "--wizard"}:
+            return None
+        if arg == "--":
+            tail = argv[index + 1:]
+            if mode == "tui" and tail:
+                if len(tail) != 1 or positional_seen:
+                    raise ValueError("expected one OpenCode workspace directory")
+            break
+        if flag in value_flags:
+            if not separator:
+                index += 1
+                if index >= len(argv):
+                    raise ValueError(f"missing value for {flag}")
+                value = argv[index]
+            if flag == "--server":
+                connection_args += ["--server", value]
+        else:
+            if arg == "--standalone":
+                connection_args.append(arg)
+            if not arg.startswith("-") and not positional_seen:
+                positional_seen = True
+                if arg in {"run", "mini"}:
+                    mode = arg
+                elif not os.path.isdir(os.path.expanduser(arg)):
+                    # Other subcommands (api, mcp, service, etc.) do not
+                    # start a conversation and must not receive Naia config.
+                    return None
+        index += 1
+
+    return {"connection_args": connection_args}
+
+
+def build_opencode_args(argv):
+    options = opencode_session_options(argv)
+    if options is None:
+        return argv
+    if "--server" in options["connection_args"]:
+        raise ValueError("Naia requires a private server, not an explicit --server")
+    # Let OpenCode handle new/resumed/continued/forked sessions itself. Inserting
+    # before -- preserves literal run messages and workspace arguments.
+    if "--standalone" in options["connection_args"]:
+        return argv
+    index = argv.index("--") if "--" in argv else len(argv)
+    return argv[:index] + ["--standalone"] + argv[index:]
+
+
+def build_claude_args(argv, connection_info):
+    mcp_config = {
+        "mcpServers": {
+            "naia": {
+                "type": "http",
+                "url": connection_info["url"],
+                "headers": {"Authorization": "Bearer ${" + MCP_TOKEN_ENV + "}"},
+            }
+        }
+    }
+
+    # No --strict-mcp-config: this merges the Naia MCP server with the
+    # user's existing global/project MCP servers instead of replacing them.
+    # This server now includes tools from other providers, so do not blanket
+    # auto-approve it. Leave shared-server permissions to the harness/user.
+    extra = [
+        "--mcp-config",
+        json.dumps(mcp_config),
+    ]
+
+    extra += ["--append-system-prompt", NOTICE_FILE.read_text(encoding="utf-8").strip(),
+              "--plugin-dir", str(AGENT_DIR)]
+
+    return extra + argv
+
+
+def build_codex_args(argv, connection_info):
+    # Replace this server as a whole, so an inherited old stdio command cannot
+    # conflict with the new URL. Neither the override nor instructions contain a token.
+    server = ("{ url = " + json.dumps(connection_info["url"])
+              + ", bearer_token_env_var = " + json.dumps(MCP_TOKEN_ENV) + ", enabled = true }")
+    extra = [
+        "-c",
+        "mcp_servers.naia=" + server,
+        "-c",
+        "developer_instructions=" + json.dumps(NOTICE_FILE.read_text(encoding="utf-8").strip()),
+    ]
+    return extra + argv
+
+
+def main():
+    if len(sys.argv) < 2:
+        warn("expected target CLI name")
+        return 1
+
+    target = sys.argv[1]
+    target_args = sys.argv[2:]
+    env = os.environ.copy()
+    env.pop(MCP_TOKEN_ENV, None)  # Do not reuse another editor's inherited token.
+
+    connection_info = get_naia_connection_info()
+    if not connection_info:
+        warn("Naia bridge info unavailable, launching without injected MCP config")
+
+    try:
+        if connection_info:
+            if not NOTICE_FILE.read_text(encoding="utf-8").strip() or not (NAIA_SKILL / "SKILL.md").is_file():
+                raise ValueError("Naia attachment notice and skill must be installed")
+        if target == "opencode":
+            if connection_info:
+                # Administrative commands must not inherit Naia's launch config.
+                if opencode_session_options(target_args) is not None:
+                    target_args = build_opencode_args(target_args)
+                    env = build_opencode_env(env, connection_info)
+        elif target == "codex":
+            if connection_info:
+                env[MCP_TOKEN_ENV] = connection_info["token"]
+                ensure_codex_skill(env)
+                target_args = build_codex_args(target_args, connection_info)
+        elif target == "claude":
+            if connection_info:
+                env[MCP_TOKEN_ENV] = connection_info["token"]
+                target_args = build_claude_args(target_args, connection_info)
+        else:
+            warn(f"unsupported target CLI: {target}")
+            return 1
+    except (ValueError, KeyError, TypeError, AttributeError, OSError) as error:
+        warn(f"failed to prepare {target} attachment: {error}")
+        return 1
+
+    os.execvpe(target, [target] + target_args, env)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

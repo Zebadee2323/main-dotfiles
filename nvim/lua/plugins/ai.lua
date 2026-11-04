@@ -1,18 +1,12 @@
 return {
     'github/copilot.vim',
     {
-        dir = vim.fn.expand('~/dev/naia.nvim'),
-        name = 'nvim-naia',
+        'guill/mcp-tools.nvim',
+        dependencies = { 'mfussenegger/nvim-dap' },
+        build = 'cd bridge && npm install',
         config = function()
-            require('naia').setup()
+            require('config.mcp_tools')
             require('config.naia')
-        end,
-    },
-    {
-        'folke/sidekick.nvim',
-        dependencies = { 'nvim-naia' },
-        config = function()
-            require('config.sidekick')
         end,
     },
     {
@@ -20,7 +14,7 @@ return {
         dependencies = {
             'nvim-lua/plenary.nvim',
             'nvim-treesitter/nvim-treesitter',
-            'nvim-naia',
+            'guill/mcp-tools.nvim',
         },
         config = function()
             require('config.code-companion')

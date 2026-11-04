@@ -43,6 +43,8 @@ end
 
 local ok_ui, dapui = pcall(require, "dapui")
 
+dap.defaults.fallback.switchbuf = require("config.dap-navigation").switchbuf
+
 -- Auto-open/close dap-ui if available
 if ok_ui then
     dap.listeners.after.event_initialized["dapui_autoopen"]  = function() dapui.open() end

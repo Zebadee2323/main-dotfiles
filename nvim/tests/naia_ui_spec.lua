@@ -1,8 +1,10 @@
 -- Run: nvim --headless -u NONE -l tests/naia_ui_spec.lua
 local file = debug.getinfo(1, "S").source:sub(2)
 vim.opt.rtp:prepend(vim.fn.fnamemodify(file, ":p:h:h"))
-local ui = require("features.naia_ui")
-local actions = require("features.naia_ui.actions")
+-- This suite exercises opt-in approval flows independently of auto-allow defaults.
+vim.g.naia_ui_policies = { companion = "ask", quickfix = "ask", navigation = "ask", card = "allow" }
+local ui = require("naia.ui")
+local actions = require("naia.ui.actions")
 local warnings = {}
 vim.notify = function(message) warnings[#warnings + 1] = message end
 local function flush() vim.wait(40, function() return false end, 5) end
@@ -105,6 +107,29 @@ local first = status(request).result
 assert(vim.api.nvim_get_current_win() == source, "companion stole focus")
 assert(vim.bo[first.buffer].buftype == "nofile" and not vim.bo[first.buffer].modifiable)
 assert(vim.bo[first.buffer].buflisted and not vim.bo[first.buffer].modified)
+-- Telescope uses an ordinary :buffer command in the chosen window. Companion
+-- splits must allow that, while keeping the hidden, read-only snapshot/history.
+local repurposed = first.window
+local switched, switch_error = pcall(vim.api.nvim_win_call, repurposed, function()
+  vim.cmd.buffer(vim.fn.bufnr(target))
+end)
+assert(switched, switch_error)
+assert(vim.api.nvim_win_get_buf(repurposed) == vim.fn.bufnr(target))
+assert(vim.api.nvim_buf_is_loaded(first.buffer) and not vim.bo[first.buffer].modifiable)
+local fixed = vim.wo[source].winfixbuf
+vim.wo[source].winfixbuf = true
+local reopened = actions.open_companion(false)
+assert(reopened ~= repurposed, "reopening a companion must not overwrite a repurposed window")
+assert(vim.api.nvim_win_get_buf(repurposed) == vim.fn.bufnr(target))
+assert(vim.api.nvim_win_get_buf(reopened) == first.buffer)
+assert(not vim.wo[reopened].winfixbuf, "new companion inherited the source's buffer lock")
+assert(vim.wo[source].winfixbuf, "opening a companion changed another window's buffer lock")
+vim.wo[source].winfixbuf = fixed
+-- Reusing an older companion view must clear the lock left by previous code.
+vim.wo[reopened].winfixbuf = true
+assert(actions.open_companion(false) == reopened and not vim.wo[reopened].winfixbuf)
+vim.api.nvim_win_close(repurposed, false)
+first.window = reopened
 local original_request, link_request, link_target = ui.request
 ui.request = function(kind, args)
   local result = original_request(kind, args)
@@ -200,7 +225,7 @@ for pulse = 1, 3 do
   flash_steps[start].callback()
   assert(vim.w[first_card.window].naia_card_flashing, "new card did not flash")
   assert(flash_steps[start + 1].delay == 150, "pulse should last 150ms")
-  require("features.naia_ui.style").refresh()
+  require("naia.ui.style").refresh()
   assert(vim.wo[first_card.window].winhighlight:find("Normal:NaiaUICardFlashNormal", 1, true))
   flash_steps[start + 1].callback()
   assert(not vim.w[first_card.window].naia_card_flashing, "pulse did not return to normal")
@@ -270,11 +295,13 @@ flush()
 assert(status(request).status == "expired")
 
 local tools = {}
-  require("features.naia_ui.tools").register({
+  require("naia.ui.tools").register({
   deregister_tool = function(name) tools[name] = nil; return true end,
   register_tool = function(name, spec) tools[name] = spec; return true end,
 })
 assert(vim.tbl_count(tools) == 5)
+for _, spec in pairs(tools) do assert(spec.args and not spec.input_schema) end
+assert(tools.show_card.args.title.required and tools.show_card.args.content.required)
 ui.set_policy("navigation", "off")
 ui.set_policy("companion", "off")
 assert(vim.json.decode(tools.jump_to_location.callback({})).status == "muted")
@@ -288,7 +315,7 @@ assert(not pcall(actions.prepare, "card", { title = "Large", content = string.re
 
 -- Surfaces remain distinct even when the theme gives NormalFloat the same
 -- background as Normal. Dark/light theme changes must not alter editor colours.
-local style = require("features.naia_ui.style")
+local style = require("naia.ui.style")
 for _, palette in ipairs({
   { mode = "dark", background = 0x181818, foreground = 0xeeeeee },
   { mode = "light", background = 0xf5f5f5, foreground = 0x202020 },

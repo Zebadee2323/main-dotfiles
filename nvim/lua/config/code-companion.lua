@@ -1,6 +1,6 @@
 local codecompanion = require("codecompanion")
 
-local sidekick_naia_wrapper = require("naia").wrapper_path()
+local naia_wrapper = require("naia").wrapper_path()
 local ai_chat_adapter = "opencode_naia"
 local ai_chat_model = "openai/gpt-5.4/medium"
 
@@ -11,7 +11,7 @@ local function build_opencode_naia_adapter()
   adapter.formatted_name = "OpenCode Naia"
   adapter.commands = {
     default = {
-      sidekick_naia_wrapper,
+      naia_wrapper,
       "opencode",
       "acp",
     },

@@ -1,0 +1,81 @@
+# tuios → Neovim Naia shims
+
+Launch `opencode`, `codex`, or `claude` in a tuios pane and connect it to a ready
+`nvim-naia` editor in the **same session and workspace**.
+
+## Use
+
+Put this repository's `bin` directory before the real CLIs in your PATH:
+
+```sh
+export PATH="$HOME/.config/dotfiles/tuios/naia/bin:$PATH"
+opencode
+codex
+claude
+```
+
+Or invoke `./bin/opencode`, `./bin/codex`, or `./bin/claude` directly.
+All arguments are forwarded.
+The Codex shim adds `--no-daemon` so its tools inherit the launching terminal's
+environment, including tuios pane identity, whether or not an editor is found.
+It also defaults each spawned Codex session to `workspace-write` with
+`sandbox_workspace_write.network_access = true`, so shell commands can reach
+the tuios daemon and agent-comms listener. These are command-line defaults, not
+global config changes; caller options come afterward and can override them
+(for example, `codex-t --sandbox read-only` or
+`codex-t -c sandbox_workspace_write.network_access=false`). This enables general
+command network access, not only localhost. Approval policy is unchanged.
+Relaunch existing sessions to pick up these defaults. Managed restrictions still
+apply and can reject settings they do not allow.
+Explicit remote-server launches and `codex agents` are incompatible with this
+shim; invoke the real Codex executable for those commands.
+No shell configuration is changed automatically. Keep the scripts together in
+`bin`; use PATH rather than copying or symlinking individual scripts.
+
+Requirements: Python 3, `tuios`, `nvim`, `ps`, `lsof`, the real target CLI, and
+an editor with `nvim-naia` configured and ready (`:NaiaStatus`). macOS and Linux
+process/socket discovery is supported; remote-host editors and TCP-only Neovim
+RPC listeners are not discovered.
+
+Discovery uses the launching pane's workspace, even if the client is viewing
+another one. It finds Neovim descendants of that workspace's pane processes,
+including forked headless RPC servers, then asks their Unix sockets for readiness
+and `require('naia').wrapper_path()`. It never starts an editor or bridge, types
+into a pane, or scans unrelated editor sockets.
+
+The selected editor's `nvim/bin/naia-attach` handles MCP configuration,
+authentication and a short attachment notice. Detailed editor guidance lives in
+`nvim/agent/skills/naia/SKILL.md` and is loaded only when useful. OpenCode uses a
+private V2 server with native skill/instruction sources; Claude loads the local
+skill-only plugin for this session. Codex creates a missing symlink at
+`$CODEX_HOME/skills/naia` (default `~/.codex/skills/naia`) to the Neovim-owned skill,
+or reuses the correct existing link. Conflicting entries are left untouched and
+cancel attachment. That link persists and is visible to other Codex sessions.
+Tokens stay in the launch environment, not arguments or files. Except for the
+Codex session defaults above, existing harness permissions remain in force.
+No global/project config is written.
+OpenCode administrative commands are handled by the upstream launcher without
+Naia config; explicit `--server` conversation launches are rejected upstream.
+
+Outside tuios these shims launch the real CLI directly; the Codex shim still adds
+`--no-daemon`. Inside tuios, inherited
+`NVIM`, `NVIM_LISTEN_ADDRESS`, and `NAIA_MCP_TOKEN` are cleared before discovery.
+No ready editor means a warning and an ordinary launch. Discovery errors and
+ambiguous editor matches cancel the launch instead of guessing.
+
+Select a particular editor pane when multiple editors are ready:
+
+```sh
+tuios list-windows --json
+TUIOS_NAIA_PANE=65eb4e59 opencode
+```
+
+The selector is a unique full/prefix pane ID in the caller's workspace. Multiple
+ready editors within that one pane remain ambiguous. Relaunch after restarting
+the editor's MCP bridge to refresh its URL/token.
+
+## Tests
+
+```sh
+python3 -m unittest discover -s tests -v
+```
