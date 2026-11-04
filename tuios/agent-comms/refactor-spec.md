@@ -341,7 +341,7 @@ recommends the epoch rather than that weaker guarantee.
 Add a pane-sized visual conversation view alongside the existing caption view:
 
 ```sh
-agent-comms watch --view conversation
+agent-comms watch --view convo
 ```
 
 - Keep the current watcher view as the default for compatibility.

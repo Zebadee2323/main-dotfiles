@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 import io
+import hashlib
 import json
 import os
 import re
@@ -60,6 +61,51 @@ class PaneIdentityTests(Fixture):
                 cwd=SCRIPT.parent, env={**self.env, **self.own_env}, capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout), [epoch, bound["name"]])
+
+    def test_connection_environment_changes_preserve_identity_and_bags(self):
+        epoch, binding = self.bind()
+        before = self.state()
+        changed = self.env_for(TUIOS_SOCKET="/different/socket", TUIOS_HOST="other-host", TUIOS_SERVER="other")
+        self.assertEqual(pane_identity.owner(changed)[0], hashlib.sha256(b"own").hexdigest())
+        with patch.object(pane_identity, "inventory", return_value={"own"}):
+            actual_epoch, actual = app.pane_binding(self.paths, self.config, env=changed)
+        self.assertEqual((actual_epoch, actual["name"], actual["voice_profile"]),
+                         (epoch, binding["name"], binding["voice_profile"]))
+        self.assertEqual((self.state()["names"], self.state()["voices"]), (before["names"], before["voices"]))
+        self.assertEqual(len(self.state()["bindings"]), 1)
+        with self.assertRaisesRegex(ValueError, "pane ID is missing"):
+            pane_identity.owner({"TUIOS_ENV": "1", "TUIOS_WINDOW_ID": "legacy-alias"})
+
+    def test_checked_lookup_migrates_old_keys_without_renaming_or_resetting(self):
+        epoch, binding = self.bind()
+        state = self.state()
+        key = pane_identity.owner(self.own_env)[0]
+        record = state["bindings"].pop(key)
+        record["agent_role"] = "worker"
+        record["title_prefix"] = f'[{binding["name"]}] '
+        state["bindings"]["old-daemon-scoped-key"] = record
+        app.atomic_json(self.state_file, state)
+        self.assertEqual(self.bind()[0], epoch)
+        migrated = self.state()
+        self.assertEqual(migrated["bindings"], {key: record})
+        self.assertEqual((migrated["names"], migrated["voices"]), (state["names"], state["voices"]))
+
+    def test_conflicting_old_bindings_fail_without_writes_and_can_clear_only_this_pane(self):
+        self.bind()
+        self.bind("other")
+        self.bind("third")
+        state = self.state()
+        other_key = pane_identity.owner(self.env_for("other"))[0]
+        state["bindings"][other_key]["pane_id"] = "own"
+        state["bindings"][other_key]["daemon"] = "other-old-daemon"
+        app.atomic_json(self.state_file, state)
+        with self.assertRaisesRegex(app.CommsError, "Multiple saved identities"):
+            self.bind()
+        self.assertEqual(self.state(), state)
+        result = app.pane_binding(self.paths, self.config, clear=True, env=self.own_env)
+        self.assertTrue(result["cleared"])
+        self.assertEqual([r["pane_id"] for r in self.state()["bindings"].values()], ["third"])
+        self.assertEqual((self.state()["names"], self.state()["voices"]), (state["names"], state["voices"]))
 
     def test_lookup_is_lock_free_and_never_creates_state(self):
         env = self.env_for()
@@ -176,7 +222,7 @@ class PaneIdentityTests(Fixture):
         first = self.name()
         with patch.object(pane_identity, "inventory", return_value={"own"}):
             second = app.pane_binding(self.paths, self.config,
-                                      env=self.env_for(TUIOS_SOCKET="/nonexistent/other/daemon.sock"))[1]["name"]
+                                      env=self.env_for("other", TUIOS_SOCKET="/nonexistent/other/daemon.sock"))[1]["name"]
         before = self.state()
         history = self.paths.state / "history.jsonl"
         history.write_text("keep history")
@@ -357,6 +403,21 @@ class PaneIdentityTests(Fixture):
                          "[Bob3] [Human] Task")
         self.assertIsNone(re.match(pattern, "[Alice1] "))
 
+    def test_title_updates_use_discovered_session_after_rename(self):
+        _, bound = self.bind()
+        env = self.env_for(TUIOS_SESSION="old-name")
+        run = Mock(side_effect=[subprocess.CompletedProcess([], 0, json.dumps(
+            {"success": True, "id": "own", "title": "Working", "custom_name": ""})),
+            subprocess.CompletedProcess([], 0, "{}")])
+        pane_identity.update_title(self.paths, bound["name"],
+                                   {"pane_title": "Working", "session_name": "renamed"}, config=self.config,
+                                   private_dir=app.private_dir, lock=app.FileLock, atomic_json=app.atomic_json,
+                                   run=run, env=env)
+        for call in run.call_args_list:
+            argv = call.args[0]
+            self.assertEqual(argv[argv.index("-s") + 1], "renamed")
+        self.assertEqual(env["TUIOS_SESSION"], "old-name")
+
 
 class GarbageCollectionTests(Fixture):
     def state(self):
@@ -405,4 +466,5 @@ class GarbageCollectionTests(Fixture):
         self.assertEqual(pane_identity.inventory(run), {"a", "b"})
         base = {"TUIOS_ENV": "1", "TUIOS_PANE_ID": "a", "TUIOS_SOCKET": "/nonexistent/socket"}
         self.assertEqual(pane_identity.owner(base), pane_identity.owner({**base, "TUIOS_SESSION": "new"}))
-        self.assertNotEqual(pane_identity.owner(base), pane_identity.owner({**base, "TUIOS_SOCKET": "/nonexistent/other"}))
+        self.assertEqual(pane_identity.owner(base)[0], pane_identity.owner({**base, "TUIOS_SOCKET": "/nonexistent/other"})[0])
+        self.assertNotEqual(pane_identity.owner(base)[1], pane_identity.owner({**base, "TUIOS_SOCKET": "/nonexistent/other"})[1])

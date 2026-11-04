@@ -275,6 +275,7 @@ show_ram = true
 position = "left"
 enabled = false
 density = "normal"
+sections = "sessions,agents:34"
 
 [spotlight]
 enabled = false

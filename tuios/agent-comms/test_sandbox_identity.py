@@ -21,10 +21,10 @@ class SandboxIdentityTests(Fixture):
         tuios = bin_dir / 'tuios'
         tuios.write_text(f'#!{sys.executable}\n' + '''import json, os, sys
 pane = os.environ.get('TUIOS_PANE_ID', '')
-window = dict(window_id=pane, workspace=1, display_name='Codex', agent_state='working')
+window = dict(window_id=pane, session='test', workspace=1, display_name='Codex', agent_state='working')
 command = sys.argv[1]
 if command == 'session-info':
-    data = dict(session_name=os.environ['TUIOS_SESSION'], tui_attached=True)
+    data = dict(session_name=sys.argv[sys.argv.index('-s') + 1], tui_attached=True)
 elif command == 'list-windows' and '--all' in sys.argv:
     data = dict(success=True, total=1, panes=[window])
 elif command == 'list-windows':
@@ -77,6 +77,32 @@ sys.exit(app.main(sys.argv[2:]))
         result = self.restricted_cli('context')
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
+
+    def test_stale_or_missing_session_environment_is_resolved_by_pane_id(self):
+        self.env['TUIOS_SESSION'] = 'old-name'
+        first = self.context()
+        binding = next(iter(self.state()['bindings'].values()))
+        self.assertEqual(binding['session_name'], 'test')
+        del self.env['TUIOS_SESSION']
+        self.assertEqual(self.context(), first)
+
+    def test_inline_roles_use_listener_without_client_state_writes(self):
+        context = self.restricted_cli('context', '--agent-role', 'reviewer')
+        self.assertEqual(context.returncode, 0, context.stderr)
+        identity = json.loads(context.stdout)
+        binding = next(iter(self.state()['bindings'].values()))
+        self.assertEqual(binding['agent_role'], 'reviewer')
+        recipient = 'Bob' if identity['name'] != 'Bob' else 'Alice'
+        self.sender(recipient)
+        result = self.restricted_cli('send', '--name', identity['name'], '--epoch', identity['epoch'],
+                                     '--msg', 'Working.', '--agent-role', 'worker', '--role', 'responder',
+                                     '--display-recipient', recipient)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        binding = next(b for b in self.state()['bindings'].values() if b['name'] == identity['name'])
+        self.assertEqual(binding['agent_role'], 'worker')
+        result = self.restricted_cli('context', '--agent-role', '')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(next(b for b in self.state()['bindings'].values() if b['name'] == identity['name'])['agent_role'], '')
 
     def test_lookup_send_and_repeat_work_without_any_client_state_writes(self):
         identity = self.context()
@@ -168,7 +194,7 @@ class ContextClientTests(Fixture):
     def test_clear_requires_upgraded_listener(self):
         import asyncio
         env = {'TUIOS_ENV': '1', 'TUIOS_PANE_ID': 'caller', 'TUIOS_SESSION': 'work'}
-        with patch.dict(os.environ, env), patch.object(app, 'checked_context', return_value={}), \
+        with patch.dict(os.environ, env), patch.object(app, 'checked_context', return_value={'session_name': 'work'}), \
              patch.object(app, 'endpoint', return_value={'pane_identity': True}), \
              patch.object(app, 'rpc', new_callable=AsyncMock) as rpc:
             with self.assertRaisesRegex(app.CommsError, 'restart'):
@@ -189,6 +215,21 @@ class ContextClientTests(Fixture):
                          'Alice here, in the work session, workspace 1, in the bottom-right.'})
         app.validate_message(app.load_config(self.paths.config), 'Alice', result['prefix'] + ' Ready.', source=source)
 
+    def test_context_and_send_forward_discovered_session_without_changing_process_environment(self):
+        import asyncio
+        env = {'TUIOS_ENV': '1', 'TUIOS_PANE_ID': 'caller', 'TUIOS_SESSION': 'old-name'}
+        source = {'session_name': 'renamed', 'pane_id': 'caller', 'workspace': 1, 'introduce': False}
+        identity = {'name': 'Alice', 'epoch': '0' * 16, 'prefix': ''}
+        capabilities = {'pane_identity': True, 'name_identity': True, 'prefix_policy': app.PREFIX_POLICY}
+        with patch.dict(os.environ, env), patch.object(app, 'checked_context', return_value=source), \
+             patch.object(app, 'endpoint', return_value=capabilities), \
+             patch.object(app, 'rpc', new_callable=AsyncMock, return_value={'identity': identity}) as rpc:
+            asyncio.run(app.listener_context(self.paths))
+            self.assertEqual(rpc.call_args.kwargs['pane_env']['TUIOS_SESSION'], 'renamed')
+            asyncio.run(app.send(self.paths, 'Alice', identity['epoch'], 'Working.', source=source))
+            self.assertEqual(rpc.call_args.kwargs['pane_env']['TUIOS_SESSION'], 'renamed')
+            self.assertEqual(os.environ['TUIOS_SESSION'], 'old-name')
+
     def test_launchd_path_discovers_homebrew_tuios_before_running_queries(self):
         import shutil
         minimal = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'TUIOS_ENV': '1',
@@ -196,6 +237,8 @@ class ContextClientTests(Fixture):
         listing = {'windows': [{'window_id': 'caller', 'workspace': 1}],
                    'current_workspace': 1, 'focused_window_id': 'caller'}
         run = unittest.mock.Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, json.dumps({'success': True, 'total': 1,
+                                                          'panes': [{'window_id': 'caller', 'session': 'test'}]})),
             subprocess.CompletedProcess([], 0, json.dumps({'tui_attached': True})),
             subprocess.CompletedProcess([], 0, json.dumps(listing)),
         ])
@@ -230,7 +273,7 @@ class ContextClientTests(Fixture):
     def test_old_listener_requires_restart_without_client_allocation(self):
         import asyncio
         env = {'TUIOS_ENV': '1', 'TUIOS_PANE_ID': 'caller', 'TUIOS_SESSION': 'test'}
-        with patch.dict(os.environ, env), patch.object(app, 'checked_context', return_value={}), \
+        with patch.dict(os.environ, env), patch.object(app, 'checked_context', return_value={'session_name': 'test'}), \
              patch.object(app, 'endpoint', return_value={}), patch.object(app, 'rpc', new_callable=AsyncMock) as rpc:
             with self.assertRaisesRegex(app.CommsError, 'restart'):
                 asyncio.run(app.listener_context(self.paths))

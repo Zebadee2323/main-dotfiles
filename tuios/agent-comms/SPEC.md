@@ -229,7 +229,7 @@ updates for a tuios dock component.
 - Keep diagnostics off stdout; stdout is the dock's display stream.
 - Flatten multiline messages for the dock while preserving terminal wrapping in
   the standalone server display.
-- `watch --view conversation` is a separate, always-silent, pane-sized view (it
+- `watch --view convo` is a separate, always-silent, pane-sized view (it
   requires a terminal). It never claims speech; it follows the listener's shared
   presentation lifecycle (`start`, `display`, `end` events in each snapshot's
   `lifecycle` object), deduplicates by timeline/sequence, and resynchronizes to
@@ -325,8 +325,11 @@ Optional watcher speech and provider settings are documented in README.md.
 Personalities have been removed; use ordinary communication style. Runtime state
 must not be written into the checked-in source/configuration.
 
-Ownership is persisted by stable daemon namespace + pane UUID (or host + shell PID
-+ process start time) inside the allocation document. Confirmed missing panes and
+Ownership is persisted by SHA-256 of `TUIOS_PANE_ID` alone (or host + shell PID
++ process start time outside tuios) inside the allocation document. Connection
+environment is routing/cleanup metadata, never part of the pane identity key.
+Checked context lookups migrate unambiguous old daemon-scoped bindings; conflicts
+require an explicit per-pane clear rather than selecting an identity. Confirmed missing panes and
 exited shells are pruned after a seven-day grace period; failed/incomplete
 listings never prune. This is attribution, not authentication; the local
 connection token provides transport authentication. Clear commands apply to both

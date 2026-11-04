@@ -193,11 +193,13 @@ class ContextTests(unittest.TestCase):
         info = {"session_name": "work", "tui_attached": attached}
         listing = {"windows": windows, "current_workspace": current, "focused_window_id": focused}
         with patch.object(tuios_context.subprocess, "run", side_effect=[
+            subprocess.CompletedProcess([], 0, json.dumps({"success": True, "total": 1,
+                                                          "panes": [{"window_id": "own", "session": "work"}]})),
             subprocess.CompletedProcess([], 0, json.dumps(info)),
             subprocess.CompletedProcess([], 0, json.dumps(listing)),
         ]) as run:
             result = tuios_context.context("Alice", run=run, env=self.env)
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_count, 3)
         self.assertTrue(all(call.kwargs["timeout"] == 2 for call in run.call_args_list))
         return result
 

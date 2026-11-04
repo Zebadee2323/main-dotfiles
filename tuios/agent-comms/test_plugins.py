@@ -92,7 +92,7 @@ console.log(JSON.stringify(event.system));
                 self.assertIn("--name RETURNED_NAME --epoch RETURNED_EPOCH", instructions)
                 self.assertNotIn("--id", instructions)
                 self.assertIn("(`name`, `epoch`, `prefix`)", instructions)
-                self.assertIn("or another pane/agent", instructions)
+                self.assertIn("never one copied from another pane/agent", instructions)
                 self.assertIn("`agent-comms context`", instructions)
                 self.assertNotIn("--harness", instructions)
                 self.assertNotIn("--session-id", instructions)
@@ -158,6 +158,41 @@ class CodexHookTests(Fixture):
         self.assertIn('Use "Ollie" in `--tts`', outputs[0]["additionalContext"])
         self.assertFalse(self.paths.state.exists(), "instruction hooks must not allocate identities")
 
+    def test_codex_bootstrap_feeds_checked_context_and_names_pane_before_model(self):
+        pane = "startup-pane"
+        title_log = Path(self.temp.name) / "title.json"
+        tuios = Path(self.env["PATH"]) / "tuios"
+        tuios.write_text(f'''#!{sys.executable}
+import json,sys
+command=sys.argv[1]
+if command == "session-info":
+ print(json.dumps({{"tui_attached":True,"session_name":"test"}}))
+elif command == "list-windows":
+ pane={{"window_id":{pane!r},"session":"test","workspace":1,"display_name":"Codex"}}
+ print(json.dumps({{"windows":[pane],"current_workspace":1,"focused_window_id":{pane!r},
+                   "success":True,"panes":[pane],"total":1}}))
+elif command == "get-window":
+ print(json.dumps({{"success":True,"id":{pane!r},"title":"Codex","custom_name":""}}))
+elif command == "set-window":
+ open({str(title_log)!r},"w").write(json.dumps(sys.argv))
+ print("{{}}")
+''')
+        tuios.chmod(0o755)
+        self.env.update(TUIOS_ENV="1", TUIOS_PANE_ID=pane, TUIOS_SESSION="test",
+                        TUIOS_SOCKET="/nonexistent/startup-test.sock")
+        self.start_server()
+        result = self.invoke({"session_id": "codex-thread", "source": "startup"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("## Checked local startup context", text)
+        self.assertIn("do not run context again just to initialize", text)
+        self.assertIn('"epoch":', text)
+        self.assertIn('"prefix":', text)
+        state = json.loads((self.paths.state / "allocation.json").read_text())
+        binding = next(iter(state["bindings"].values()))
+        self.assertIn(f'"name": "{binding["name"]}"', text)
+        self.assertEqual(json.loads(title_log.read_text())[-1], f'[{binding["name"]}] Codex')
+
     def test_bad_input_and_missing_launcher_are_advisory(self):
         result = self.invoke({})
         self.assertEqual(result.returncode, 0)
@@ -188,6 +223,10 @@ class InstallerTests(Fixture):
         install_plugins.install_opencode(config)
         loader = (config / "plugins/agent-comms/index.js").read_text()
         self.assertIn((ROOT / "plugins/opencode/index.js").as_uri(), loader)
+        tui = (config / "plugins/agent-comms/tui.js").read_text()
+        self.assertIn((ROOT / "plugins/opencode/tui.js").as_uri(), tui)
+        package = json.loads((config / "plugins/agent-comms/package.json").read_text())
+        self.assertEqual(package["exports"]["./tui"], "./tui.js")
         self.assertEqual(existing.read_text(), "user plugin")
 
     def test_opencode_installer_does_not_overwrite_unfamiliar_plugin(self):
