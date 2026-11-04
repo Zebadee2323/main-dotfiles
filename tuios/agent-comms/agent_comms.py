@@ -46,7 +46,8 @@ VERSION = 3
 PREFIX_POLICY = "explicit"
 CAPABILITIES = {"prefix_policy": PREFIX_POLICY, "spatial_prefix": True, "audio_control": True,
                 "pane_identity": True, "pane_identity_clear": True, "shell_identity": True, "queue_preview": True, "tree_navigation": True, "log_view": True,
-                "name_identity": True, "conversation_view": True, "presentation_lifecycle": True, "tree_view": True}
+                "name_identity": True, "conversation_view": True, "presentation_lifecycle": True, "tree_view": True,
+                "inline_agent_role": True}
 MAX_FRAME = 65536
 MAX_MESSAGE = 8192
 QUEUE_LIMIT = 256
@@ -534,7 +535,7 @@ def source_session(source):
     return None
 
 
-def pane_binding(paths, config, *, allocate=True, clear=False, env=None, session=None):
+def pane_binding(paths, config, *, allocate=True, clear=False, env=None, session=None, agent_role=None):
     """Return (epoch, binding) for the verified owner, or a clear result.
 
     Without allocation, read the store lock-free: sending must never mkdir,
@@ -547,7 +548,8 @@ def pane_binding(paths, config, *, allocate=True, clear=False, env=None, session
         if not allocate:
             return pane_identity.lookup(paths, env)
         return pane_identity.resolve(paths, config, private_dir=private_dir, lock=FileLock,
-                                     atomic_json=atomic_json, error=CommsError, env=env, session=session)
+                                     atomic_json=atomic_json, error=CommsError, env=env, session=session,
+                                     agent_role=agent_role)
     except allocation.MissingBinding as exc:
         raise ContextMismatch(f"{exc} Message was not queued.") from None
     except ValueError as exc:
@@ -561,10 +563,20 @@ def checked_context(env=None):
         raise CommsError(str(exc)) from None
 
 
-def identify(paths, config, env=None):
+def validate_agent_role(value):
+    if value is not None and value != "":
+        try:
+            tree_view.text(value, "Role")
+        except ValueError as exc:
+            raise CommsError(str(exc)) from None
+    return value
+
+
+def identify(paths, config, env=None, *, agent_role=None):
     # Verify pane presence/focus before persisting any allocation.
     source = checked_context(env) if env is not None else checked_context()
     epoch, binding = pane_binding(paths, config, session=source_session(source),
+                                  agent_role=validate_agent_role(agent_role),
                                   **({"env": env} if env is not None else {}))
     name = binding["name"]
     prefix = expected_prefix(config, name, source)
@@ -620,7 +632,7 @@ def require_capability(info, flag, message):
         raise CommsError(message)
 
 
-async def listener_context(paths, *, clear=False):
+async def listener_context(paths, *, clear=False, agent_role=None):
     env = {k: os.environ[k] for k in PANE_ENV_KEYS if k in os.environ}
     standalone = env.get("TUIOS_ENV") != "1"
     if standalone:
@@ -637,6 +649,10 @@ async def listener_context(paths, *, clear=False):
         require_capability(info, "shell_identity", "Listener predates standalone shell identities; restart 'agent-comms serve'.")
     require_capability(info, "pane_identity", "Listener predates sandbox-compatible identity lookup; restart 'agent-comms serve'.")
     require_capability(info, "name_identity", "Listener predates generated agent names; restart 'agent-comms serve'.")
+    if agent_role is not None:
+        validate_agent_role(agent_role)
+        require_capability(info, "inline_agent_role", "Restart agent-comms listener to enable --agent-role.")
+        payload["agent_role"] = agent_role
     if clear:
         return (await rpc(paths, "clear-context", **payload))["result"]
     identity = (await rpc(paths, "context", **payload))["identity"]
@@ -898,6 +914,8 @@ async def send(paths: Paths, name: str, epoch: str, message: str, tts=None, sour
         raise CommsError("Listener predates spatial prefixes; restart 'agent-comms serve'. Message was not queued.")
     require_capability(info, "name_identity", "Listener predates generated agent names; restart "
                        "'agent-comms serve'. Message was not queued.")
+    if (display or {}).get("agent_role") is not None:
+        require_capability(info, "inline_agent_role", "Restart agent-comms listener to enable --agent-role. Message was not queued.")
     pane_env = {key: os.environ[key] for key in PANE_ENV_KEYS if os.environ.get(key)}
     owner = {"pane_env": pane_env} if pane_env.get("TUIOS_ENV") == "1" else {"shell_pid": os.getpid()}
     return await rpc(paths, "send", name=name, epoch=epoch, msg=message, tts=tts, source=source,
@@ -1501,6 +1519,9 @@ class Server:
                     find_message=self.find_message)
             except conversation.ConversationError as exc:
                 raise CommsError(f"{exc} Message was not queued.") from None
+            agent_role = validate_agent_role(request.get("agent_role"))
+            if agent_role is not None:
+                binding["agent_role"] = agent_role
             message["agent_role"] = binding.get("agent_role", "")
             self.presentation = tree_view.presentation(state)
             message.update(uid=uid, message_id=uid, created_at=datetime.now(timezone.utc).isoformat(),
@@ -1720,9 +1741,13 @@ class Server:
                 env = await asyncio.to_thread(request_owner_env, request)
                 # File locks and tuios queries must not stall speech/watch clients.
                 try:
-                    identity = await asyncio.to_thread(identify, self.paths, self.config, env)
+                    identity = await asyncio.to_thread(identify, self.paths, self.config, env,
+                                                       agent_role=request.get("agent_role"))
                 except (CommsError, OSError) as exc:
                     raise CommsError(f"Listener identity lookup failed: {exc}") from None
+                if request.get("agent_role") is not None:
+                    self.presentation = tree_view.presentation(allocation.read_state(self.paths.state))
+                    self.broadcast(presentation_only=True)
                 await write_frame(writer, {"ok": True, "protocol_version": VERSION, "identity": identity})
             elif request.get("command") == "shell-binding":
                 if "shell_pid" not in request:
@@ -1903,6 +1928,7 @@ def parser():
     identity_actions.add_argument("--refill", action="store_true", help=argparse.SUPPRESS)  # Retired; reports guidance.
     identity_actions.add_argument("--clear", action="store_true", help="Release the current pane or shell's name; the next context gets a fresh name")
     identity_actions.add_argument("--clear-all", action="store_true", help="Release all pane and shell bindings; issued names stay spent")
+    identity.add_argument("--agent-role", help="Set your persistent role during lookup; empty string clears it")
     bags = subs.add_parser("bags", help="Inspect or explicitly reset the name and voice bags")
     bag_actions = bags.add_subparsers(dest="action", required=True)
     bag_status = bag_actions.add_parser("status", help="Show generation, remaining bag sizes, and bindings as JSON")
@@ -1912,7 +1938,7 @@ def parser():
     review.add_argument("--all", action="store_true", help="Audition all active voice profiles, including approved voices")
     serve_parser = subs.add_parser("serve", help="Run the single per-user listener")
     serve_parser.add_argument("--quiet", action="store_true", help="Disable the standalone terminal display")
-    service = subs.add_parser("service", help="Manage the per-user OS service (macOS launchd / Windows Task Scheduler)")
+    service = subs.add_parser("service", help="Manage the per-user OS service (launchd / systemd / Task Scheduler)")
     restart = subs.add_parser("restart", help="Reload watchers, optionally restarting the listener service first")
     restart.add_argument("scope", choices=("all", "watchers"), nargs="?", default="all")
     actions = service.add_subparsers(dest="action", required=True)
@@ -1935,6 +1961,7 @@ def parser():
                              help="Displayed recipient only; does not route or deliver the message. "
                                   "Defaults to the configured user.")
     send_parser.add_argument("--role", choices=conversation.ROLES, help="Your side of the displayed exchange (default: requester)")
+    send_parser.add_argument("--agent-role", help="Set your persistent role with an accepted message; empty string clears it")
     send_parser.add_argument("--kind", choices=conversation.KINDS, help="Displayed message kind (default: statement)")
     send_parser.add_argument("--emotion", help=f"Displayed expression: {', '.join(conversation.FACES)} (default: neutral)")
     send_parser.add_argument("--reply-to", metavar="MESSAGE_ID", help="Continue the displayed exchange of an accepted message")
@@ -1970,6 +1997,8 @@ def parser():
     history.add_argument("--no-color", action="store_true", help="Disable history heading colors")
     instructions = subs.add_parser("instructions", help="Print shared communication instructions without allocating identity")
     instructions.add_argument("--format", choices=("json", "text"), default="json")
+    instructions.add_argument("--bootstrap", action="store_true", help="Also resolve the local caller's context for startup hooks")
+    instructions.add_argument("--startup-scope", action="store_true", help="Include a non-secret listener fingerprint without resolving identity")
     role = subs.add_parser("role", help="Set your persistent display role (independent of send --role)")
     role.add_argument("value", nargs="?")
     role.add_argument("--clear", action="store_true")
@@ -2031,6 +2060,10 @@ def main(argv=None):
     args = parser().parse_args(argv)
     try:
         paths = Paths.resolve(args)
+        if args.command == "context" and args.agent_role is not None:
+            if args.clear or args.clear_all or args.refill:
+                raise CommsError("--agent-role cannot be combined with context clearing or refill.")
+            validate_agent_role(args.agent_role)
         restart_all = args.command == "restart" and args.scope == "all"
         if restart_all:
             args.command, args.action = "service", "restart"
@@ -2160,7 +2193,7 @@ def main(argv=None):
                 if args.clear:
                     print(json.dumps(asyncio.run(listener_context(paths, clear=True)), ensure_ascii=True, separators=(",", ":")))
                 else:
-                    print(json.dumps(asyncio.run(listener_context(paths)), ensure_ascii=True, separators=(",", ":")))
+                    print(json.dumps(asyncio.run(listener_context(paths, agent_role=args.agent_role)), ensure_ascii=True, separators=(",", ":")))
             elif args.command in ("role", "tree"):
                 env = {k: os.environ[k] for k in PANE_ENV_KEYS if k in os.environ}
                 owner = {"pane_env": env} if env.get("TUIOS_ENV") == "1" else {"shell_pid": os.getpid()}
@@ -2195,6 +2228,8 @@ def main(argv=None):
                 expected = args.name if args.name is not None else args.id
                 display = {"display_recipient": args.display_recipient, "role": args.role, "kind": args.kind,
                            "emotion": args.emotion, "reply_to": args.reply_to}
+                if args.agent_role is not None:
+                    display["agent_role"] = validate_agent_role(args.agent_role)
                 try:
                     conversation.validate_request(display)
                 except conversation.ConversationError as exc:
@@ -2239,6 +2274,30 @@ def main(argv=None):
                     handler.close()
             elif args.command == "instructions":
                 assignment = {"instructions": communication_instructions(config)}
+                if args.bootstrap or args.startup_scope:
+                    try:
+                        # Prove that terminal and model server use the same
+                        # listener without sending its transport credential.
+                        token = endpoint(paths)["token"]
+                        assignment["listener"] = hashlib.sha256(token.encode()).hexdigest()
+                    except (CommsError, OSError):
+                        pass
+                if args.bootstrap:
+                    try:
+                        identity = asyncio.run(listener_context(paths))
+                        assignment.update(identity=identity, owner=pane_identity.owner()[0])
+                        snapshot = ("## Checked local startup context\n\n"
+                                    "The local startup hook ran agent-comms context in this terminal before the model started. "
+                                    "This is a successful same-pane/same-shell lookup, not another agent's identity. "
+                                    "Reuse this result immediately; do not run context again just to initialize. "
+                                    "It is a startup snapshot: later checked context or send mismatch results take precedence. "
+                                    "Never reuse it in a child agent, another pane, or another shell.\n\n"
+                                    + json.dumps(identity, ensure_ascii=True))
+                        assignment["instructions"] = snapshot + "\n\n" + assignment["instructions"]
+                    except (CommsError, OSError, ValueError, asyncio.TimeoutError):
+                        # Keep ordinary lookup instructions usable if startup
+                        # cannot reach the listener. Never auto-start a service.
+                        print("agent-comms: startup context unavailable; use a tool context lookup.", file=sys.stderr)
                 print(assignment["instructions"] if args.format == "text" else json.dumps(assignment, ensure_ascii=True))
         return 0
     except BrokenPipeError:

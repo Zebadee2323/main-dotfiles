@@ -79,10 +79,10 @@ $message = if ($prefix) { "$prefix Hello from Windows!" } else { "Hello from Win
 | `watch --view conversation [--no-animation] [--no-color]` | Silent, pane-sized view of who is speaking to whom. |
 | `instructions --format text` | Render shared messaging instructions only; never allocate a name. |
 
-`instructions --format text` prints just the instruction block. Both plugins use this
-helper to require an initial, argument-free `context` call and checked
-`--name`/`--epoch` on sends. Instructions contain no assigned name or epoch; those
-come from the caller's tool environment.
+`instructions --format text` prints just the instruction block without allocating
+identity. Startup hooks use `instructions --bootstrap` to add a checked local
+context snapshot when available; otherwise the model performs its own lookup.
+Sends always validate the supplied `--name`/`--epoch` against the actual caller.
 The old `id`, `prefix`, and session-allocation commands have been removed.
 
 Successful sends print `Estimated total time: N.N seconds (approximate).`
@@ -1403,23 +1403,35 @@ moving the checkout on a machine; the checked-in plugin contains no absolute
 dotfiles path. OpenCode discovers the loader automatically. Use `/reload` to
 reload plugins and the revised Naia instructions in an already-open session.
 
-The server plugin injects instructions through the V2 session `context` hook,
-before the **first agent-loop model request**, including new sessions created
-inside the TUI. Empty sessions and title-generation requests do not consume names.
-Each tool continuation and post-compaction agent-loop request receives the same
-lookup instructions. Concurrent initialization is coalesced. A bounded
-128-session cache stores **instructions only**, never a name, epoch, or prefix.
-The agent's pre-send `context` call runs in the actual pane's tool environment, rather
-than attributing shared-server plugin processes to the wrong pane. Reload after
-changing the communication template. Metadata is read fresh by `context`.
+The terminal-side plugin runs a checked local `context` lookup during startup,
+even on the home screen before the first prompt. This allocates/reuses the pane's
+name and prefixes its tuios title with `[Name]`. Rerun the installer once to add
+the terminal loader to an existing installation, then use `/reload`.
+
+The terminal passes that checked snapshot to the server over plugin RPC when a
+root session is opened. The server injects it alongside instructions through the
+V2 session `context` hook, before the first agent-loop model request. The model
+can reuse `name`, `epoch`, and `prefix` immediately without its own context call.
+Later checked tool results take precedence over this startup snapshot, including
+after compaction. Headless/server-only sessions still receive lookup instructions.
+
+The shared server never resolves **its own** pane identity. Startup snapshots are
+held in a separate bounded, in-memory 128-session cache, never durable session
+instructions or child-agent inheritance. The server rejects child sessions and
+snapshots from a different listener (compared via non-secret SHA-256 fingerprints,
+not transport tokens). If different pane/shell owners open the same conversation,
+its snapshot is suppressed for that plugin lifetime rather than guessing. The
+model then uses a normal tool context lookup. Concurrent instruction initialization
+is coalesced. Reload after changing the communication template.
 
 The plugin uses `python3` on POSIX and `py -3` on Windows. Set
 `AGENT_COMMS_PYTHON` to an executable path (not a shell command) to override it, or
 configure the plugin's `python` option. It invokes the helper as an argument
 vector, never interpolating session IDs into shell commands. Identity setup
 failures are advisory, logged once, and retried no more often than every 30
-seconds for that session. The plugin runs on the **OpenCode server**. The v1
-integration assumes the listener and server are on the same machine.
+seconds for that session. Startup lookup runs in the **terminal client**; instruction
+injection runs on the **OpenCode server**. Remote or missing-listener startup
+snapshots are not injected, and no service is automatically started.
 
 ### Codex
 
@@ -1429,6 +1441,11 @@ CLI. The adapter is packaged under `plugins/codex/`; its `SessionStart` hook
 returns `hookSpecificOutput.additionalContext` for `startup`, `resume`, `clear`,
 `compact`, and `fork` events. It resolves the canonical helper through the
 installed launcher, even when Codex runs a cached copy of the plugin.
+The hook uses `instructions --bootstrap` to resolve context in the launching
+terminal before the model processes a prompt, prefix the tuios title, and include
+the checked `name`/`epoch`/`prefix` in `additionalContext`. The model should reuse
+it rather than make a redundant initial lookup. Startup context failures retain
+ordinary lookup instructions; they never start a service or block Codex.
 
 **Required manual step:** in Codex, open `/hooks`, review the agent-comms
 SessionStart command, and trust it. Installation/enabling does not imply trust.
@@ -1550,8 +1567,9 @@ Codex shell commands with `workspace-write` and `network_access = false` cannot
 connect to the listener's localhost TCP port, even when the listener is healthy.
 The CLI reports this as a permissions/sandbox block, not an offline listener.
 Restarting the listener does not fix that restriction. Both normal name
-lookup and sending require localhost access; the SessionStart hook only supplies
-instructions and does not allocate names.
+lookup and sending require localhost access. A successful SessionStart hook may
+supply checked startup context, but that does not grant the model's later tool
+calls any additional network access or sandbox permissions.
 
 Use Codex's normal approval flow for any additional access. Do not automatically
 enable general networking, bypass the sandbox, auto-approve commands, or silently
@@ -1640,6 +1658,11 @@ allocates its new name.
 ### Named tree watcher and persistent roles
 
 `agent-comms role 'worker'` sets your own display role; `role --clear` removes it.
+You can avoid a separate setup call with `agent-comms context --agent-role worker`
+or `agent-comms send --agent-role worker ...`. Empty string clears the role; omitting
+the flag preserves it. On send, the role changes only if the message is accepted
+and is included in that message's role snapshot. Invalid/stale sends cannot change
+it. This is independent of the exchange's `send --role requester|responder`.
 Roles appear in conversation and tree views, independently of `send --role`.
 Publish a JSON node array with `agent-comms tree set RUN --file tree.json`, then
 open `agent-comms watch --view tree --tree RUN` in a terminal. Example array:

@@ -104,7 +104,8 @@ def lookup(paths, env=None):
     return allocation.Store(paths.state, lock=None, atomic_json=None).binding(key)
 
 
-def resolve(paths, config, *, private_dir, lock, atomic_json, error, clear=False, env=None, rng=None, session=None):
+def resolve(paths, config, *, private_dir, lock, atomic_json, error, clear=False, env=None, rng=None, session=None,
+            agent_role=None):
     """Return the owner's binding (allocating on first use) as (epoch, record)."""
     key, daemon, pane = owner(env)
 
@@ -130,6 +131,8 @@ def resolve(paths, config, *, private_dir, lock, atomic_json, error, clear=False
         saved.pop("missing_since", None)
         if isinstance(session, str) and session:
             saved["session_name"] = session  # Last verified tuios session, for display only.
+        if agent_role is not None:
+            saved["agent_role"] = agent_role
         return state["epoch"], dict(saved)
 
     target = store(paths, lock=lock, atomic_json=atomic_json, private_dir=private_dir)

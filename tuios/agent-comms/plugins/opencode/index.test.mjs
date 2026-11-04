@@ -16,7 +16,7 @@ test("appends context without replacing existing instructions or duplicating its
   const calls = []
   const hook = await harness(async (python, args, options) => {
     calls.push({ python, args, options })
-    return { stdout: "Look up agent-comms context once; send with --name RETURNED_NAME --epoch RETURNED_EPOCH.\nAlways close every turn with agent-comms send." }
+    return { stdout: JSON.stringify({ instructions: "Look up agent-comms context once; send with --name RETURNED_NAME --epoch RETURNED_EPOCH.\nAlways close every turn with agent-comms send." }) }
   })
   const original = { type: "text", text: "Existing system instructions" }
   const event = { sessionID: "ses_test", system: [original] }
@@ -37,7 +37,7 @@ test("coalesces concurrent initialization, handles new sessions and post-compact
   const hook = await harness(async (_, args) => {
     calls++
     await new Promise(resolve => setImmediate(resolve))
-    return { stdout: "Always call agent-comms context before sending." }
+    return { stdout: JSON.stringify({ instructions: "Reuse checked startup context, or look it up before sending." }) }
   })
   const one = { sessionID: "ses_one", system: [] }
   const two = { sessionID: "ses_one", system: [] }

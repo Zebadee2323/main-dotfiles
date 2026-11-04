@@ -16,10 +16,16 @@ def install_opencode(config_dir):
     entry = target / "index.js"
     if any(target.iterdir()) and (not entry.exists() or not entry.read_text(encoding="utf-8").startswith(MARKER)):
         raise RuntimeError(f"Refusing to overwrite an unrelated plugin: {target}")
+    tui_entry = target / "tui.js"
+    if tui_entry.exists() and not tui_entry.read_text(encoding="utf-8").startswith(MARKER):
+        raise RuntimeError(f"Refusing to overwrite an unrelated terminal plugin: {tui_entry}")
     source = (ROOT / "plugins/opencode/index.js").as_uri()
     entry.write_text(f"{MARKER}\nexport {{ default }} from {json.dumps(source)};\n", encoding="utf-8")
+    tui = (ROOT / "plugins/opencode/tui.js").as_uri()
+    tui_entry.write_text(f"{MARKER}\nexport {{ default }} from {json.dumps(tui)};\n", encoding="utf-8")
     (target / "package.json").write_text(json.dumps({
         "name": "opencode-agent-comms-local", "private": True, "type": "module",
+        "exports": {".": "./index.js", "./tui": "./tui.js"},
     }, indent=2) + "\n", encoding="utf-8")
     print(f"OpenCode V2 loader installed: {target}")
 

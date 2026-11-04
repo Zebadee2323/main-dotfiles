@@ -274,6 +274,7 @@ show_ram = true
 [appearance.sidebar]
 position = "left"
 enabled = false
+sections = "sessions,agents:34"
 
 [spotlight]
 enabled = false

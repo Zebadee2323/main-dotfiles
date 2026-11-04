@@ -25,10 +25,10 @@ def main():
         session_id = event.get("session_id")
         if not isinstance(session_id, str) or not session_id:
             raise ValueError("Missing session ID")
-        command = [sys.executable, str(resolve_helper()), "instructions"]
+        command = [sys.executable, str(resolve_helper()), "instructions", "--bootstrap"]
         result = subprocess.run(command, capture_output=True, encoding="utf-8", timeout=12, check=True)
-        # This helper renders lookup instructions only; identity is resolved by
-        # the agent in its actual tool process before every announcement.
+        # The hook runs in the launching terminal, not a shared model server.
+        # Its checked context also prefixes that terminal's tuios pane title.
         instructions = json.loads(result.stdout)["instructions"]
         if not isinstance(instructions, str) or not instructions.strip():
             raise ValueError("Empty instructions")

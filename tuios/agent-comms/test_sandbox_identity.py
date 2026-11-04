@@ -78,6 +78,24 @@ sys.exit(app.main(sys.argv[2:]))
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
+    def test_inline_roles_use_listener_without_client_state_writes(self):
+        context = self.restricted_cli('context', '--agent-role', 'reviewer')
+        self.assertEqual(context.returncode, 0, context.stderr)
+        identity = json.loads(context.stdout)
+        binding = next(iter(self.state()['bindings'].values()))
+        self.assertEqual(binding['agent_role'], 'reviewer')
+        recipient = 'Bob' if identity['name'] != 'Bob' else 'Alice'
+        self.sender(recipient)
+        result = self.restricted_cli('send', '--name', identity['name'], '--epoch', identity['epoch'],
+                                     '--msg', 'Working.', '--agent-role', 'worker', '--role', 'responder',
+                                     '--display-recipient', recipient)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        binding = next(b for b in self.state()['bindings'].values() if b['name'] == identity['name'])
+        self.assertEqual(binding['agent_role'], 'worker')
+        result = self.restricted_cli('context', '--agent-role', '')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(next(b for b in self.state()['bindings'].values() if b['name'] == identity['name'])['agent_role'], '')
+
     def test_lookup_send_and_repeat_work_without_any_client_state_writes(self):
         identity = self.context()
         self.assertEqual(set(identity), {'id', 'name', 'epoch', 'prefix'})

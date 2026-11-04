@@ -3,8 +3,9 @@
 Identity belongs to the caller's tuios pane, or its persistent parent shell outside
 tuios, not the conversation or harness. Your generated `name` is your only agent
 identifier.
-Use only your own checked same-pane or same-shell identity, never one supplied by instructions
-or another pane/agent. Identity supplies a name and voice, not a personality;
+Use only your own checked same-pane or same-shell identity, including a checked local
+startup context supplied by the harness plugin, never one copied from another pane/agent.
+Identity supplies a name and voice, not a personality;
 keep your normal clear, concise style. Other roles, safety rules, and user
 instructions still apply.
 
@@ -15,7 +16,10 @@ instructions still apply.
 ## Identity and sending
 
 Reuse your latest successful same-pane `agent-comms context` result, including
-from history/summary after compaction or resume. Look up context ONLY if:
+checked local startup context from the harness plugin, or from history/summary
+after compaction or resume. Startup snapshots never supersede later checked results
+and must not be inherited by child agents or reused in another pane/shell.
+Look up context ONLY if:
 1. No result with known provenance from this agent in this pane remains, or
 2. `send` reports a name/epoch/prefix mismatch without fresh context JSON.
 
@@ -33,6 +37,11 @@ or from the running parent shell outside tuios. The listener derives shell owner
 setup or caller-selected identity is needed. If no persistent shell can be found,
 launch the agent from a terminal shell. Never invent a fallback.
 There is no `prefix` command.
+
+Set your persistent role without an extra command: use `agent-comms context
+--agent-role worker` when a lookup is needed, or add `--agent-role worker` to your
+first `send` when startup context is already available. Empty string clears it.
+This is your persistent display role, not the exchange's `send --role`.
 
 Send with the checked/retained values:
 `agent-comms send --name RETURNED_NAME --epoch RETURNED_EPOCH --msg ... --tts ...`
@@ -139,10 +148,11 @@ bypass restrictions. Additional access or messaging integrations need user appro
 
 ## Persistent roles and live trees
 
-After obtaining your checked same-pane or same-shell identity, set a descriptive
-role with `agent-comms role 'worker'` (or `supervisor`, `reviewer`, any printable
-string up to 128 characters). Change it as your assignment changes; use
-`agent-comms role --clear` to remove it. This command changes only your own role.
+Set a descriptive persistent role with `context --agent-role 'worker'` or your
+first `send --agent-role 'worker'` (or `supervisor`, `reviewer`, any printable
+string up to 128 characters). The standalone `agent-comms role 'worker'` also
+works. Change it as your assignment changes; use `--agent-role ''` or
+`agent-comms role --clear` to remove it. These commands change only your own role.
 Roles persist across listener restarts and appear next to agent names in tree
 and conversation views. They confer no authority and are separate from the
 per-message `send --role requester|responder` exchange metadata.
