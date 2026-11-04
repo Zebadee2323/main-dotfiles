@@ -190,7 +190,7 @@ class ServiceTests(Fixture):
 
     def test_unsupported_platform_is_explicit_but_hook_can_skip(self):
         args = SimpleNamespace(action="start", if_installed=True)
-        with patch.object(service.sys, "platform", "linux"):
+        with patch.object(service.sys, "platform", "freebsd"):
             self.assertIn("skipped", service.manage(args, self.paths, private_dir=Mock(), lock=Mock(), busy=Mock(), health=Mock()))
             args.if_installed = False
             with self.assertRaisesRegex(service.ServiceError, "macOS"):
