@@ -177,13 +177,16 @@ class LaunchAgent:
 
 
 def manage(args, paths, *, private_dir, lock, busy, health, probe=None):
-    if sys.platform not in ("darwin", "win32"):
+    if sys.platform not in ("darwin", "win32", "linux"):
         if args.action == "start" and args.if_installed:
             return "Service backend unavailable on this platform; skipped."
-        raise ServiceError("Service management supports macOS launchd and Windows Task Scheduler. Use 'serve' on other platforms.")
+        raise ServiceError("Service management supports macOS launchd, Linux systemd user services, and Windows Task Scheduler. Use 'serve' on other platforms.")
     if sys.platform == "win32":
         from windows_service import ScheduledTask
         manager = ScheduledTask(paths, probe=probe)
+    elif sys.platform == "linux":
+        from linux_service import SystemdUser
+        manager = SystemdUser(paths)
     else:
         manager = LaunchAgent(paths)
     if args.action == "status":

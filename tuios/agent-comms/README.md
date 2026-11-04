@@ -64,7 +64,7 @@ $message = if ($prefix) { "$prefix Hello from Windows!" } else { "Hello from Win
 | `voice-review --all` | Audition every active voice profile, including already-approved ones. |
 | `serve` | Own the singleton listener, timed FIFO queue, and terminal display. |
 | `serve --quiet` | Same listener without terminal display. |
-| `service install/start/stop/restart/status/logs/uninstall` | Manage the per-user macOS LaunchAgent or experimental Windows scheduled task; see below. |
+| `service install/start/stop/restart/status/logs/uninstall` | Manage the per-user macOS LaunchAgent, Linux systemd user unit, or experimental Windows scheduled task; see below. |
 | `send --name NAME --epoch EPOCH --msg TEXT --tts SPEECH` | Verify the expected name and epoch against the pane or shell binding, save and queue text; print approximate total time and the message ID. `--id` is a deprecated alias for `--name`. Optional display metadata: see [Conversation view](#conversation-view). |
 | `history` | Show readable, wrapped history with timestamps and sender/session headings, even offline. Colors appear only in a terminal (respecting `NO_COLOR` / `--no-color`). |
 | `history --raw` | Print unstyled, one-line timestamp/name/message records. |
@@ -1242,7 +1242,7 @@ Python installation in place. After moving/upgrading them, stop, install, and
 start again. No API keys or pane environment are copied into the job; speech
 still runs in the credential-bearing dock watcher, not the global listener.
 Commands using different config/state/runtime overrides refuse to manage an
-existing job for other paths. Linux still uses foreground `serve`; Windows has
+existing job for other paths. Linux uses the systemd user backend; Windows has
 the experimental Task Scheduler backend described below.
 
 Lifecycle logs live in `STATE/logs/server.log` (2 MB, three rotated backups).
@@ -1266,6 +1266,36 @@ tuios attach; uninstall to disable both automatic starts. New clients read the
 hook from configuration; no tuios daemon restart is required for this client-side
 hook. Use service status/logs to diagnose startup failures. Existing dock watchers
 reconnect automatically.
+
+### Persistent Linux service
+
+Requires systemd and a working user session (`systemctl --user`); no sudo is used.
+After updating this checkout on Linux:
+
+```sh
+agent-comms service install
+agent-comms service start
+agent-comms service status
+agent-comms service logs --follow
+```
+
+Installation writes `$XDG_CONFIG_HOME/systemd/user/com.agent-comms.server.service`
+(default `~/.config/systemd/user/`) and enables it for future user logins. It does
+not start the listener until `service start` or the next login/tuios attach.
+The unit pins Python, the source script, and config/state/runtime paths; no caller
+credentials or pane identity are written to it. Paths with spaces are supported.
+systemd owns the listener and restarts it after exit with a 10-second delay.
+`start` checks authenticated readiness without restarting a healthy listener,
+and refuses to replace a manually started listener.
+
+The same stop/restart/uninstall commands apply. Explicit stop suppresses automatic
+restart until the next login or tuios attach. Uninstall disables and removes only
+the managed unit, preserving history, identities, and logs. `service logs` reads
+the user journal, including early startup failures; lifecycle logs also remain in
+`STATE/logs/server.log`. After moving the checkout or Python, stop/install/start
+again. A missing user bus or systemd installation is reported, not bypassed with
+a background process. Staying alive after logout requires a separately configured
+lingering user session; these commands do not enable lingering or elevate privileges.
 
 ### Experimental Windows service
 
