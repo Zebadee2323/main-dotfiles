@@ -1,0 +1,5 @@
+interface:
+  display_name: "Git Commit (Auto)"
+  short_description: "Stage and commit changes automatically without confirmation"
+  icon: "terminal"
+  color: "#F05032"
