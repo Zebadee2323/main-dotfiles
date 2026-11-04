@@ -76,7 +76,7 @@ $message = if ($prefix) { "$prefix Hello from Windows!" } else { "Hello from Win
 | `watch --no-color --width 80` | Plain-text output, at most 80 display cells. |
 | `watch --no-vfx --no-flash` | Steady captions without delivery animation or arrival flashes. |
 | `watch --mute --no-flash` | Disable speech generation/playback and the attention flash. |
-| `watch --view conversation [--no-animation] [--no-color]` | Silent, pane-sized view of who is speaking to whom. |
+| `watch --view convo [--no-animation] [--no-color]` | Silent, pane-sized view of who is speaking to whom. |
 | `instructions --format text` | Render shared messaging instructions only; never allocate a name. |
 
 `instructions --format text` prints just the instruction block without allocating
@@ -948,13 +948,17 @@ A silent, pane-sized view that shows who is talking to whom, alongside the norma
 caption watcher:
 
 ```sh
-agent-comms watch --view conversation
-agent-comms watch --view conversation --no-animation --no-color
+agent-comms watch --view convo
+agent-comms watch --view convo --no-animation --no-color
 ```
 
 Run it in its own tuios pane: for example, split a narrow pane beside your agents
 (or open one in a spare workspace) and start the command there. The default
 `watch` (`--view captions`) is unchanged and remains the dock view.
+The selector is `convo`, not `conversation`. The `convo`, `tree`, and `log`
+watchers share the same top-left `◉ agent-comms` header, view label, and
+right-aligned activity/status styling, including compact layouts. Tree titles
+remain alongside the `tree` label in that header.
 
 - **Always silent.** It never claims, synthesizes, or plays speech; `--mute` is
   accepted but has no effect, and it does not change shared mute or volume. Keep a
@@ -1457,13 +1461,28 @@ must be available locally; this is not a cloud-orchestrated Work integration.
 
 ### Ownership and cleanup
 
-Inside tuios, `state/allocation.json` maps **daemon + pane UUID** to a binding
+Inside tuios, `state/allocation.json` maps **TUIOS_PANE_ID alone** (SHA-256 hashed) to a binding
 (name, gender, generation, voice profile ID, and voice snapshot) under the
-allocation lock. The daemon key hashes the stable host/socket path (or named
-server fallback), never a PID or secret token. Workspace/session moves, harness
-switches, forks in the same pane, and process restarts reuse the binding.
+allocation lock. Host, socket, server, session, and workspace changes do not change
+identity. `TUIOS_WINDOW_ID` is not an identity fallback. Daemon connection details
+are retained only as routing/cleanup metadata and refreshed on lookup.
+Harness switches, forks in the same pane, and process restarts reuse the binding.
 Separate panes always receive distinct names; there is no roster limit, because the
 name bag refills with suffixed names and voices may be shared.
+
+After updating, restart the listener. The next checked `context` lookup migrates
+an existing daemon-scoped binding without changing its name, epoch, voice, role,
+or bags. If old connection variants left multiple bindings for the same pane ID,
+lookup refuses to guess: `context --clear` releases only that pane's conflicting
+bindings, then a new `context` obtains a fresh name. Other panes remain untouched.
+Standalone shell ownership is unchanged.
+
+Context discovery also resolves the pane's current session from an exact
+`TUIOS_PANE_ID` match in `tuios list-windows --all --json`, rather than trusting
+an inherited `TUIOS_SESSION`. Renaming a session or moving a pane therefore does
+not strand a running harness on its old session name. Layout/prefix checks and
+pane-title updates use the discovered session. Missing/ambiguous panes, incomplete
+inventories, and denied queries still fail closed; no environment is rewritten.
 
 On `context`, at most hourly per daemon, a complete successful read-only
 `tuios list-windows --all --json` snapshot checks every session, including

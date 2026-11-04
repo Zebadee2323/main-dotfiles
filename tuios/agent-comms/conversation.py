@@ -228,6 +228,34 @@ HEADER = "48;5;236;97"
 AVATAR_WIDTH = 9
 
 
+def view_header(canvas, width, label, message=None, *, offline=False, notice=None):
+    """Shared top-left identity and right-aligned activity for pane-sized views."""
+    canvas.put(0, 0, " " * width, HEADER)
+    canvas.put(1, 0, "◉ agent-comms", f"1;{HEADER}")
+    if offline or notice:
+        status, style = f"✕ {notice or 'offline'}", "1;33;48;5;236"
+    elif message:
+        status, style = ("● speaking", "1;32;48;5;236") if message.get("phase") == "displaying" \
+            else ("◌ preparing", "1;33;48;5;236")
+    else:
+        status, style = "○ idle", f"2;{HEADER}"
+    right = width - 1
+    kind = message.get("kind") if message else None
+    if kind in KINDS:
+        chip = f" {kind.upper()} "
+        right -= text_width(chip)
+        # Never let status/chips overwrite the top-left brand in narrow panes.
+        if right >= 29:
+            canvas.put(right, 0, chip, KIND_STYLES[kind])
+            right -= 2
+        else:
+            right = width - 1
+    status = fit(status, max(0, right - 29))
+    status_x = right - text_width(status)
+    canvas.put(15, 0, fit(label, max(0, status_x - 17)), f"2;{HEADER}")
+    canvas.put(status_x, 0, status, style)
+
+
 class ConversationView:
     """Pure renderer state; the listener timeline drives every message transition."""
 
@@ -304,25 +332,7 @@ class ConversationView:
         return max(0.0, min(1.0, (now - message.get("started_at", now)) / max(message.get("duration", 1), 0.01)))
 
     def header(self, canvas, width, message):
-        canvas.put(0, 0, " " * width, HEADER)
-        canvas.put(1, 0, "◉ agent-comms", f"1;{HEADER}")
-        canvas.put(15, 0, "conversation", f"2;{HEADER}")
-        if self.offline:
-            status, style = f"✕ {self.notice or 'offline'}", f"1;33;{HEADER.split(';', 2)[0]};5;236"
-        elif message:
-            status, style = ("● speaking", f"1;32;48;5;236") if message.get("phase") == "displaying" \
-                else ("◌ preparing", "1;33;48;5;236")
-        else:
-            status, style = "○ idle", f"2;{HEADER}"
-        right = width - 1
-        kind = message.get("kind") if message else None
-        if kind in KINDS:
-            chip = f" {kind.upper()} "
-            right -= text_width(chip)
-            canvas.put(right, 0, chip, KIND_STYLES[kind])
-            right -= 2
-        status = fit(status, max(0, right - 29))
-        canvas.put(right - text_width(status), 0, status, style)
+        view_header(canvas, width, "convo", message, offline=self.offline, notice=self.notice)
 
     def render(self, width, height, now):
         width, height = max(1, width), max(1, height)
@@ -463,11 +473,10 @@ class ConversationView:
     def compact(self, width, height, now):
         canvas = Canvas(width, height)
         message = self.message if not self.offline else None
-        if self.offline:
-            canvas.put(0, 0, fit(f"✕ comms: {self.notice or 'offline'}", width), "33")
+        self.header(canvas, width, message)
+        if self.offline or height < 2:
             return canvas.lines(self.color)
         if not self.exchange or not message:
-            canvas.put(0, 0, fit("○ comms: idle", width), "2")
             if self.exchange:
                 pair = f"{self.name_label(self.exchange['requester'])} · {self.name_label(self.exchange['responder'])}"
                 if height > 1:
@@ -478,16 +487,16 @@ class ConversationView:
         listener = self.exchange["responder" if speaking == "requester" else "requester"]
         kind = message.get("kind")
         head = f"{self.name_label(speaker)} ▸ {self.name_label(listener)}"
-        canvas.put(0, 0, fit(head, width), f"1;{ink(str(speaker.get('name', '')))}")
+        canvas.put(0, 1, fit(head, width), f"1;{ink(str(speaker.get('name', '')))}")
         if kind in KINDS and text_width(head) + len(kind) + 3 <= width:
-            canvas.put(width - len(kind) - 2, 0, f" {kind.upper()} ", KIND_STYLES[kind])
-        if height > 1:
+            canvas.put(width - len(kind) - 2, 1, f" {kind.upper()} ", KIND_STYLES[kind])
+        if height > 2:
             detail = f"{face(message.get('emotion'))} ◆ {self.session_label(speaker)}"
-            canvas.put(0, 1, fit(detail, width), "36")
-        rows = max(1, height - 2)
+            canvas.put(0, 2, fit(detail, width), "36")
+        rows = max(1, height - 3)
         lines = self.caption(max(1, width), rows, now)
         if message.get("phase") != "displaying":
             lines = ("…",)
         for index, text in enumerate(lines[:rows]):
-            canvas.put(0, 2 + index, fit(text, width))
+            canvas.put(0, 3 + index, fit(text, width))
         return canvas.lines(self.color)

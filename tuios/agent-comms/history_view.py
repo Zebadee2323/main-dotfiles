@@ -108,8 +108,7 @@ class LogView:
     def render(self, width, height, now):
         width, height = max(1, width), max(1, height)
         canvas = c.Canvas(width, height)
-        status = (self.notice or 'offline · reconnecting') if self.offline else 'live'
-        put(canvas, 0, 0, f'Agent communications · LOG · {status}', '1;36' if not self.offline else '33')
+        c.view_header(canvas, width, 'log', self.message, offline=self.offline, notice=self.notice)
         if height < 2:
             return canvas.lines(self.color)
         message = self.message or {}

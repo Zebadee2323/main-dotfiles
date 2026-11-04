@@ -133,9 +133,9 @@ class TreeView:
         self.hits = {}
         canvas = c.Canvas(width, height)
         tree = self.data.get("trees", {}).get(self.name)
-        status = self.notice or ("offline" if self.offline else ("live · click an agent" if tree else "waiting for tree"))
         title = (tree or {}).get("title") or self.name
-        canvas.put(0, 0, c.fit(f"{title} · {status}", width), "1")
+        c.view_header(canvas, width, f"tree · {title}", self.message,
+                      offline=self.offline, notice=self.notice)
         if not tree or height < 2:
             return canvas.lines(self.color)
         nodes = [dict(n) for n in tree["nodes"]]

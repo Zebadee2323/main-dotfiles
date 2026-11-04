@@ -63,27 +63,43 @@ def workspace_position(own, windows):
 def context(name, run=subprocess.run, env=None, strict=False):
     explicit_env = env is not None
     env = os.environ if env is None else env
-    pane = env.get("TUIOS_PANE_ID") or env.get("TUIOS_WINDOW_ID")
-    session = env.get("TUIOS_SESSION")
+    pane = env.get("TUIOS_PANE_ID")
     if env.get("TUIOS_ENV") != "1":
         return {}
-    if not pane or not session:
+    if not pane:
         if strict:
-            raise ContextError("Cannot check tuios prefix: pane/session environment is incomplete.")
+            raise ContextError("Cannot check tuios prefix: pane environment is incomplete.")
         return {}
 
-    command = "session-info"
+    command = "list-windows"
 
-    def query(name):
+    def query(name, *args):
         nonlocal command
         command = name
-        result = run([executable(env), command, "-s", session, "--json"], capture_output=True,
+        result = run([executable(env), command, *args, "--json"], capture_output=True,
                      encoding="utf-8", timeout=2, check=True, **({"env": env} if explicit_env else {}))
         return json.loads(result.stdout)
 
     try:
-        info = query("session-info")
-        listing = query("list-windows")
+        # Session names are mutable; an inherited TUIOS_SESSION can name an old
+        # or entirely different session after a rename/move. Resolve the exact
+        # pane UUID from a complete daemon inventory before querying its layout.
+        inventory = query("list-windows", "--all")
+        panes = inventory["panes"]
+        if (inventory.get("success") is not True or inventory.get("errors")
+                or not isinstance(panes, list) or type(inventory.get("total")) is not int
+                or inventory["total"] != len(panes)
+                or any(not isinstance(p, dict) or not isinstance(p.get("window_id"), str)
+                       or not isinstance(p.get("session"), str) or not p["session"] for p in panes)):
+            raise ValueError("Incomplete pane inventory")
+        matches = [p for p in panes if p["window_id"] == pane]
+        if len(matches) != 1:
+            if strict:
+                raise ContextError("Cannot check tuios prefix: sender pane was not found or is ambiguous.")
+            return {}
+        session = matches[0]["session"]
+        info = query("session-info", "-s", session)
+        listing = query("list-windows", "-s", session)
         windows = listing["windows"]
         own = next((window for window in windows if window.get("window_id") == pane), None)
         if own is None:

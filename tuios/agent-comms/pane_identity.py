@@ -26,13 +26,14 @@ def owner(env=None):
     env = os.environ if env is None else env
     if env.get("TUIOS_ENV") != "1":
         return shell_identity.owner(env.get(shell_identity.ENV_KEY) if explicit_env else None)
-    pane = env.get("TUIOS_PANE_ID") or env.get("TUIOS_WINDOW_ID")
+    pane = env.get("TUIOS_PANE_ID")
     if not pane:
         raise ValueError("tuios pane ID is missing")
-    # Socket path, never PID/token: stable across daemon and machine restarts.
+    # The pane UUID is the identity. Connection details are only an inventory
+    # scope for cleanup/navigation; changing them must not allocate a new name.
     daemon = [env.get("TUIOS_HOST", "local"), env.get("TUIOS_SOCKET") or env.get("TUIOS_SERVER", "default")]
     daemon_key = hashlib.sha256(json.dumps(daemon).encode()).hexdigest()
-    key = hashlib.sha256(json.dumps([daemon_key, pane]).encode()).hexdigest()
+    key = hashlib.sha256(pane.encode()).hexdigest()
     return key, daemon_key, pane
 
 
@@ -115,11 +116,31 @@ def resolve(paths, config, *, private_dir, lock, atomic_json, error, clear=False
         return inventory(env=env) if env is not None else inventory()
 
     def operation(state):
+        # Migrate old daemon-scoped keys on checked lookup, under the existing
+        # allocation lock. Keep the name, epoch, voice, role, and bags intact.
+        # Shell bindings retain their existing process-based identity.
+        matches = []
+        if state is not None:
+            if daemon.startswith("shell:"):
+                matches = [key] if key in state["bindings"] else []
+            else:
+                matches = [old for old, record in state["bindings"].items()
+                           if not record["daemon"].startswith("shell:") and record["pane_id"] == pane]
         if clear:
-            saved = state["bindings"].pop(key, None) if state is not None else None
-            if saved is not None:
-                allocation.retire_prefix(state, saved)
-            return {"cleared": saved is not None, "name": saved["name"] if saved else None}
+            removed = [state["bindings"].pop(old) for old in matches]
+            for record in removed:
+                allocation.retire_prefix(state, record)
+            return {"cleared": bool(removed), "name": removed[0]["name"] if len(removed) == 1 else None}
+        if len(matches) > 1:
+            raise error("Multiple saved identities exist for this TUIOS_PANE_ID. "
+                        "Run 'agent-comms context --clear' to release this pane's conflicting "
+                        "bindings, then run context again. No identity was selected.")
+        if matches and matches[0] != key:
+            state["bindings"][key] = state["bindings"].pop(matches[0])
+        saved = state["bindings"].get(key)
+        if saved is not None:
+            saved["daemon"] = daemon  # Refresh routing/cleanup metadata only.
+            saved.pop("missing_since", None)
         now = time.time()
         if now - state["scanned"].get(daemon, 0) >= SCAN_INTERVAL:
             prune(state, daemon, pane, live_owners(), now)
@@ -173,6 +194,9 @@ def update_title(paths, name, source, *, config, private_dir, lock, atomic_json,
     if env.get("TUIOS_ENV") != "1" or "pane_title" not in source:
         return
     key, _, pane = owner(env)
+    session = source.get("session_name") or env.get("TUIOS_SESSION")
+    if not isinstance(session, str) or not session:
+        raise ValueError("Pane has no verified session for naming.")
     run = subprocess.run if run is None else run
 
     def operation(state):
@@ -180,7 +204,7 @@ def update_title(paths, name, source, *, config, private_dir, lock, atomic_json,
         if saved is None or saved["name"] != name:
             raise ValueError("Pane binding changed before its name could be shown.")
         # Re-read under the lock so concurrent context calls cannot stack prefixes.
-        result = run([tuios_context.executable(env), "get-window", pane, "-s", env["TUIOS_SESSION"], "--json"],
+        result = run([tuios_context.executable(env), "get-window", pane, "-s", session, "--json"],
                      capture_output=True, encoding="utf-8", timeout=2, check=True, env=env)
         window = json.loads(result.stdout)
         identifiers = [window[field] for field in ("id", "window_id") if field in window]
@@ -197,7 +221,7 @@ def update_title(paths, name, source, *, config, private_dir, lock, atomic_json,
         pattern, retired = title_names(config, state.get("retired_title_prefixes", ()))
         updated = prefixed_title(title, prefix, previous if isinstance(previous, str) else None, retired, pattern)
         if updated != custom:
-            run([tuios_context.executable(env), "set-window", "-s", env["TUIOS_SESSION"], "-w", pane, "--name", updated],
+            run([tuios_context.executable(env), "set-window", "-s", session, "-w", pane, "--name", updated],
                 capture_output=True, encoding="utf-8", timeout=2, check=True, env=env)
         saved["title_prefix"] = prefix
 

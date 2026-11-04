@@ -50,7 +50,7 @@ class LogTests(Fixture):
             task = asyncio.create_task(app.watch_log(self.paths, color=False, animate=False,
                                                      size=lambda:(90,24), writer=output))
             try:
-                await until(lambda: 'LOG · live' in output.getvalue())
+                await until(lambda: '○ idle' in output.getvalue())
                 for text in ('first arrival', 'second arrival'):
                     _, stream = await asyncio.to_thread(self.request, 'send', **sender, msg=text)
                     self.assertTrue(json.loads(await asyncio.to_thread(stream.readline))['ok'])
@@ -61,7 +61,7 @@ class LogTests(Fixture):
                 await until(lambda: 'offline' in output.getvalue())
                 output.seek(0); output.truncate()
                 await asyncio.to_thread(self.start_server)
-                await until(lambda: 'LOG · live' in output.getvalue())
+                await until(lambda: '○ idle' in output.getvalue())
                 self.assertIn('first arrival', output.getvalue())
                 self.assertIn('second arrival', output.getvalue())
             finally:

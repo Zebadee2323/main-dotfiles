@@ -168,7 +168,7 @@ command=sys.argv[1]
 if command == "session-info":
  print(json.dumps({{"tui_attached":True,"session_name":"test"}}))
 elif command == "list-windows":
- pane={{"window_id":{pane!r},"workspace":1,"display_name":"Codex"}}
+ pane={{"window_id":{pane!r},"session":"test","workspace":1,"display_name":"Codex"}}
  print(json.dumps({{"windows":[pane],"current_workspace":1,"focused_window_id":{pane!r},
                    "success":True,"panes":[pane],"total":1}}))
 elif command == "get-window":

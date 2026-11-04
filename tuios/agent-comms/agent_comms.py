@@ -602,8 +602,7 @@ def request_pane_env(value):
     if (not isinstance(value, dict) or set(value) - PANE_ENV_KEYS
             or any(not isinstance(v, str) or not v or len(v) > 4096 or "\0" in v for v in value.values())):
         raise CommsError("Invalid pane environment.")
-    if (value.get("TUIOS_ENV") != "1" or not (value.get("TUIOS_PANE_ID") or value.get("TUIOS_WINDOW_ID"))
-            or not value.get("TUIOS_SESSION")):
+    if value.get("TUIOS_ENV") != "1" or not value.get("TUIOS_PANE_ID"):
         raise CommsError("Cannot resolve identity outside a tuios pane. No caller-selected identity or session fallback is allowed.")
     env = {k: v for k, v in os.environ.items() if not k.startswith("TUIOS_")}
     return {**env, **value}
@@ -644,6 +643,10 @@ async def listener_context(paths, *, clear=False, agent_role=None):
         source = checked_context()  # Respect local context-query denials before contacting the listener.
     except CommsError as exc:
         raise CommsError(f"Client pane check failed: {exc}") from None
+    if not standalone:
+        # Forward verified current routing, not the harness's inherited name.
+        # This also lets an already-running older listener handle a rename.
+        payload["pane_env"] = {**env, "TUIOS_SESSION": source["session_name"]}
     info = endpoint(paths)
     if standalone:
         require_capability(info, "shell_identity", "Listener predates standalone shell identities; restart 'agent-comms serve'.")
@@ -917,6 +920,8 @@ async def send(paths: Paths, name: str, epoch: str, message: str, tts=None, sour
     if (display or {}).get("agent_role") is not None:
         require_capability(info, "inline_agent_role", "Restart agent-comms listener to enable --agent-role. Message was not queued.")
     pane_env = {key: os.environ[key] for key in PANE_ENV_KEYS if os.environ.get(key)}
+    if pane_env.get("TUIOS_ENV") == "1" and isinstance(source, dict) and source.get("session_name"):
+        pane_env["TUIOS_SESSION"] = source["session_name"]
     owner = {"pane_env": pane_env} if pane_env.get("TUIOS_ENV") == "1" else {"shell_pid": os.getpid()}
     return await rpc(paths, "send", name=name, epoch=epoch, msg=message, tts=tts, source=source,
                      **{k: v for k, v in (display or {}).items() if v is not None}, **owner)
@@ -1117,7 +1122,7 @@ async def watch(paths: Paths, *, color: bool, width: int, muted=False, flash=Tru
     worker = None
     if view == "log":
         stream = asyncio.create_task(watch_log(paths, color=color, animate=animate))
-    elif view in ("conversation", "tree"):
+    elif view in ("convo", "tree"):
         # Always silent: never claims speech, synthesizes, or plays audio.
         stream = asyncio.create_task(watch_conversation(paths, color=color, animate=animate, tree=tree if view == "tree" else None))
     else:
@@ -1965,9 +1970,9 @@ def parser():
     send_parser.add_argument("--kind", choices=conversation.KINDS, help="Displayed message kind (default: statement)")
     send_parser.add_argument("--emotion", help=f"Displayed expression: {', '.join(conversation.FACES)} (default: neutral)")
     send_parser.add_argument("--reply-to", metavar="MESSAGE_ID", help="Continue the displayed exchange of an accepted message")
-    watcher = subs.add_parser("watch", help="Stream captions or show a silent conversation/tree/log view")
-    watcher.add_argument("--view", choices=("captions", "conversation", "tree", "log"), default="captions",
-                         help="captions: dock caption line with speech (default); conversation/tree/log: silent pane-sized views")
+    watcher = subs.add_parser("watch", help="Stream captions or show a silent convo/tree/log view")
+    watcher.add_argument("--view", choices=("captions", "convo", "tree", "log"), default="captions",
+                          help="captions: dock caption line with speech (default); convo/tree/log: silent pane-sized views")
     watcher.add_argument("--tree", default="default", help="Named tree to display (default: default)")
     watcher.add_argument("--no-animation", action="store_true", help="Disable arrival slides in conversation and log views")
     watcher.add_argument("--no-color", action="store_true")
@@ -2172,7 +2177,7 @@ def main(argv=None):
         elif args.command == "watch":
             if not 16 <= args.width <= 1000:
                 raise CommsError("--width must be between 16 and 1000.")
-            if args.view in ("conversation", "tree", "log") and not sys.stdout.isatty():
+            if args.view in ("convo", "tree", "log") and not sys.stdout.isatty():
                 raise CommsError("This view is pane-sized and requires a terminal.")
             try:
                 settings = load_config(paths.config).get("speech", {})

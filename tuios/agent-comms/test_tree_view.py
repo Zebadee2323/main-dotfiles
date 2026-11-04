@@ -84,7 +84,8 @@ class TreeTests(unittest.TestCase):
         view = t.TreeView('run', color=False)
         view.metadata(t.presentation(self.state), [])
         view.update(None, 0)
-        self.assertIn('Calculator implementation · live', view.render(60, 4, 0)[0])
+        self.assertIn('tree · Calculator implementation', view.render(60, 4, 0)[0])
+        self.assertIn('○ idle', view.render(60, 4, 0)[0])
         self.change(title='Parser review')
         self.assertEqual(self.state['display_trees']['run']['nodes'], original['nodes'])
         self.change(nodes=original['nodes'])
@@ -95,7 +96,7 @@ class TreeTests(unittest.TestCase):
             self.assertEqual(self.state['display_trees']['run']['title'], 'Parser review')
         self.change(title='')
         view.metadata(t.presentation(self.state), [])
-        self.assertIn('run · live', view.render(60, 4, 0)[0])
+        self.assertIn('tree · run', view.render(60, 4, 0)[0])
         self.assertLessEqual(conversation.text_width(view.render(8, 1, 0)[0]), 8)
 
     def test_conversation_roles(self):

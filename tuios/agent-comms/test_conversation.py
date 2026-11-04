@@ -160,7 +160,7 @@ class RenderTests(unittest.TestCase):
         lines = self.text(view, now=101.5)
         self.assertIn("◆ dotfiles", lines[SESSION_ROW])
         self.assertIn("◆ valkyrie", lines[SESSION_ROW])
-        self.assertIn("◆ dotfiles", view.render(30, 6, 101.5)[1])
+        self.assertIn("◆ dotfiles", view.render(30, 6, 101.5)[2])
 
     def test_narrow_panes_idle_offline_and_sanitization(self):
         view = conversation.ConversationView(color=True, animate=False)
@@ -179,7 +179,7 @@ class RenderTests(unittest.TestCase):
                 self.assertNotIn("\u202e", joined)
         compact = conversation.ConversationView(color=False, animate=False)
         compact.update(self.message(), 100.0)
-        self.assertIn("Alice ▸ Ben", compact.render(30, 6, 101.0)[0])
+        self.assertIn("Alice ▸ Ben", compact.render(30, 6, 101.0)[1])
         idle = conversation.ConversationView(color=False)
         idle.update(None, 100.0)
         self.assertIn("idle", idle.render(72, 14, 100.0)[0])

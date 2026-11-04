@@ -63,7 +63,9 @@ class SpatialContextTests(unittest.TestCase):
         listing = {"current_workspace": current, "focused_window_id": focused,
                    "windows": [own, pane("other", 0, 20, agent_state=other_state, workspace=other_workspace),
                                pane("third", 0, 0, agent_state="none")]}
-        run = Mock(side_effect=[subprocess.CompletedProcess([], 0, json.dumps({"tui_attached": attached,
+        run = Mock(side_effect=[subprocess.CompletedProcess([], 0, json.dumps({"success": True, "total": 1,
+                                                                            "panes": [{"window_id": "own", "session": "work"}]})),
+                                subprocess.CompletedProcess([], 0, json.dumps({"tui_attached": attached,
                                                                             "workspace_names": workspace_names})),
                                 subprocess.CompletedProcess([], 0, json.dumps(listing))])
         return context.context("Alice", run=run, env={"TUIOS_ENV": "1", "TUIOS_SESSION": "work", "TUIOS_PANE_ID": "own"}, strict=True)
@@ -146,7 +148,9 @@ class SpatialContextTests(unittest.TestCase):
     def test_no_other_panes_and_missing_own_marker_still_counts_caller_as_agent(self):
         listing = {"current_workspace": 2, "focused_window_id": "missing",
                    "windows": [pane("own", 0, 0)]}
-        run = Mock(side_effect=[subprocess.CompletedProcess([], 0, json.dumps({"tui_attached": False})),
+        run = Mock(side_effect=[subprocess.CompletedProcess([], 0, json.dumps({"success": True, "total": 1,
+                                    "panes": [{"window_id": "own", "session": "work"}]})),
+                                subprocess.CompletedProcess([], 0, json.dumps({"tui_attached": False})),
                                 subprocess.CompletedProcess([], 0, json.dumps(listing))])
         source = context.context("Alice", run=run,
                                  env={"TUIOS_ENV": "1", "TUIOS_SESSION": "work", "TUIOS_PANE_ID": "own"}, strict=True)

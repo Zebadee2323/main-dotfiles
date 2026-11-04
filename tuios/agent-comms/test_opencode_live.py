@@ -28,7 +28,7 @@ class OpenCodeIntegrationTests(Fixture):
         tuios = bin_dir / "tuios"
         tuios.write_text(f'#!{sys.executable}\n' + f'''
 import json,sys
-pane={{"window_id":"terminal-startup","workspace":1,"display_name":"OpenCode"}}
+pane={{"window_id":"terminal-startup","session":"test","workspace":1,"display_name":"OpenCode"}}
 command=sys.argv[1]
 if command=="session-info":
  data={{"tui_attached":True,"session_name":"test"}}
