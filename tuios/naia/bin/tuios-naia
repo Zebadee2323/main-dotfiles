@@ -89,8 +89,12 @@ def sockets_for(pids):
     text = run(["lsof", "-n", "-a", "-p", ",".join(map(str, sorted(pids))), "-U", "-Fpn"])
     sockets = []
     for line in text.splitlines():
-        if line.startswith("n/") and line[1:] not in sockets:
-            sockets.append(line[1:])
+        if line.startswith("n/"):
+            # Linux lsof appends socket metadata even in field output. Keep
+            # spaces in the actual pathname rather than splitting on whitespace.
+            socket = line[1:].split(" type=", 1)[0]
+            if socket not in sockets:
+                sockets.append(socket)
     return sockets
 
 
