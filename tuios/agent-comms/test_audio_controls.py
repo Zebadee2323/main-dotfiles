@@ -41,13 +41,13 @@ class AudioControlTests(Fixture):
             self.assertTrue(json.loads(stream.readline())["audio"]["muted"])
             self.assertFalse(json.loads(stream.readline())["audio"]["muted"])
 
-    def test_volume_cycle_includes_permanent_mute_for_all_watchers(self):
+    def test_volume_cycle_wraps_without_muting_for_all_watchers(self):
         self.start_server()
         watchers = [self.request("watch")[1] for _ in range(2)]
         for stream in watchers:
             self.assertEqual(json.loads(stream.readline())["audio"]["volume"], 100)
-        for volume, muted in ((100, True), (10, False), (25, False),
-                              (50, False), (100, False), (100, True)):
+        for volume, muted in ((10, False), (25, False), (50, False),
+                              (100, False), (10, False)):
             status = self.audio("cycle-volume")
             self.assertEqual(status["volume"], volume)
             self.assertEqual(status["muted"], muted)
@@ -66,7 +66,8 @@ class AudioControlTests(Fixture):
         self.assertIsNone(status["remaining_seconds"])
         for _ in range(4):
             self.audio("cycle-volume")
-        # The old timeout must not unmute the newly selected permanent preset.
+        self.audio("mute")
+        # The old timeout must not unmute an explicit permanent mute.
         import time
         time.sleep(0.15)
         self.assertTrue(self.audio("status")["muted"])
@@ -79,28 +80,37 @@ class AudioControlTests(Fixture):
 
     def test_dock_click_routes_mouse_buttons(self):
         self.start_server()
-        cases = (("3", False, 100, False), ("2", False, 100, False),
-                 ("1", True, 100, True), ("1", True, 10, False),
-                 ("1", False, 10, True), ("1", True, 10, False),
-                 ("1", True, 25, False), ("3", True, 25, False))
-        for button, ctrl, volume, muted in cases:
+        # mute: None (unmuted), "snooze" (timed) or "full" (indefinite).
+        cases = (("3", False, True, 100, None), ("2", False, True, 100, None),
+                 ("1", False, False, 100, "snooze"), ("1", True, False, 10, None),
+                 ("1", False, True, 10, "full"), ("1", False, False, 10, "full"),
+                 ("1", False, True, 10, None), ("1", True, True, 10, "full"),
+                 ("1", True, False, 10, None), ("1", True, False, 25, None),
+                 ("1", False, False, 25, "snooze"), ("1", False, True, 25, "full"))
+        for button, ctrl, alt, volume, mute in cases:
             with patch.dict(os.environ, {**self.env, "TUIOS_CLICK_BUTTON": button}), \
                  patch.object(app, "control_pressed", return_value=ctrl), \
+                 patch.object(app, "alt_pressed", return_value=alt), \
                  patch("sys.stdout", new_callable=io.StringIO):
                 result = app.main(["audio", "dock-click"])
             self.assertEqual(result, 0)
             status = self.audio("status")
             self.assertEqual(status["volume"], volume)
-            self.assertEqual(status["muted"], muted)
+            self.assertEqual(status["muted"], mute is not None)
+            if mute == "snooze":
+                self.assertGreater(status["remaining_seconds"], 0)
+            elif mute == "full":
+                self.assertIsNone(status["remaining_seconds"])
 
     def test_macos_control_modifier_mask(self):
         quartz = Mock()
         with patch.object(app.sys, "platform", "darwin"), \
              patch("ctypes.CDLL", return_value=quartz):
-            for flags, expected in ((0, False), (1 << 17, False), (1 << 18, True),
-                                    ((1 << 18) | (1 << 17), True)):
+            for flags, expected in ((0, False), (1 << 19, False), (1 << 17, False), (1 << 18, True),
+                                    ((1 << 18) | (1 << 19), True)):
                 quartz.CGEventSourceFlagsState.return_value = flags
                 self.assertEqual(app.control_pressed(), expected)
+                self.assertEqual(app.alt_pressed(), bool(flags & (1 << 19)))
                 quartz.CGEventSourceFlagsState.assert_called_with(0)
 
     def test_unmute_cancels_old_timer_and_muting_releases_a_speech_lease(self):

@@ -29,7 +29,8 @@ Write a JSON array in the run artifact directory using current verified names:
 Substitute actual identities; omit reviewer nodes until the reviewers exist.
 Grouping nodes have labels; agent nodes use the bound identity and its self-set
 role. Node IDs are stable within the tree; parents refer to IDs in the same array.
-Publish the full array atomically when membership/hierarchy changes:
+Publish the full array atomically when membership, hierarchy, labels, or `info`
+descriptions change:
 
 ```sh
 agent-comms tree set '<run-name>' --file '<absolute-run-artifact-directory>/tree.json'
@@ -54,8 +55,18 @@ labels; short panes keep the speaker visible and show an omitted-line count.
 This describes communication activity, not implementation status or approval.
 Continue using the durable ledger and delivery-flow pane for task progress.
 
-No per-message tree updates or background monitor process are needed. Update
-topology and optional work descriptions; do not ask workers to edit a shared registry. Keep the final tree
+The supervisor owns keeping the published tree accurate throughout the run. On
+launch, reassignment, replacement, release, or cleanup, reconcile the affected
+nodes and descriptions with the actual team. Remove departed agents or clearly
+label retained historical entries so they do not appear active. If new evidence
+makes a label, title, or `info` description stale, correct and publish it before
+your next progress update or wait. Update the full JSON array with `tree set --file`
+and the title with `tree set --title` as needed; editing the file alone is insufficient.
+Use `tree show` to verify the published result.
+
+The listener updates communication indicators automatically; no per-message tree
+updates or background monitor process are needed for those indicators. Do not ask
+workers to edit a shared registry. Keep the final tree
 for inspection, or delete it with `agent-comms tree delete '<run-name>'` and close
 only the recorded watcher pane through normal tuios commands when appropriate.
 Do not stop the shared listener. Report denied pane operations without bypassing grants.

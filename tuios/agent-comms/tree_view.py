@@ -10,10 +10,13 @@ import conversation as c
 
 def presentation(state):
     state = state or {}
+    # Retain identities during the grace period, but do not broadcast dead pane
+    # addresses. Successful inventory scans restore addresses for returning panes.
     return {"trees": state.get("display_trees", {}),
             "agents": {b["name"].lower(): {"session": b.get("session_name"), "pane": b.get("pane_id"),
                                               "daemon": b.get("daemon")}
-                       for b in state.get("bindings", {}).values()},
+                       for b in state.get("bindings", {}).values()
+                       if "missing_since" not in b},
             "roles": {b["name"].lower(): b.get("agent_role", "") for b in state.get("bindings", {}).values()}}
 
 

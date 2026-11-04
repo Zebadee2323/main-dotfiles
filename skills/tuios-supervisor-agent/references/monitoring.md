@@ -16,13 +16,19 @@ recurring reminder that can reliably be stopped. The reminder should tell you to
 inspect current worker state and mail against the task/revision plan, rather
 than assume the workers are still running or automatically message them all.
 
-On waking, reconcile expected activity with the actual panes and inboxes. Look
-for missed completion reports, blocked approvals, delivery failures, stalled
-progress, or a worker that has vanished. Take the next warranted coordination
-action within existing permissions; do not restart or reassign work merely
-because five minutes passed. Use the established selector procedure for any
-cross-session messages, and report material findings to the user without routine
-all-clear announcements.
+On waking, perform the routine check using only
+`tuios list-agents -s <session> --json`, once per relevant session; batch independent
+queries. Compare assigned pane IDs and states with expected activity. Do not
+capture panes, read transcripts, or request progress from every agent. A missing
+agent or unexpected `idle`, `done`, `needs_input`, `errored`, `unknown`, or `none`
+state warrants targeted follow-up. First account for already-received completion
+reports and planned waits; expected frozen workers and retained idle reviewers
+are not stopped-work incidents. Inspect mail or a specific prompt only as needed
+to explain a discrepancy. Take the next warranted coordination action within
+existing permissions; do not restart or reassign work merely because five minutes
+passed or a status changed. Never type into a `needs_input` pane. Use the established
+selector procedure for cross-session messages, and report material findings to the
+user without routine all-clear announcements.
 
 Rearm only if workers are still expected to progress or respond. Cancel the
 reminder when no worker or reviewer is active, work is awaiting only your

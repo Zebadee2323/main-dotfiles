@@ -66,6 +66,18 @@ def prune(state, daemon, own, live, now):
             allocation.retire_prefix(state, state["bindings"].pop(key))
 
 
+def prune_tree_metadata(state, daemon, own, live, now):
+    """Collect expired owners using a complete inventory; preserve live teams."""
+    before = {b["name"].lower() for b in state["bindings"].values()}
+    prune(state, daemon, own, live, now)
+    retained = {b["name"].lower() for b in state["bindings"].values()}
+    expired = before - retained
+    for name, tree in list(state.get("display_trees", {}).items()):
+        participants = {n["agent"].lower() for n in tree["nodes"] if "agent" in n}
+        if tree["owner"].lower() in expired and not participants & retained:
+            del state["display_trees"][name]
+
+
 def store(paths, *, lock, atomic_json, private_dir=None):
     return allocation.Store(paths.state, lock=lock, atomic_json=atomic_json, private_dir=private_dir)
 

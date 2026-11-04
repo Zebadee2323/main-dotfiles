@@ -91,6 +91,32 @@ class ShimTests(unittest.TestCase):
     def test_cycle_in_process_tree(self):
         self.assertFalse(MODULE["belongs_to"](1, 9, {1: (2, "nvim"), 2: (1, "nvim")}))
 
+    def test_socket_paths_strip_linux_metadata_and_deduplicate(self):
+        output = (
+            "p10246\n"
+            "n/run/user/1000/nvim.10246.0 type=STREAM\n"
+            "n/run/user/1000/nvim.10246.0 type=STREAM (LISTEN)\n"
+            "n/run/user/1000/editor socket type=STREAM\n"
+            "n/var/folders/editor socket\n"
+            "n@abstract-socket type=STREAM\n"
+        )
+        run = Mock(return_value=output)
+        with patch.dict(G, run=run):
+            self.assertEqual(MODULE["sockets_for"]({10247, 10246}), [
+                "/run/user/1000/nvim.10246.0",
+                "/run/user/1000/editor socket",
+                "/var/folders/editor socket",
+            ])
+        run.assert_called_once_with([
+            "lsof", "-n", "-a", "-p", "10246,10247", "-U", "-Fpn",
+        ])
+
+    def test_no_editor_processes_does_not_query_sockets(self):
+        run = Mock()
+        with patch.dict(G, run=run):
+            self.assertEqual(MODULE["sockets_for"]([]), [])
+        run.assert_not_called()
+
     def test_path_removes_shim_and_symlink_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

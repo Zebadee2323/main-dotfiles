@@ -1,0 +1,5 @@
+interface:
+  display_name: "Git Commit (Staged Only)"
+  short_description: "Create clean commits from staged files with high-quality messages"
+  icon: "terminal"
+  color: "#F05032"

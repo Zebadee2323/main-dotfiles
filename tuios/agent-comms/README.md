@@ -684,7 +684,7 @@ agent-comms audio mute --seconds 60
 agent-comms audio mute           # until explicitly unmuted
 agent-comms audio unmute
 agent-comms audio status         # JSON; no identity/config needed
-agent-comms audio cycle-volume   # mute → 10% → 25% → 50% → 100% → mute
+agent-comms audio cycle-volume   # 10% → 25% → 50% → 100% → 10%
 ```
 
 These commands control the shared listener, so every connected watcher honors
@@ -700,8 +700,7 @@ The dock shows `[Muted 43s]` or `[Muted]` ahead of the normal captions. Mute sta
 is in memory: restarting the listener resets it to unmuted.
 
 Voice volume starts at 100% and is shared across watchers. `cycle-volume`
-cycles through permanent mute, 10%, 25%, 50%, and 100%. From 100%, the next
-preset is actual mute: speech generation stops and `[Muted]` stays visible.
+cycles through 10%, 25%, 50%, and 100%, wrapping to 10% without muting.
 Cycling from any mute selects 10% and cancels its countdown. Volume presets
 adjust ongoing speech playback gain and show `[Volume 25%]` for two seconds.
 This does not change system volume. Restarting the listener resets voice volume to 100%.
@@ -1196,16 +1195,18 @@ refresh = "push"
 max-width = 80
 ```
 
-Left-click the agent-comms dock component to mute speech across all watchers for
-15 seconds. Each left-click restarts the countdown; captions continue, and speech
-resumes automatically without replaying skipped announcements. Ctrl+left-click to
-cycle through permanent mute, 10%, 25%, 50%, and 100%. Mute remains until another
-audio action changes it; volume values appear for two seconds. Cycling from a
-timed mute selects 10% and cancels the timer. `dock-click` uses tuios's `TUIOS_CLICK_BUTTON` (1 left) and ignores other
-buttons. Tuios does not forward modifiers, so on macOS and Windows the command
-checks whether Ctrl is held when it runs; keep Ctrl held through the click.
-Other platforms retain plain left-click mute only. Reload tuios config with
-`tuios config apply` after updating the hook.
+Left-click the agent-comms dock component to snooze speech across all watchers
+for 15 seconds. Each click restarts the countdown; captions continue, and
+speech resumes automatically without replaying skipped announcements.
+Option+left-click (Alt+left-click on Windows) toggles full mute; it also turns a
+running snooze into full mute, and plain clicks leave a full mute in place.
+Ctrl+left-click cycles 10%, 25%, 50%, and 100%, with no mute step; values appear
+for two seconds. Cycling while muted selects 10% and cancels the timer.
+Option/Alt takes precedence if both modifiers are held.
+`dock-click` uses tuios's `TUIOS_CLICK_BUTTON` (1 left) and ignores other buttons.
+Tuios does not forward modifiers, so macOS and Windows sample keyboard state;
+keep the modifier held through the click. Other platforms do not handle these
+modified clicks. Reload tuios config with `tuios config apply` after updating the hook.
 
 The existing dock remains at the bottom. Each stdout line replaces the component
 text; SGR colors survive, but cursor movement and clearing do not. This is not an
@@ -1671,3 +1672,14 @@ resizes do not trigger arrival animations. Queue labels, speaker highlights, and
 playback progress react to the same lifecycle as the other watchers. Use
 `watch --view log --no-animation` for immediate arrivals. `history` stays a
 standard one-shot log with filters, JSON, and raw output.
+
+### Automatic tree metadata cleanup
+
+Each `tree set` checks a fresh, complete pane inventory before applying the tree.
+Missing bindings retain the seven-day identity grace period. After that period,
+confirmed-absent bindings and their roles are pruned; their owned trees are also
+removed if none of the tree's agents has a retained binding. Trees with retained
+participants are preserved. Cleanup is scoped to the caller's daemon and skips
+failed/incomplete inventories or inventories missing the caller. Identities on
+other daemons, active teams, name bags and the identity epoch are unchanged.
+Missing pane addresses are omitted from watcher snapshots during the grace period.

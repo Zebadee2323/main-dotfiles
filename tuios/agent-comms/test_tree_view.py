@@ -27,6 +27,21 @@ class TreeTests(unittest.TestCase):
         t.change(self.state, self.debbie, {"command": "role", "value": ""})
         self.assertEqual(t.presentation(self.state)['roles']['debbie'], '')
 
+    def test_missing_panes_do_not_exhaust_tree_budget(self):
+        for i in range(150):
+            self.state["bindings"][f"old-{i}"] = {
+                "name": f"Old{i}", "pane_id": "p" * 36, "daemon": "d" * 64,
+                "session_name": "previous-session", "missing_since": 1,
+                "agent_role": "worker"}
+        self.change(nodes=[{"id": "a", "agent": "Dennis"}])
+        data = t.presentation(self.state)
+        self.assertNotIn("old0", data["agents"])
+        self.assertEqual(data["roles"]["old0"], "worker")
+        self.assertEqual(len(self.state["bindings"]), 152)
+        self.assertIn("dennis", data["agents"])
+        del self.state["bindings"]["old-0"]["missing_since"]
+        self.assertEqual(t.presentation(self.state)["agents"]["old0"]["pane"], "p" * 36)
+
     def test_render_queue_speaker_arrow_external_and_idle(self):
         self.change(nodes=[{"id": "a", "agent": "Dennis"}, {"id": "b", "parent": "a", "agent": "Debbie"}])
         self.debbie['agent_role'] = 'worker'
@@ -88,6 +103,46 @@ class TreeTests(unittest.TestCase):
         view.metadata({'roles': {'dennis': 'supervisor'}}, [])
         self.assertEqual(view.name_label({'kind': 'agent', 'name': 'Dennis'}), 'Dennis · supervisor')
         self.assertEqual(view.name_label({'kind': 'user', 'name': 'Dennis'}), 'Dennis')
+
+
+class TreeCleanupTests(unittest.TestCase):
+    def state(self):
+        return {"bindings": {
+            "own": {"name": "Owner", "daemon": "local", "pane_id": "own"},
+            "old": {"name": "Old", "daemon": "local", "pane_id": "gone",
+                    "missing_since": 1, "agent_role": "worker"},
+            "foreign": {"name": "Foreign", "daemon": "remote", "pane_id": "other",
+                        "missing_since": 1}},
+            "display_trees": {
+                "old": {"owner": "Old", "nodes": [{"id": "old", "agent": "Old"}]},
+                "team": {"owner": "Old", "nodes": [{"id": "active", "agent": "Owner"}]},
+                "foreign": {"owner": "Foreign", "nodes": []}}}
+
+    def test_expired_owners_collected_but_live_teams_and_other_daemons_preserved(self):
+        import pane_identity as p
+        state = self.state()
+        p.prune_tree_metadata(state, "local", "own", {"own"}, p.GRACE_SECONDS + 2)
+        self.assertNotIn("old", state["bindings"])
+        self.assertNotIn("old", state["display_trees"])
+        self.assertIn("team", state["display_trees"])
+        self.assertIn("foreign", state["bindings"])
+        self.assertIn("foreign", state["display_trees"])
+
+    def test_unknown_inventory_missing_caller_grace_and_returned_panes(self):
+        import pane_identity as p
+        import copy
+        for live in (None, set()):
+            state = self.state()
+            original = copy.deepcopy(state)
+            p.prune_tree_metadata(state, "local", "own", live, p.GRACE_SECONDS + 2)
+            self.assertEqual(state, original)
+        state = self.state()
+        p.prune_tree_metadata(state, "local", "own", {"own"}, 2)
+        self.assertIn("old", state["bindings"])
+        self.assertIn("old", state["display_trees"])
+        p.prune_tree_metadata(state, "local", "own", {"own", "gone"}, p.GRACE_SECONDS + 2)
+        self.assertNotIn("missing_since", state["bindings"]["old"])
+        self.assertIn("old", state["display_trees"])
 
 
 from test_agent_comms import Fixture
